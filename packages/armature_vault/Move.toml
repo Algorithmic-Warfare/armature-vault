@@ -1,0 +1,37 @@
+[package]
+name = "armature_vault"
+edition = "2024"
+version = "0.0.1"
+
+# armature_vault — a DAO/OU-gated vault for warehouse receipts (and, later,
+# other shared resources). Players mint multicoin::Balance receipts via the
+# warehouse_receipts package and deposit them here; access is gated by a
+# dynamic, multi-principal ACL keyed on armature DAO identity rather than a raw
+# in-game tribe_id. Standalone, optional package: it lives outside the
+# transitional armature_world_bridge because the vault outlives the bridge.
+#
+# Target environment: testnet_stillness — armature_vault, the framework, world,
+# and warehouse-receipts/triexbook all resolve multicoin to the same build
+# (c7a97f2), so the `multicoin::Balance` receipt type is identical across the
+# deposit boundary, and world to 8e2e97b so StorageUnit/Character match.
+#
+# BLOCKER (same as armature-trading): armature_framework on `main` declares only
+# `testnet_wip` (plus the implicit testnet/mainnet), NOT `testnet_stillness`.
+# Move's automated address management requires every transitive dep to declare the
+# build env, so `sui move build -e testnet_stillness` fails to resolve `armature`
+# until the framework adds a `testnet_stillness` entry to its [environments].
+# Until then, build/test against `-e testnet_wip` (a shared env both this package
+# and the framework declare).
+[dependencies]
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "main" }
+world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "8e2e97b50fd6bbf605284bcdaae54a33a5475e89" }
+# override = true: armature (framework) transitively pins multicoin at 330d339;
+# we intentionally unify on c7a97f2 (same as warehouse-receipts / armature-trading
+# / triexbook) so `multicoin::Balance` receipts are the same on-chain type.
+multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin.git", subdir = "packages/multicoin", rev = "c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6", override = true }
+
+[environments]
+# Publish target (blocked until the framework declares this env — see above).
+testnet_stillness = "0x0"
+# Shared build/test env (the framework declares testnet_wip).
+testnet_wip = "0x0"
