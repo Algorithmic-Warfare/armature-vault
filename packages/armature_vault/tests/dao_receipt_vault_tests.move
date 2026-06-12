@@ -292,18 +292,15 @@ fun migration_grant_new_editor_then_revoke_old() {
     let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
 
     // Old officers grant Edit to the new officers OU (both editors coexist).
+    // Edit grants must go through grant_edit_ou, which validates the &DAO witness.
     ts::next_tx(&mut scenario, AWAR_OFFICER);
     {
         let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
         let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-        vault::grant(
-            &mut v,
-            &officers_dao,
-            vector[vault::role_edit()],
-            vector[vault::ou(new_officers)],
-            scenario.ctx(),
-        );
+        let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
+        vault::grant_edit_ou(&mut v, &officers_dao, &new_officers_dao, scenario.ctx());
         assert!(vault::principals(&v, vault::role_edit()).length() == 2, 0);
+        ts::return_shared(new_officers_dao);
         ts::return_shared(officers_dao);
         ts::return_shared(v);
     };
@@ -361,3 +358,456 @@ fun cannot_revoke_last_editor() {
 
     abort
 }
+
+// =============================================================================
+// === Regression tests for issue #1 fixes (F2/F3/F4/F5 + H1/M3/M4/L1/L2/I1)
+// === Each test was originally written against unfixed code (see
+// === workflow w46pp0jni); the assertion direction is flipped to verify the fix.
+// =============================================================================
+
+// --- H1/M3: Edit role must be granted via grant_edit_ou (rejects Player + bogus Ou)
+
+/// Original H1 (Player variant): bypass attempted via Player{@0x0}. Post-fix the
+/// grant() call rejects the Edit role itself with EEditMustBeOu, before the
+/// Principal value is ever inspected.
+#[test]
+#[expected_failure(abort_code = vault::EEditMustBeOu)]
+fun grant_rejects_player_for_edit_role() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+    let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+    vault::grant(
+        &mut v,
+        &officers_dao,
+        vector[vault::role_edit()],
+        vector[vault::player(@0x0)],
+        scenario.ctx(),
+    );
+
+    abort
+}
+
+/// Original H1 (Ou variant): bypass attempted via Ou{bogus_dao_id}. Post-fix the
+/// grant() call rejects the Edit role itself — bogus Ou ids are no longer reachable.
+#[test]
+#[expected_failure(abort_code = vault::EEditMustBeOu)]
+fun grant_rejects_bogus_ou_for_edit_role() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    let bogus = object::id_from_address(@0xDEADBEEF);
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+    let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+    vault::grant(
+        &mut v,
+        &officers_dao,
+        vector[vault::role_edit()],
+        vector[vault::ou(bogus)],
+        scenario.ctx(),
+    );
+
+    abort
+}
+
+/// Original M3: rogue self-grants Player Edit then revokes the OU. Post-fix the
+/// initial grant aborts EEditMustBeOu — the bare-Player Edit backdoor is closed.
+#[test]
+#[expected_failure(abort_code = vault::EEditMustBeOu)]
+fun grant_rejects_player_self_grant_for_edit() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+    let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+    vault::grant(
+        &mut v,
+        &officers_dao,
+        vector[vault::role_edit()],
+        vector[vault::player(AWAR_OFFICER)],
+        scenario.ctx(),
+    );
+
+    abort
+}
+
+/// H1 positive: grant_edit_ou succeeds with a real &DAO witness and emits an event.
+#[test]
+fun grant_edit_ou_happy_path() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+    let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    {
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
+        vault::grant_edit_ou(&mut v, &officers_dao, &new_officers_dao, scenario.ctx());
+        let edits = vault::principals(&v, vault::role_edit());
+        assert!(edits.length() == 2, 0);
+        assert!(edits.contains(&vault::ou(new_officers)), 1);
+        ts::return_shared(new_officers_dao);
+        ts::return_shared(officers_dao);
+        ts::return_shared(v);
+    };
+    ts::end(scenario);
+}
+
+// --- H1 brick-guard 2: caller must remain satisfied post-revoke
+
+/// Revoke aborts EEditorWouldLockSelf if the caller wouldn't pass assert_role(Edit)
+/// after the batch. Defends against the "grant unsatisfiable then revoke self"
+/// brick path even if a future change re-opened the Edit grant to non-Ou.
+#[test]
+#[expected_failure(abort_code = vault::EEditorWouldLockSelf)]
+fun revoke_aborts_if_caller_would_lock_themselves() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+    // A second editor who is NOT a member of `officers`.
+    let other = make_dao(&mut scenario, OUTSIDER, vector[OUTSIDER]);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    // First, validly add `other` as a second Edit principal (Edit list non-empty).
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    {
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let other_dao = ts::take_shared_by_id<DAO>(&scenario, other);
+        vault::grant_edit_ou(&mut v, &officers_dao, &other_dao, scenario.ctx());
+        ts::return_shared(other_dao);
+        ts::return_shared(officers_dao);
+        ts::return_shared(v);
+    };
+
+    // Now AWAR_OFFICER tries to revoke `officers` (their own OU). The brick-guard 1
+    // (length > 0) passes since `other` remains. But AWAR_OFFICER is NOT a member
+    // of `other` — so the post-revoke caller-satisfies check fires.
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+    let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+    vault::revoke(
+        &mut v,
+        &officers_dao,
+        vector[vault::role_edit()],
+        vector[vault::ou(officers)],
+        scenario.ctx(),
+    );
+
+    abort
+}
+
+// --- F2 + L1: events emitted only after brick-guards, and only on real changes
+
+/// Original L1: phantom events on no-op grant/revoke. Post-fix: zero events
+/// when the operation is a no-op, and the state is unchanged.
+#[test]
+fun no_op_grant_and_revoke_emit_no_events() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    let deposit_len_before = {
+        let v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let n = vault::principals(&v, vault::role_deposit()).length();
+        ts::return_shared(v);
+        n
+    };
+
+    // (1) Duplicate grant: PROTO already has deposit.
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    {
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        vault::grant(
+            &mut v,
+            &officers_dao,
+            vector[vault::role_deposit()],
+            vector[vault::player(PROTO)],
+            scenario.ctx(),
+        );
+        ts::return_shared(officers_dao);
+        ts::return_shared(v);
+    };
+    let regrant_effects = ts::next_tx(&mut scenario, AWAR_OFFICER);
+    assert!(ts::num_user_events(&regrant_effects) == 0, 100);
+    {
+        let v = ts::take_shared<DaoReceiptVault>(&scenario);
+        assert!(
+            vault::principals(&v, vault::role_deposit()).length() == deposit_len_before,
+            101,
+        );
+        ts::return_shared(v);
+    };
+
+    // (2) Revoke of non-member: OUTSIDER never had deposit.
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    {
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        vault::revoke(
+            &mut v,
+            &officers_dao,
+            vector[vault::role_deposit()],
+            vector[vault::player(OUTSIDER)],
+            scenario.ctx(),
+        );
+        ts::return_shared(officers_dao);
+        ts::return_shared(v);
+    };
+    let rerevoke_effects = ts::next_tx(&mut scenario, AWAR_OFFICER);
+    assert!(ts::num_user_events(&rerevoke_effects) == 0, 200);
+
+    ts::end(scenario);
+}
+
+// --- M4 + L2: zero-value deposit is rejected
+
+#[test]
+#[expected_failure(abort_code = vault::EZeroAmount)]
+fun zero_value_deposit_rejected() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let zero_receipt = multicoin::zero(collection_id, ASSET, scenario.ctx());
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+    let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+    vault::deposit_receipt(&mut v, &awar_dao, zero_receipt, scenario.ctx());
+
+    abort
+}
+
+// --- F3: zero-amount withdraw is rejected
+
+#[test]
+#[expected_failure(abort_code = vault::EZeroAmount)]
+fun zero_amount_withdraw_rejected() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 10);
+    ts::next_tx(&mut scenario, AWAR_M1);
+    {
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+        vault::deposit_receipt(&mut v, &awar_dao, r, scenario.ctx());
+        ts::return_shared(awar_dao);
+        ts::return_shared(v);
+    };
+
+    ts::next_tx(&mut scenario, PROTO);
+    let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+    let any_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+    let out = vault::withdraw_receipt(&mut v, &any_dao, ASSET, 0, scenario.ctx());
+    transfer::public_transfer(out, PROTO);
+
+    abort
+}
+
+// --- F5: length mismatch returns EInvalidArguments, not ENotAuthorized
+
+#[test]
+#[expected_failure(abort_code = vault::EInvalidArguments)]
+fun grant_length_mismatch_returns_invalid_arguments() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        object::id_from_address(@0x5501),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v);
+
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+    let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+    vault::grant(
+        &mut v,
+        &officers_dao,
+        vector[vault::role_deposit(), vault::role_withdraw()],
+        vector[vault::player(OUTSIDER)],
+        scenario.ctx(),
+    );
+
+    abort
+}
+
+// --- F4: registry key is updatable after DAO migration
+
+#[test]
+fun update_registry_key_remaps_vault_after_migration() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+    let ssu_id = object::id_from_address(@0x5501);
+
+    // Stand up the registry so update_registry_key has a real entry to remap.
+    ts::next_tx(&mut scenario, AWAR_M1);
+    vault::init_for_testing(scenario.ctx());
+
+    // Construct a vault by hand and register its key under the OLD editor DAO.
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v = vault::new_for_testing(
+        ssu_id,
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    let v_id = object::id(&v);
+    vault::share_for_testing(v);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    {
+        let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+        vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+        // Lookup under the old key works.
+        assert!(vault::lookup(&reg, ssu_id, officers).is_some(), 0);
+        assert!(vault::lookup(&reg, ssu_id, new_officers).is_none(), 1);
+        ts::return_shared(reg);
+    };
+
+    // Editor re-keys the registry entry to point at the migrated DAO.
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    {
+        let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+        let v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
+        vault::update_registry_key(
+            &mut reg,
+            &v,
+            &officers_dao,
+            &new_officers_dao,
+            scenario.ctx(),
+        );
+        // New key resolves; old key no longer.
+        assert!(vault::lookup(&reg, ssu_id, new_officers).is_some(), 2);
+        assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 3);
+        ts::return_shared(new_officers_dao);
+        ts::return_shared(officers_dao);
+        ts::return_shared(v);
+        ts::return_shared(reg);
+    };
+
+    ts::end(scenario);
+}
+
+// --- I1: initialize_dao_vault emits AclGrantedEvent for the seeded Edit principal
+
+// I1 is verified by inspection of the source — initialize_dao_vault now emits
+// AclGrantedEvent { role: Edit, principal: Ou{editor_dao_id} } alongside
+// VaultInitializedEvent. The initialize path requires a real world::StorageUnit
+// which the existing test harness intentionally bypasses (see new_for_testing's
+// doc-comment), so this fix is not exercisable as a Move #[test] here. The
+// follow-up issue tracking M1/M2/F1 should add an SSU-bootstrap helper.

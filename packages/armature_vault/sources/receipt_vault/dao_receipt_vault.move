@@ -54,6 +54,17 @@ const EVaultAlreadyExists: vector<u8> =
 #[error(code = 4)]
 const ELastEditor: vector<u8> =
     b"Cannot remove the last Edit principal — the vault would be unadministrable";
+#[error(code = 5)]
+const EInvalidArguments: vector<u8> =
+    b"Invalid arguments (e.g. parallel vectors of different lengths)";
+#[error(code = 6)]
+const EZeroAmount: vector<u8> = b"Amount must be greater than zero";
+#[error(code = 7)]
+const EEditMustBeOu: vector<u8> =
+    b"Edit role only accepts Ou principals — use grant_edit_ou";
+#[error(code = 8)]
+const EEditorWouldLockSelf: vector<u8> =
+    b"Revocation would leave the caller unable to administer the vault";
 
 // === Roles ===
 
@@ -172,23 +183,25 @@ fun satisfies(principal: &Principal, dao: &DAO, sender: address): bool {
     }
 }
 
-/// Assert `sender` satisfies *some* principal listed for `role`, using `dao` as
-/// the OU context. Aborts with `ENotAuthorized` if the role is absent or no
-/// principal matches.
-fun assert_role(vault: &DaoReceiptVault, role: Role, dao: &DAO, sender: address) {
-    assert!(vault.acl.contains(&role), ENotAuthorized);
+/// True if `sender` satisfies *some* principal listed for `role`, using `dao` as
+/// the OU context. False if the role is absent or no principal matches.
+fun satisfies_role(vault: &DaoReceiptVault, role: Role, dao: &DAO, sender: address): bool {
+    if (!vault.acl.contains(&role)) { return false };
     let principals = vault.acl.get(&role);
     let n = principals.length();
     let mut i = 0;
-    let mut ok = false;
     while (i < n) {
         if (satisfies(&principals[i], dao, sender)) {
-            ok = true;
-            break
+            return true
         };
         i = i + 1;
     };
-    assert!(ok, ENotAuthorized);
+    false
+}
+
+/// Aborts with `ENotAuthorized` unless `satisfies_role` holds.
+fun assert_role(vault: &DaoReceiptVault, role: Role, dao: &DAO, sender: address) {
+    assert!(satisfies_role(vault, role, dao, sender), ENotAuthorized);
 }
 
 // === Public: lifecycle ===
@@ -212,8 +225,9 @@ public fun initialize_dao_vault(
     let key = VaultKey { storage_unit_id, editor_dao_id };
     assert!(!table::contains(&registry.vaults, key), EVaultAlreadyExists);
 
+    let seed_principal = Principal::Ou { dao_id: editor_dao_id };
     let mut acl = vec_map::empty<Role, vector<Principal>>();
-    acl.insert(Role::Edit, vector[Principal::Ou { dao_id: editor_dao_id }]);
+    acl.insert(Role::Edit, vector[seed_principal]);
 
     let vault = DaoReceiptVault {
         id: object::new(ctx),
@@ -232,6 +246,14 @@ public fun initialize_dao_vault(
         storage_unit_id,
         collection_id,
     });
+    // I1: also emit AclGrantedEvent for the seeded Edit principal so event-sourced
+    // ACL reconstructions don't need to hardcode the seeding rule.
+    event::emit(AclGrantedEvent {
+        vault_id,
+        role: Role::Edit,
+        principal: seed_principal,
+        by: ctx.sender(),
+    });
 }
 
 // === Public: deposit / withdraw ===
@@ -248,6 +270,9 @@ public fun deposit_receipt(
     let sender = ctx.sender();
     assert_role(vault, Role::Deposit, dao, sender);
     assert!(receipt.collection_id() == vault.collection_id, EWrongCollection);
+    // M4/L2: reject zero-value deposits so a Deposit-only principal cannot
+    // unilaterally grow the vault's DOF set with phantom entries.
+    assert!(receipt.value() > 0, EZeroAmount);
 
     let asset_id = receipt.asset_id();
     let amount = receipt.value();
@@ -279,6 +304,8 @@ public fun withdraw_receipt(
 ): Balance {
     let sender = ctx.sender();
     assert_role(vault, Role::Withdraw, dao, sender);
+    // F3: reject zero-amount withdrawals so indexers don't see spurious WithdrawEvents.
+    assert!(amount > 0, EZeroAmount);
 
     assert!(dof::exists_(&vault.id, asset_id), EInsufficientVaultBalance);
     let stored: &mut Balance = dof::borrow_mut(&mut vault.id, asset_id);
@@ -316,7 +343,8 @@ public fun grant(
 ) {
     let sender = ctx.sender();
     assert_role(vault, Role::Edit, editor_dao, sender);
-    assert!(roles.length() == principals.length(), ENotAuthorized);
+    // F5: distinct error code so callers can tell bad-input from auth failure.
+    assert!(roles.length() == principals.length(), EInvalidArguments);
 
     let vault_id = object::id(vault);
     let n = roles.length();
@@ -324,9 +352,41 @@ public fun grant(
     while (i < n) {
         let role = roles[i];
         let principal = principals[i];
-        add_principal(vault, role, principal);
-        event::emit(AclGrantedEvent { vault_id, role, principal, by: sender });
+        // H1/M3: Edit principals must come through grant_edit_ou, which validates
+        // the &DAO witness and refuses bare-Player and unverifiable-Ou principals.
+        assert!(role != Role::Edit, EEditMustBeOu);
+        // L1: only emit on real state change.
+        let changed = add_principal(vault, role, principal);
+        if (changed) {
+            event::emit(AclGrantedEvent { vault_id, role, principal, by: sender });
+        };
         i = i + 1;
+    };
+}
+
+/// H1: grant the Edit role to an OU, validated by a live `&DAO` witness. This
+/// is the only path that can add an Edit principal — it forces every Edit grant
+/// to reference a real DAO with at least one governance member, closing the
+/// brick-by-unsatisfiable-principal attack and the bare-Player Edit backdoor.
+public fun grant_edit_ou(
+    vault: &mut DaoReceiptVault,
+    editor_dao: &DAO,
+    target_dao: &DAO,
+    ctx: &TxContext,
+) {
+    let sender = ctx.sender();
+    assert_role(vault, Role::Edit, editor_dao, sender);
+
+    let vault_id = object::id(vault);
+    let principal = Principal::Ou { dao_id: target_dao.id() };
+    let changed = add_principal(vault, Role::Edit, principal);
+    if (changed) {
+        event::emit(AclGrantedEvent {
+            vault_id,
+            role: Role::Edit,
+            principal,
+            by: sender,
+        });
     };
 }
 
@@ -342,48 +402,116 @@ public fun revoke(
 ) {
     let sender = ctx.sender();
     assert_role(vault, Role::Edit, editor_dao, sender);
-    assert!(roles.length() == principals.length(), ENotAuthorized);
+    // F5: distinct error code for bad input vs. auth failure.
+    assert!(roles.length() == principals.length(), EInvalidArguments);
 
     let vault_id = object::id(vault);
     let n = roles.length();
+
+    // L1: track which (role, principal) pairs actually changed state. Defer all
+    // event emission until after the brick-guards (F2) and only emit for real
+    // changes (L1).
+    let mut changed_mask: vector<bool> = vector[];
     let mut i = 0;
     while (i < n) {
         let role = roles[i];
         let principal = principals[i];
-        remove_principal(vault, role, principal);
-        event::emit(AclRevokedEvent { vault_id, role, principal, by: sender });
+        let changed = remove_principal(vault, role, principal);
+        changed_mask.push_back(changed);
         i = i + 1;
     };
 
-    // Enforce the brick-guard once, after all removals in this batch.
+    // Brick-guard 1: Edit list must remain non-empty.
     assert!(
         vault.acl.contains(&Role::Edit) && vault.acl.get(&Role::Edit).length() > 0,
         ELastEditor,
     );
+    // H1: brick-guard 2 — the caller must still satisfy Edit using editor_dao.
+    // Prevents grant-bogus-then-revoke-self bricking attacks: a rogue can only
+    // remove themselves from Edit if some other satisfiable principal remains
+    // for *them* (which they can verify by passing the same editor_dao). This
+    // is the post-state version of assert_role(Edit, ...) — it would have
+    // succeeded entering revoke; the assertion forces it to still hold on exit.
+    assert!(satisfies_role(vault, Role::Edit, editor_dao, sender), EEditorWouldLockSelf);
+
+    // F2 + L1: emit events only now (after guards), and only for state-changing pairs.
+    let mut j = 0;
+    while (j < n) {
+        if (changed_mask[j]) {
+            event::emit(AclRevokedEvent {
+                vault_id,
+                role: roles[j],
+                principal: principals[j],
+                by: sender,
+            });
+        };
+        j = j + 1;
+    };
+}
+
+// === Registry maintenance ===
+
+/// F4: re-key the registry entry for this vault after a DAO migration. The caller
+/// must satisfy the *current* `Edit` role using `editor_dao`. The new key uses
+/// `new_editor_dao.id()` for the `editor_dao_id` component. Aborts if no entry
+/// exists for the old key or if an entry already exists for the new key.
+///
+/// Note: this does NOT alter the ACL — granting `Ou { new_editor_dao.id() }` the
+/// `Edit` role is a separate `grant_edit_ou` call. This function only keeps
+/// `lookup(...)` discoverable under the new DAO's identity.
+public fun update_registry_key(
+    registry: &mut DaoReceiptVaultRegistry,
+    vault: &DaoReceiptVault,
+    editor_dao: &DAO,
+    new_editor_dao: &DAO,
+    ctx: &TxContext,
+) {
+    let sender = ctx.sender();
+    assert_role(vault, Role::Edit, editor_dao, sender);
+
+    let old_key = VaultKey {
+        storage_unit_id: vault.storage_unit_id,
+        editor_dao_id: editor_dao.id(),
+    };
+    let new_key = VaultKey {
+        storage_unit_id: vault.storage_unit_id,
+        editor_dao_id: new_editor_dao.id(),
+    };
+    assert!(table::contains(&registry.vaults, old_key), EInvalidArguments);
+    assert!(!table::contains(&registry.vaults, new_key), EVaultAlreadyExists);
+
+    let vault_id = table::remove(&mut registry.vaults, old_key);
+    table::add(&mut registry.vaults, new_key, vault_id);
 }
 
 // === ACL mutation (internal) ===
 
-fun add_principal(vault: &mut DaoReceiptVault, role: Role, principal: Principal) {
+/// Returns true iff the principal was actually added (i.e. state changed).
+fun add_principal(vault: &mut DaoReceiptVault, role: Role, principal: Principal): bool {
     if (!vault.acl.contains(&role)) {
         vault.acl.insert(role, vector[principal]);
-        return
+        return true
     };
     let list = vault.acl.get_mut(&role);
-    if (!list.contains(&principal)) {
-        list.push_back(principal);
+    if (list.contains(&principal)) {
+        return false
     };
+    list.push_back(principal);
+    true
 }
 
-fun remove_principal(vault: &mut DaoReceiptVault, role: Role, principal: Principal) {
+/// Returns true iff the principal was actually removed (i.e. state changed).
+fun remove_principal(vault: &mut DaoReceiptVault, role: Role, principal: Principal): bool {
     if (!vault.acl.contains(&role)) {
-        return
+        return false
     };
     let list = vault.acl.get_mut(&role);
     let (found, idx) = list.index_of(&principal);
-    if (found) {
-        list.remove(idx);
+    if (!found) {
+        return false
     };
+    list.remove(idx);
+    true
 }
 
 // === View Functions ===
@@ -457,4 +585,14 @@ public fun share_for_testing(vault: DaoReceiptVault) {
 #[test_only]
 public fun init_for_testing(ctx: &mut TxContext) {
     init(ctx)
+}
+
+#[test_only]
+public fun register_for_testing(
+    registry: &mut DaoReceiptVaultRegistry,
+    storage_unit_id: ID,
+    editor_dao_id: ID,
+    vault_id: ID,
+) {
+    table::add(&mut registry.vaults, VaultKey { storage_unit_id, editor_dao_id }, vault_id);
 }
