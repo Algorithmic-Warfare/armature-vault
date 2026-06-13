@@ -85,3 +85,62 @@ jobs:
       # separate `sui move build` step is redundant.
       - name: sui move test
         run: sui move test --build-env testnet
+
+      # Issue #9: lockfile dep-rev guard.
+      #
+      # multicoin::Balance and world::storage_unit::StorageUnit type identity at
+      # the deposit boundary depends on every package across this on-chain build
+      # resolving multicoin to the same git rev (c7a97f2) and world to the same
+      # rev (8e2e97b). Today this works because:
+      #   - Our Move.toml pins multicoin with `override = true` (forces our rev
+      #     even when transitive deps declare a different one).
+      #   - Our Move.toml pins world at the top level (top-level pin wins).
+      #   - warehouse_receipts is pinned to 8a2f80e — the most recent rev where
+      #     its source and tests are in sync.
+      #
+      # If any of those three pins drifts (or someone removes `override = true`
+      # on multicoin), the resolution algorithm silently falls back to whatever
+      # the transitive dep declared. That would silently break Balance/SSU type
+      # identity at the deposit boundary, and would only surface as a confusing
+      # type error when consumers try to integrate — not in this package's own
+      # tests, which type-check fine in isolation.
+      #
+      # Move.lock records the resolved revs after `sui move test`. We assert the
+      # three expected revs literally appear in the lock; if anyone bumps a pin
+      # without bumping the corresponding line here, CI fails with a clear
+      # pointer to what changed.
+      - name: Check pinned dep revs in Move.lock
+        run: |
+          set -euo pipefail
+          # Expected revs — keep in sync with packages/armature_vault/Move.toml.
+          # When you bump a pin in Move.toml, bump it here too.
+          EXPECTED_MULTICOIN="c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6"
+          EXPECTED_WORLD="8e2e97b50fd6bbf605284bcdaae54a33a5475e89"
+          EXPECTED_WAREHOUSE_RECEIPTS="8a2f80e857d516187c99b28efa935ff7ce42af03"
+
+          fail=0
+          check() {
+            local name="$1" rev="$2"
+            if grep -qF "$rev" Move.lock; then
+              echo "ok   $name pinned at $rev"
+            else
+              echo "FAIL $name expected $rev — not present in Move.lock"
+              fail=1
+            fi
+          }
+
+          check multicoin "$EXPECTED_MULTICOIN"
+          check world "$EXPECTED_WORLD"
+          check warehouse_receipts "$EXPECTED_WAREHOUSE_RECEIPTS"
+
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "::error::Move.lock dep-rev drift detected. Either:"
+            echo "  - You intentionally bumped a pin in Move.toml — update the"
+            echo "    EXPECTED_* values above to match."
+            echo "  - You dropped \`override = true\` on multicoin or removed the"
+            echo "    top-level world pin — restore the override so transitive"
+            echo "    deps don't shadow our chosen rev."
+            echo "  - A transitive dep changed and our override no longer fires."
+            exit 1
+          fi
