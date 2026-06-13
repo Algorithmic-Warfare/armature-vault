@@ -81,8 +81,16 @@ jobs:
       # denominator env that resolves all transitive deps. Revisit when the
       # framework declares testnet_stillness so we can switch CI to that.
       #
-      # We run `sui move test` only — it builds the package first, so a
-      # separate `sui move build` step is redundant.
+      # `sui move build` is run explicitly before `sui move test` because the
+      # `test` subcommand does NOT regenerate Move.lock when it's missing
+      # (verified against sui 1.72.x — test only updates an existing lock).
+      # CI checks out the repo with Move.lock gitignored, so without an
+      # explicit build the lock would be absent and the dep-rev guard below
+      # would fail with "Move.lock: No such file or directory" (which is
+      # exactly how the prior version of this workflow failed at PR #12).
+      - name: sui move build
+        run: sui move build --build-env testnet
+
       - name: sui move test
         run: sui move test --build-env testnet
 
@@ -116,6 +124,10 @@ jobs:
       - name: Check pinned dep revs in Move.lock
         run: |
           set -euo pipefail
+          if [ ! -f Move.lock ]; then
+            echo "::error::Move.lock not found in $(pwd). Did 'sui move build' get reordered before this step? (sui move test alone does NOT regenerate the lock.)"
+            exit 1
+          fi
           # Expected revs — keep in sync with packages/armature_vault/Move.toml.
           # When you bump a pin in Move.toml, bump it here too.
           EXPECTED_MULTICOIN="c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6"
