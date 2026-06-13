@@ -1,0 +1,87 @@
+name: Move build & test
+
+# Trigger note: this workflow uses `pull_request` (NOT `pull_request_target`).
+# That means fork PRs run their own untrusted code in CI — which is safe here
+# because the workflow has no secrets and no write permissions. Do NOT migrate
+# to `pull_request_target` without adding explicit guardrails (fork-allowlist,
+# manual approval, or a separate restricted job).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: move-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  move-test:
+    name: sui move test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: packages/armature_vault
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sui CLI version. To bump: pick a mainnet-vX.Y.Z tag from
+      # https://github.com/MystenLabs/sui/releases and update SUI_VERSION below.
+      # Keep this within one minor of the local toolchain used to author/test
+      # the package (currently sui 1.72.x).
+      - name: Resolve Sui release info
+        id: sui
+        run: |
+          set -euo pipefail
+          SUI_VERSION="mainnet-v1.72.5"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) SUI_ARCH=x86_64 ;;
+            aarch64|arm64) SUI_ARCH=aarch64 ;;
+            *) echo "Unsupported runner arch: $ARCH" >&2; exit 1 ;;
+          esac
+          TARBALL="sui-${SUI_VERSION}-ubuntu-${SUI_ARCH}.tgz"
+          echo "version=${SUI_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
+          echo "url=https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/${TARBALL}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Sui CLI binary
+        id: sui-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/sui
+          key: sui-${{ steps.sui.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Sui CLI
+        if: steps.sui-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fL -o /tmp/sui.tgz "${{ steps.sui.outputs.url }}"
+          mkdir -p "$HOME/.local/bin"
+          # Tarball entries are prefixed with "./" (./sui, ./sui-node, ...).
+          # Extract only the sui CLI to keep the cached binary small.
+          # NOTE: MystenLabs does not currently publish SHA256SUMS alongside the
+          # release tarballs — we rely on the pinned tag + GitHub TLS as integrity
+          # signal. Revisit if upstream starts publishing checksums.
+          tar -xzf /tmp/sui.tgz -C "$HOME/.local/bin" ./sui
+          chmod +x "$HOME/.local/bin/sui"
+
+      - name: Expose Sui CLI on PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: sui --version
+        run: sui --version
+
+      # --build-env note: the package's Move.toml declares `testnet_stillness`
+      # (publish target, blocked on the armature_framework declaring it) and
+      # `testnet_wip` (build/test env declared by the framework). The latter
+      # doesn't resolve in practice because the multicoin dep doesn't declare
+      # `testnet_wip` — its available envs are [testnet, mainnet,
+      # testnet_stillness, testnet_utopia]. `testnet` is the lowest-common-
+      # denominator env that resolves all transitive deps. Revisit when the
+      # framework declares testnet_stillness so we can switch CI to that.
+      #
+      # We run `sui move test` only — it builds the package first, so a
+      # separate `sui move build` step is redundant.
+      - name: sui move test
+        run: sui move test --build-env testnet
