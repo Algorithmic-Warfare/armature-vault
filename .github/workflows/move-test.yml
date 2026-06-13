@@ -24,7 +24,9 @@ jobs:
           URL="https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/${TARBALL}"
           curl -fL -o /tmp/sui.tgz "$URL"
           mkdir -p "$HOME/.local/bin"
-          tar -xzf /tmp/sui.tgz -C "$HOME/.local/bin" sui
+          # Tarball entries are prefixed with "./" (./sui, ./sui-node, ...).
+          # Extract only the sui CLI to keep the PATH dir small.
+          tar -xzf /tmp/sui.tgz -C "$HOME/.local/bin" ./sui
           chmod +x "$HOME/.local/bin/sui"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
