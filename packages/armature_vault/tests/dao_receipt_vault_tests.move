@@ -1321,6 +1321,10 @@ fun deinit_uses_current_registry_key_after_migration() {
         let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
         vault::deinitialize_dao_vault(&mut reg, &mut v, &new_officers_dao, scenario.ctx());
         assert!(vault::lookup(&reg, ssu_id, new_officers).is_none(), 2);
+        // ACL is fully wiped — every role becomes empty/absent.
+        assert!(vault::principals(&v, vault::role_edit()).is_empty(), 3);
+        assert!(vault::principals(&v, vault::role_deposit()).is_empty(), 4);
+        assert!(vault::principals(&v, vault::role_withdraw()).is_empty(), 5);
         ts::return_shared(new_officers_dao);
         ts::return_shared(v);
         ts::return_shared(reg);

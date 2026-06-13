@@ -171,6 +171,11 @@ public struct VaultInitializedEvent has copy, drop {
 /// no caller can satisfy any role on it.
 public struct VaultDeinitializedEvent has copy, drop {
     vault_id: ID,
+    /// The `editor_dao_id` component of the `VaultKey` that was freed —
+    /// equivalently `vault.registry_key_dao_id` at the moment of deinit. After
+    /// a prior `update_registry_key` migration this is the *current* DAO id,
+    /// not the original initializer's. Indexers should treat it as the
+    /// registry-key half, not the caller's identity.
     editor_dao_id: ID,
     by: address,
 }
@@ -576,7 +581,7 @@ public fun deinitialize_dao_vault(
         EVaultRegistryMismatch,
     );
     let vault_id = table::remove(&mut registry.vaults, key);
-    let editor_dao_id = vault.registry_key_dao_id;
+    let freed_key_dao_id = vault.registry_key_dao_id;
 
     // Brick the ACL. Any subsequent assert_role aborts ENotAuthorized.
     while (!vault.acl.is_empty()) {
@@ -585,7 +590,7 @@ public fun deinitialize_dao_vault(
 
     event::emit(VaultDeinitializedEvent {
         vault_id,
-        editor_dao_id,
+        editor_dao_id: freed_key_dao_id,
         by: sender,
     });
 }
@@ -675,10 +680,15 @@ public fun new_for_testing(
     acl: VecMap<Role, vector<Principal>>,
     ctx: &mut TxContext,
 ): DaoReceiptVault {
-    // `registry_key_dao_id` is set to a sentinel zero-id by default; tests that
-    // exercise the registry (lookup / update_registry_key / deinitialize)
-    // should call `set_registry_key_dao_id_for_testing` after construction to
-    // match whatever key they register.
+    // `registry_key_dao_id` is set to a sentinel zero-id by default. Tests
+    // that *only* exercise ACL paths (most of the suite) can leave it alone.
+    // Tests that touch the registry (lookup / update_registry_key /
+    // deinitialize) MUST call `set_registry_key_dao_id_for_testing` after
+    // construction to match the key they register — otherwise
+    // `deinitialize_dao_vault` will look up the sentinel slot and abort
+    // `EInvalidArguments`. We intentionally don't assert non-zero in deinit
+    // because the sentinel is a legitimate `ID` value in production, just
+    // unlikely; the doc + helper make the test-side contract explicit.
     DaoReceiptVault {
         id: object::new(ctx),
         storage_unit_id,
