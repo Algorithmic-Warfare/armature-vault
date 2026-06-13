@@ -29,6 +29,16 @@ world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "
 # we intentionally unify on c7a97f2 (same as warehouse-receipts / armature-trading
 # / triexbook) so `multicoin::Balance` receipts are the same on-chain type.
 multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin.git", subdir = "packages/multicoin", rev = "c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6", override = true }
+# F1 (#3): warehouse_receipts hosts `VaultConfig` which custodies the
+# Collection<-> StorageUnit binding. We accept `&VaultConfig` at
+# initialize_dao_vault so the SSU <-> collection_id binding is verified on-chain
+# rather than trusted from a caller-supplied raw ID. Pinned to 8a2f80e (the
+# most recent rev where the upstream package's sources and tests are in sync
+# — HEAD has a source-only `to_ssu_owner: bool` param change that wasn't
+# propagated to receipt_tests.move, which breaks `sui move test` because Sui
+# compiles transitive dep test code in test mode). Bump alongside the
+# multicoin/world pins above so all three stay on the same on-chain build.
+warehouse_receipts = { git = "https://github.com/loash-industries/warehouse-receipts.git", subdir = "packages/contracts", rev = "8a2f80e857d516187c99b28efa935ff7ce42af03" }
 
 [environments]
 # Publish target (blocked until the framework declares this env — see above).
