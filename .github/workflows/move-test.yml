@@ -85,3 +85,91 @@ jobs:
       # separate `sui move build` step is redundant.
       - name: sui move test
         run: sui move test --build-env testnet
+
+      # Issue #9: lockfile dep-rev guard (root pin presence + transitive-link audit).
+      #
+      # What this enforces:
+      #   1. Our root package's [pinned.testnet.armature_vault].deps resolves
+      #      multicoin to our pinned rev (c7a97f2) and world to our pinned rev
+      #      (8e2e97b). If `override = true` is dropped on multicoin or the
+      #      top-level world pin is removed, those deps reroute and the check
+      #      fails.
+      #   2. warehouse_receipts is at the pinned rev (8a2f80e).
+      #
+      # What this DOES NOT enforce (intentionally surfaced, not failed):
+      #   - Transitive packages may resolve multicoin/world to *different* revs.
+      #     For example, warehouse_receipts itself links against multicoin_2
+      #     (rev 330d339) and World (rev 8eb197e) — NOT our pins. Sui's resolver
+      #     only applies `override = true` to the root package's own dep graph;
+      #     transitive packages get their own resolution per importer.
+      #
+      #     Whether this affects runtime type identity at the deposit boundary
+      #     depends on whether multicoin@330d339 / @c7a97f2 publish to the same
+      #     on-chain address (manifest_digest equality on the multicoin entries
+      #     suggests yes; world's digests differ, so world may not unify). This
+      #     pre-existed PR #12 and is tracked in a separate follow-up issue.
+      #
+      #     The audit step below surfaces the transitive linkage on every run
+      #     so a regression there is visible in CI logs without failing the
+      #     build; bake-in a strict assertion only after the follow-up resolves
+      #     the runtime-identity question.
+      - name: Check pinned dep revs in Move.lock
+        run: |
+          set -euo pipefail
+          # Expected revs — keep in sync with packages/armature_vault/Move.toml.
+          # When you bump a pin in Move.toml, bump it here too.
+          EXPECTED_MULTICOIN="c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6"
+          EXPECTED_WORLD="8e2e97b50fd6bbf605284bcdaae54a33a5475e89"
+          EXPECTED_WAREHOUSE_RECEIPTS="8a2f80e857d516187c99b28efa935ff7ce42af03"
+
+          fail=0
+          # Anchor the assertion to a `source = ... rev = "..."` line so a stray
+          # SHA-shaped substring in a manifest_digest can't satisfy the check.
+          check() {
+            local name="$1" rev="$2"
+            if grep -qE "source = \{[^}]*rev = \"$rev\"" Move.lock; then
+              echo "ok   $name pinned at $rev"
+            else
+              echo "FAIL $name expected $rev — no [pinned.testnet.*] source line carries it"
+              fail=1
+            fi
+          }
+
+          check multicoin "$EXPECTED_MULTICOIN"
+          check world "$EXPECTED_WORLD"
+          check warehouse_receipts "$EXPECTED_WAREHOUSE_RECEIPTS"
+
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "::error::Move.lock dep-rev drift detected. Either:"
+            echo "  - You intentionally bumped a pin in Move.toml — update the"
+            echo "    EXPECTED_* values above to match."
+            echo "  - You dropped \`override = true\` on multicoin or removed the"
+            echo "    top-level world pin — restore the override so transitive"
+            echo "    deps don't shadow our chosen rev for the root package."
+            echo "  - A transitive dep changed and our override no longer fires."
+            exit 1
+          fi
+
+      # Surface (not fail) the transitive dep linkage so any regression in how
+      # warehouse_receipts / armature themselves resolve multicoin and world is
+      # visible in CI logs. Wrap as a heredoc-friendly soft-warn rather than a
+      # hard gate while the runtime-identity question is open (follow-up issue).
+      - name: Audit transitive dep linkage (informational)
+        run: |
+          set -euo pipefail
+          echo "Transitive dep mapping in Move.lock (informational — does not fail):"
+          echo ""
+          for pkg in armature_vault warehouse_receipts armature; do
+            line=$(grep -A4 "^\[pinned\.testnet\.$pkg\]" Move.lock | grep '^deps = ' || true)
+            if [ -n "$line" ]; then
+              echo "  $pkg → $line"
+            else
+              echo "  $pkg → (no entry found)"
+            fi
+          done
+          echo ""
+          echo "Note: warehouse_receipts and armature linking to multicoin_2 / multicoin (rev 330d339)"
+          echo "      instead of multicoin_1 (rev c7a97f2, our override) is EXPECTED at this rev pin."
+          echo "      Whether this affects runtime type identity at the deposit boundary is being"
+          echo "      tracked separately."
