@@ -43,6 +43,7 @@ module armature_vault::dao_receipt_vault;
 use armature::dao::DAO;
 use multicoin::multicoin::Balance;
 use sui::{dynamic_object_field as dof, event, table::{Self, Table}, vec_map::{Self, VecMap}};
+use warehouse_receipts::vault::VaultConfig;
 use world::storage_unit::StorageUnit;
 
 // === Errors ===
@@ -78,6 +79,9 @@ const EVaultNonEmpty: vector<u8> =
 #[error(code = 10)]
 const EVaultRegistryMismatch: vector<u8> =
     b"Registry slot does not point at this vault";
+#[error(code = 11)]
+const EStorageUnitMismatch: vector<u8> =
+    b"VaultConfig does not bind the passed StorageUnit";
 
 // === Roles ===
 
@@ -249,17 +253,32 @@ fun assert_role(vault: &DaoReceiptVault, role: Role, dao: &DAO, sender: address)
 /// of `editor_dao`, which is seeded as the sole initial `Edit` principal; the
 /// ACL is otherwise empty (grant deposit/withdraw principals via `grant`).
 /// Reverts if a vault for this (SSU, editor_dao) pair already exists.
-/// `collection_id` must be the ID of the SSU's warehouse receipt Collection.
+///
+/// F1 (#3): `vault_config` is the `warehouse_receipts::vault::VaultConfig` for
+/// this SSU. It is the on-chain authoritative record that a specific
+/// `Collection` was created for a specific `StorageUnit`. We assert the SSU
+/// binding (`EStorageUnitMismatch`) and derive `collection_id` from the
+/// config, closing the prior gap where a caller could supply a raw
+/// `collection_id: ID` that didn't match the SSU and permanently misconfigure
+/// the vault.
 public fun initialize_dao_vault(
     registry: &mut DaoReceiptVaultRegistry,
     storage_unit: &StorageUnit,
     editor_dao: &DAO,
-    collection_id: ID,
+    vault_config: &VaultConfig,
     ctx: &mut TxContext,
 ) {
     assert!(editor_dao.is_governance_member(ctx.sender()), ENotAuthorized);
 
     let storage_unit_id = object::id(storage_unit);
+    // F1: the VaultConfig's bound SSU must match the passed StorageUnit. This
+    // is the verifier that closes the "wrong collection for this SSU" hole.
+    assert!(
+        vault_config.storage_unit_id() == storage_unit_id,
+        EStorageUnitMismatch,
+    );
+    let collection_id = vault_config.collection_id();
+
     let editor_dao_id = editor_dao.id();
     let key = VaultKey { storage_unit_id, editor_dao_id };
     assert!(!table::contains(&registry.vaults, key), EVaultAlreadyExists);

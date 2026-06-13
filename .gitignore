@@ -1,1 +1,6 @@
 build/
+# Sui Move auto-generates Move.lock on every build/test. Historically this repo
+# has not tracked it (PRs #2/#6/#7 all merged without it). Ignoring explicitly
+# here so reviewers don't see "untracked lockfile" warnings on PRs and start
+# worrying about manifest/lock drift; the manifest is the canonical pin source.
+Move.lock
