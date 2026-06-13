@@ -72,6 +72,12 @@ const EEditMustBeOu: vector<u8> =
 #[error(code = 8)]
 const EEditorWouldLockSelf: vector<u8> =
     b"Revocation would leave the caller unable to administer the vault";
+#[error(code = 9)]
+const EVaultNonEmpty: vector<u8> =
+    b"Vault holds at least one non-empty asset balance — drain before deinit";
+#[error(code = 10)]
+const EVaultRegistryMismatch: vector<u8> =
+    b"Registry slot does not point at this vault";
 
 // === Roles ===
 
@@ -128,6 +134,17 @@ public struct DaoReceiptVault has key {
     storage_unit_id: ID,
     collection_id: ID,
     acl: VecMap<Role, vector<Principal>>,
+    /// M2: number of asset_ids with a live dynamic-object-field entry. Bumped
+    /// by `deposit_receipt` when a new asset_id is added; decremented by
+    /// `withdraw_receipt` when the last balance for an asset_id is drained.
+    /// `deinitialize_dao_vault` asserts this is zero before freeing the
+    /// registry slot.
+    non_empty_assets: u64,
+    /// M2: which `editor_dao_id` the registry currently keys this vault under.
+    /// Set at init from `editor_dao.id()`; updated by `update_registry_key`.
+    /// `deinitialize_dao_vault` uses this to find the right slot to remove,
+    /// so the caller doesn't need to track migration history out-of-band.
+    registry_key_dao_id: ID,
 }
 
 // === Module initializer ===
@@ -146,6 +163,16 @@ public struct VaultInitializedEvent has copy, drop {
     editor_dao_id: ID,
     storage_unit_id: ID,
     collection_id: ID,
+}
+
+/// M2: emitted when a vault is deinitialized — its registry slot is freed and
+/// its ACL is wiped. The vault object itself remains as an orphan (Sui shared
+/// objects cannot be deleted), but is no longer discoverable via `lookup` and
+/// no caller can satisfy any role on it.
+public struct VaultDeinitializedEvent has copy, drop {
+    vault_id: ID,
+    editor_dao_id: ID,
+    by: address,
 }
 
 public struct DepositEvent has copy, drop {
@@ -241,6 +268,8 @@ public fun initialize_dao_vault(
         storage_unit_id,
         collection_id,
         acl,
+        non_empty_assets: 0,
+        registry_key_dao_id: editor_dao_id,
     };
     let vault_id = object::id(&vault);
 
@@ -289,6 +318,8 @@ public fun deposit_receipt(
         stored.join(receipt, ctx);
     } else {
         dof::add(&mut vault.id, asset_id, receipt);
+        // M2: new asset_id slot — bump the live-asset counter.
+        vault.non_empty_assets = vault.non_empty_assets + 1;
     };
 
     event::emit(DepositEvent {
@@ -323,6 +354,8 @@ public fun withdraw_receipt(
     if (stored.value() == 0) {
         let zero: Balance = dof::remove(&mut vault.id, asset_id);
         zero.destroy_zero();
+        // M2: asset_id slot drained — decrement the live-asset counter.
+        vault.non_empty_assets = vault.non_empty_assets - 1;
     };
 
     event::emit(WithdrawEvent {
@@ -468,7 +501,7 @@ public fun revoke(
 /// `lookup(...)` discoverable under the new DAO's identity.
 public fun update_registry_key(
     registry: &mut DaoReceiptVaultRegistry,
-    vault: &DaoReceiptVault,
+    vault: &mut DaoReceiptVault,
     editor_dao: &DAO,
     new_editor_dao: &DAO,
     ctx: &TxContext,
@@ -497,6 +530,64 @@ public fun update_registry_key(
 
     let vault_id = table::remove(&mut registry.vaults, old_key);
     table::add(&mut registry.vaults, new_key, vault_id);
+    // M2: keep the vault's self-reported registry key in sync so
+    // `deinitialize_dao_vault` can later find the right slot to free.
+    vault.registry_key_dao_id = new_editor_dao.id();
+}
+
+/// M2: free the registry slot for this vault's (SSU, current editor_dao) key
+/// and effectively brick the vault by clearing its ACL. The caller must satisfy
+/// `Edit` using `editor_dao`, and the vault must be empty
+/// (`non_empty_assets == 0`).
+///
+/// Sui shared objects cannot be deleted once shared (see
+/// `sui::transfer::share_object` doc: "once an object is shared, it will stay
+/// shared forever"). So this function does not destroy the vault object — it
+/// orphans it. Subsequent `deposit_receipt` / `withdraw_receipt` / `grant` /
+/// `revoke` / `grant_edit_ou` / `update_registry_key` calls all go through
+/// `assert_role(...)` which now aborts `ENotAuthorized` because the ACL is
+/// empty. The orphan is harmless: no DOFs, no admin path, not discoverable
+/// via the registry.
+///
+/// `editor_dao` may differ from the original initializer — after
+/// `update_registry_key` the vault's current registry slot is keyed by the
+/// migrated DAO id. The vault tracks `registry_key_dao_id` internally and
+/// uses it to locate the slot, so the caller only needs a DAO that satisfies
+/// the current `Edit` role.
+public fun deinitialize_dao_vault(
+    registry: &mut DaoReceiptVaultRegistry,
+    vault: &mut DaoReceiptVault,
+    editor_dao: &DAO,
+    ctx: &TxContext,
+) {
+    let sender = ctx.sender();
+    assert_role(vault, Role::Edit, editor_dao, sender);
+    assert!(vault.non_empty_assets == 0, EVaultNonEmpty);
+
+    let key = VaultKey {
+        storage_unit_id: vault.storage_unit_id,
+        editor_dao_id: vault.registry_key_dao_id,
+    };
+    // The registry slot must exist and point at *this* vault. Mirrors the
+    // cross-vault safety check in `update_registry_key`.
+    assert!(table::contains(&registry.vaults, key), EInvalidArguments);
+    assert!(
+        *table::borrow(&registry.vaults, key) == object::id(vault),
+        EVaultRegistryMismatch,
+    );
+    let vault_id = table::remove(&mut registry.vaults, key);
+    let editor_dao_id = vault.registry_key_dao_id;
+
+    // Brick the ACL. Any subsequent assert_role aborts ENotAuthorized.
+    while (!vault.acl.is_empty()) {
+        vault.acl.pop();
+    };
+
+    event::emit(VaultDeinitializedEvent {
+        vault_id,
+        editor_dao_id,
+        by: sender,
+    });
 }
 
 // === ACL mutation (internal) ===
@@ -584,12 +675,26 @@ public fun new_for_testing(
     acl: VecMap<Role, vector<Principal>>,
     ctx: &mut TxContext,
 ): DaoReceiptVault {
+    // `registry_key_dao_id` is set to a sentinel zero-id by default; tests that
+    // exercise the registry (lookup / update_registry_key / deinitialize)
+    // should call `set_registry_key_dao_id_for_testing` after construction to
+    // match whatever key they register.
     DaoReceiptVault {
         id: object::new(ctx),
         storage_unit_id,
         collection_id,
         acl,
+        non_empty_assets: 0,
+        registry_key_dao_id: object::id_from_address(@0x0),
     }
+}
+
+#[test_only]
+public fun set_registry_key_dao_id_for_testing(
+    vault: &mut DaoReceiptVault,
+    editor_dao_id: ID,
+) {
+    vault.registry_key_dao_id = editor_dao_id;
 }
 
 #[test_only]
