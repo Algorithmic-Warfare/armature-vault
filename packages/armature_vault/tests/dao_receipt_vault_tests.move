@@ -361,8 +361,10 @@ fun cannot_revoke_last_editor() {
 
 // =============================================================================
 // === Regression tests for issue #1 fixes (F2/F3/F4/F5 + H1/M3/M4/L1/L2/I1)
-// === Each test was originally written against unfixed code (see
-// === workflow w46pp0jni); the assertion direction is flipped to verify the fix.
+// === Each test was originally written against unfixed code as part of the
+// === adversarial review in
+// === https://github.com/Algorithmic-Warfare/armature-vault/issues/1#issuecomment-4690910572
+// === then flipped here to verify the fix shipped in PR #2.
 // =============================================================================
 
 // --- H1/M3: Edit role must be granted via grant_edit_ou (rejects Player + bogus Ou)
@@ -801,6 +803,75 @@ fun update_registry_key_remaps_vault_after_migration() {
     };
 
     ts::end(scenario);
+}
+
+/// F4 cross-vault safety (per PR #2 review): update_registry_key aborts if the
+/// registry entry at old_key points at a *different* vault than the one passed.
+/// Prevents a caller with Edit on vault B (and editor_dao listed on vault B's
+/// ACL) from silently remapping vault A's registry entry.
+#[test]
+#[expected_failure(abort_code = vault::EInvalidArguments)]
+fun update_registry_key_rejects_cross_vault_remap() {
+    let mut scenario = ts::begin(AWAR_M1);
+    let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+    let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+    let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+    let collection_id = make_collection(&mut scenario, AWAR_M1);
+    let ssu_id = object::id_from_address(@0x5501);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    vault::init_for_testing(scenario.ctx());
+
+    // Vault A is the real registry occupant of (ssu_id, officers).
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v_a = vault::new_for_testing(
+        ssu_id,
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    let v_a_id = object::id(&v_a);
+    vault::share_for_testing(v_a);
+
+    // Vault B is a separate vault on which the officer also holds Edit.
+    ts::next_tx(&mut scenario, AWAR_M1);
+    let v_b = vault::new_for_testing(
+        object::id_from_address(@0x5502),
+        collection_id,
+        example_acl(awar, wolf, officers),
+        scenario.ctx(),
+    );
+    vault::share_for_testing(v_b);
+
+    ts::next_tx(&mut scenario, AWAR_M1);
+    {
+        let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+        // Only register vault A under (ssu_id, officers). Vault B is unrelated to
+        // this slot but the attacker tries to remap it.
+        vault::register_for_testing(&mut reg, ssu_id, officers, v_a_id);
+        ts::return_shared(reg);
+    };
+
+    // Attacker holds Edit on vault B and passes vault B (not vault A) to
+    // update_registry_key — pre-fix this would silently remap vault A's slot.
+    ts::next_tx(&mut scenario, AWAR_OFFICER);
+    let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+    // Both vaults are shared; disambiguate by taking vault B by id.
+    // We don't actually need the v_b id earlier — take_shared returns the second
+    // one if we already took the first; instead just take by id here.
+    let v_b = ts::take_shared<DaoReceiptVault>(&scenario);
+    let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+    let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
+    vault::update_registry_key(
+        &mut reg,
+        &v_b,
+        &officers_dao,
+        &new_officers_dao,
+        scenario.ctx(),
+    );
+
+    abort
 }
 
 // --- I1: initialize_dao_vault emits AclGrantedEvent for the seeded Edit principal

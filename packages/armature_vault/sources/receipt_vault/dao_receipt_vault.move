@@ -14,11 +14,18 @@
 ///         (`dao.id() == dao_id`) and is one of its board members.
 ///     A caller passes a role check if they satisfy *any* principal listed for it.
 ///   - `Edit` is ACL administration: holders may batch grant/revoke principals on
-///     any role (including `Edit` itself). The people who can *administer* the vault
-///     need not be the people who can *use* it — e.g. AWAR officers hold `Edit`
-///     while AWAR/WOLF members hold `Deposit`/`Withdraw`.
-///   - Invariant: `Edit` can never be emptied (`ELastEditor`). An empty `Edit` list
-///     would permanently brick the ACL.
+///     `Deposit`/`Withdraw` roles via `grant`/`revoke`. The people who can
+///     *administer* the vault need not be the people who can *use* it — e.g. AWAR
+///     officers hold `Edit` while AWAR/WOLF members hold `Deposit`/`Withdraw`.
+///   - `Edit` itself can only be granted via `grant_edit_ou`, which takes a
+///     live `&DAO` witness. `grant` aborts `EEditMustBeOu` on `Role::Edit`. This
+///     forces every `Edit` principal to reference a real on-chain DAO and closes
+///     brick-by-unsatisfiable-principal attacks (bogus dao ids, `Player{@0x0}`)
+///     plus bare-`Player` Edit backdoors that would defeat OU migration.
+///   - Invariants on `revoke`: (1) `Edit` can never be emptied (`ELastEditor`),
+///     and (2) the caller must still satisfy `Edit` via `editor_dao` after the
+///     batch (`EEditorWouldLockSelf`). Together they prevent both empty-Edit
+///     bricks and grant-bogus-then-revoke-self brick paths.
 ///
 /// Why the OU indirection (and not a flat address list): it makes board-membership
 /// changes and DAO *migration* work without re-listing addresses. A migrated DAO
@@ -478,6 +485,14 @@ public fun update_registry_key(
         editor_dao_id: new_editor_dao.id(),
     };
     assert!(table::contains(&registry.vaults, old_key), EInvalidArguments);
+    // Cross-vault safety: a caller with Edit on this vault who also has the
+    // editor_dao listed as an Ou principal on *another* vault's ACL could
+    // otherwise remap the other vault's registry entry. Assert the stored id
+    // at old_key really refers to *this* vault before swapping.
+    assert!(
+        *table::borrow(&registry.vaults, old_key) == object::id(vault),
+        EInvalidArguments,
+    );
     assert!(!table::contains(&registry.vaults, new_key), EVaultAlreadyExists);
 
     let vault_id = table::remove(&mut registry.vaults, old_key);
