@@ -272,6 +272,15 @@ fun assert_role(vault: &DaoReceiptVault, role: Role, dao: &DAO, sender: address)
 /// `&StorageUnit` they could obtain a reference to. The composition F1+M1
 /// ensures both halves of the binding (Collection<->SSU and caller<->SSU)
 /// are verified by witness, not trusted from input.
+///
+/// Trust assumption (not verified on-chain): the caller — a governance member
+/// of `editor_dao` who possesses `OwnerCap<StorageUnit>` — is acting on behalf
+/// of the DAO. M1 verifies (caller passes board-membership check) AND (caller
+/// can produce the OwnerCap), but does NOT verify the DAO *collectively*
+/// controls the cap. A board member personally holding the cap can unilaterally
+/// bind that SSU to their DAO's vault. If you need cap-custody under DAO
+/// governance, custody the cap in the DAO's treasury and borrow it via the
+/// DAO's standard proposal flow.
 public fun initialize_dao_vault(
     registry: &mut DaoReceiptVaultRegistry,
     storage_unit: &StorageUnit,
