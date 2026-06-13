@@ -44,7 +44,7 @@ use armature::dao::DAO;
 use multicoin::multicoin::Balance;
 use sui::{dynamic_object_field as dof, event, table::{Self, Table}, vec_map::{Self, VecMap}};
 use warehouse_receipts::vault::VaultConfig;
-use world::storage_unit::StorageUnit;
+use world::{access::{Self, OwnerCap}, storage_unit::StorageUnit};
 
 // === Errors ===
 
@@ -82,6 +82,9 @@ const EVaultRegistryMismatch: vector<u8> =
 #[error(code = 11)]
 const EStorageUnitMismatch: vector<u8> =
     b"VaultConfig does not bind the passed StorageUnit";
+#[error(code = 12)]
+const EUnauthorizedForStorageUnit: vector<u8> =
+    b"Caller's OwnerCap does not authorize this StorageUnit";
 
 // === Roles ===
 
@@ -261,9 +264,18 @@ fun assert_role(vault: &DaoReceiptVault, role: Role, dao: &DAO, sender: address)
 /// config, closing the prior gap where a caller could supply a raw
 /// `collection_id: ID` that didn't match the SSU and permanently misconfigure
 /// the vault.
+///
+/// M1 (#4): `owner_cap` is the `OwnerCap<StorageUnit>` for `storage_unit`.
+/// `world::access::is_authorized(owner_cap, ssu_id)` verifies on-chain that the
+/// caller has the SSU's authority surface, closing the SSU-squatting hole
+/// where any DAO board member could register a vault against any
+/// `&StorageUnit` they could obtain a reference to. The composition F1+M1
+/// ensures both halves of the binding (Collection<->SSU and caller<->SSU)
+/// are verified by witness, not trusted from input.
 public fun initialize_dao_vault(
     registry: &mut DaoReceiptVaultRegistry,
     storage_unit: &StorageUnit,
+    owner_cap: &OwnerCap<StorageUnit>,
     editor_dao: &DAO,
     vault_config: &VaultConfig,
     ctx: &mut TxContext,
@@ -271,6 +283,11 @@ public fun initialize_dao_vault(
     assert!(editor_dao.is_governance_member(ctx.sender()), ENotAuthorized);
 
     let storage_unit_id = object::id(storage_unit);
+    // M1: caller's OwnerCap must authorize this SSU.
+    assert!(
+        access::is_authorized(owner_cap, storage_unit_id),
+        EUnauthorizedForStorageUnit,
+    );
     // F1: the VaultConfig's bound SSU must match the passed StorageUnit. This
     // is the verifier that closes the "wrong collection for this SSU" hole.
     assert!(
