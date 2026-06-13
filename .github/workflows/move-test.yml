@@ -1,0 +1,38 @@
+name: Move build & test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  move-test:
+    name: sui move test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: packages/armature_vault
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Sui CLI
+        run: |
+          set -euo pipefail
+          SUI_VERSION="${SUI_VERSION:-mainnet-v1.72.5}"
+          TARBALL="sui-${SUI_VERSION}-ubuntu-x86_64.tgz"
+          URL="https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/${TARBALL}"
+          curl -fL -o /tmp/sui.tgz "$URL"
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/sui.tgz -C "$HOME/.local/bin" sui
+          chmod +x "$HOME/.local/bin/sui"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: sui --version
+        run: sui --version
+
+      - name: sui move build
+        run: sui move build --build-env testnet
+
+      - name: sui move test
+        run: sui move test --build-env testnet
