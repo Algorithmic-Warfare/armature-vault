@@ -40,11 +40,23 @@
 /// types diverge and receipts cannot be deposited.
 module armature_vault::dao_receipt_vault {
     use armature::dao::DAO;
-    use armature_vault::acl::{Self as acl, Role, Principal};
+    use armature_vault::acl::{Self as acl, Principal};
     use multicoin::multicoin::Balance;
     use sui::{dynamic_object_field as dof, event, table::{Self, Table}, vec_map::{Self, VecMap}};
     use warehouse_receipts::vault::VaultConfig;
     use world::{access::{Self, OwnerCap}, storage_unit::StorageUnit};
+
+    // === Roles ===
+
+    public enum Role has copy, drop, store {
+        Deposit,
+        Withdraw,
+        Edit,
+    }
+
+    public fun role_deposit(): Role { Role::Deposit }
+    public fun role_withdraw(): Role { Role::Withdraw }
+    public fun role_edit(): Role { Role::Edit }
 
     // === Errors ===
 
@@ -261,7 +273,7 @@ module armature_vault::dao_receipt_vault {
 
         let seed_principal = acl::ou(editor_dao_id);
         let mut vault_acl = vec_map::empty<Role, vector<Principal>>();
-        vault_acl.insert(acl::role_edit(), vector[seed_principal]);
+        vault_acl.insert(Role::Edit, vector[seed_principal]);
 
         let vault = DaoReceiptVault {
             id: object::new(ctx),
@@ -286,7 +298,7 @@ module armature_vault::dao_receipt_vault {
         // ACL reconstructions don't need to hardcode the seeding rule.
         event::emit(AclGrantedEvent {
             vault_id,
-            role: acl::role_edit(),
+            role: Role::Edit,
             principal: seed_principal,
             by: ctx.sender(),
         });
@@ -304,7 +316,7 @@ module armature_vault::dao_receipt_vault {
         ctx: &mut TxContext,
     ) {
         let sender = ctx.sender();
-        assert_role(vault, acl::role_deposit(), dao, sender);
+        assert_role(vault, Role::Deposit, dao, sender);
         assert!(receipt.collection_id() == vault.collection_id, EWrongCollection);
         // M4/L2: reject zero-value deposits so a Deposit-only principal cannot
         // unilaterally grow the vault's DOF set with phantom entries.
@@ -341,7 +353,7 @@ module armature_vault::dao_receipt_vault {
         ctx: &mut TxContext,
     ): Balance {
         let sender = ctx.sender();
-        assert_role(vault, acl::role_withdraw(), dao, sender);
+        assert_role(vault, Role::Withdraw, dao, sender);
         // F3: reject zero-amount withdrawals so indexers don't see spurious WithdrawEvents.
         assert!(amount > 0, EZeroAmount);
 
@@ -382,7 +394,7 @@ module armature_vault::dao_receipt_vault {
         ctx: &TxContext,
     ) {
         let sender = ctx.sender();
-        assert_role(vault, acl::role_edit(), editor_dao, sender);
+        assert_role(vault, Role::Edit, editor_dao, sender);
         // F5: distinct error code so callers can tell bad-input from auth failure.
         assert!(roles.length() == principals.length(), EInvalidArguments);
 
@@ -394,7 +406,7 @@ module armature_vault::dao_receipt_vault {
             let principal = principals[i];
             // H1/M3: Edit principals must come through grant_edit_ou, which validates
             // the &DAO witness and refuses bare-Player and unverifiable-Ou principals.
-            assert!(role != acl::role_edit(), EEditMustBeOu);
+            assert!(role != Role::Edit, EEditMustBeOu);
             // L1: only emit on real state change.
             let changed = add_principal(vault, role, principal);
             if (changed) {
@@ -415,15 +427,15 @@ module armature_vault::dao_receipt_vault {
         ctx: &TxContext,
     ) {
         let sender = ctx.sender();
-        assert_role(vault, acl::role_edit(), editor_dao, sender);
+        assert_role(vault, Role::Edit, editor_dao, sender);
 
         let vault_id = object::id(vault);
         let principal = acl::ou(target_dao.id());
-        let changed = add_principal(vault, acl::role_edit(), principal);
+        let changed = add_principal(vault, Role::Edit, principal);
         if (changed) {
             event::emit(AclGrantedEvent {
                 vault_id,
-                role: acl::role_edit(),
+                role: Role::Edit,
                 principal,
                 by: sender,
             });
@@ -441,7 +453,7 @@ module armature_vault::dao_receipt_vault {
         ctx: &TxContext,
     ) {
         let sender = ctx.sender();
-        assert_role(vault, acl::role_edit(), editor_dao, sender);
+        assert_role(vault, Role::Edit, editor_dao, sender);
         // F5: distinct error code for bad input vs. auth failure.
         assert!(roles.length() == principals.length(), EInvalidArguments);
 
@@ -462,7 +474,7 @@ module armature_vault::dao_receipt_vault {
         };
 
         // Brick-guard 1: Edit list must remain non-empty.
-        let edit_role = acl::role_edit();
+        let edit_role = Role::Edit;
         assert!(
             vault.acl.contains(&edit_role) && vault.acl.get(&edit_role).length() > 0,
             ELastEditor,
@@ -473,7 +485,7 @@ module armature_vault::dao_receipt_vault {
         // for *them* (which they can verify by passing the same editor_dao). This
         // is the post-state version of assert_role(Edit, ...) — it would have
         // succeeded entering revoke; the assertion forces it to still hold on exit.
-        assert!(satisfies_role(vault, acl::role_edit(), editor_dao, sender), EEditorWouldLockSelf);
+        assert!(satisfies_role(vault, Role::Edit, editor_dao, sender), EEditorWouldLockSelf);
 
         // F2 + L1: emit events only now (after guards), and only for state-changing pairs.
         let mut j = 0;
@@ -508,7 +520,7 @@ module armature_vault::dao_receipt_vault {
         ctx: &TxContext,
     ) {
         let sender = ctx.sender();
-        assert_role(vault, acl::role_edit(), editor_dao, sender);
+        assert_role(vault, Role::Edit, editor_dao, sender);
 
         let old_key = VaultKey {
             storage_unit_id: vault.storage_unit_id,
@@ -559,7 +571,7 @@ module armature_vault::dao_receipt_vault {
         ctx: &TxContext,
     ) {
         let sender = ctx.sender();
-        assert_role(vault, acl::role_edit(), editor_dao, sender);
+        assert_role(vault, Role::Edit, editor_dao, sender);
         assert!(vault.non_empty_assets == 0, EVaultNonEmpty);
 
         let key = VaultKey {

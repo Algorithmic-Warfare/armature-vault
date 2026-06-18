@@ -12,7 +12,8 @@
 #[test_only]
 module armature_vault::dao_receipt_vault_tests {
     use armature::{dao::{Self, DAO}, governance};
-    use armature_vault::dao_receipt_vault::{Self as vault, DaoReceiptVault, Role, Principal};
+    use armature_vault::acl::{Self as acl, Principal};
+    use armature_vault::dao_receipt_vault::{Self as vault, DaoReceiptVault, Role};
     use multicoin::multicoin::{Self, Collection, CollectionCap, Balance};
     use std::string;
     use sui::{test_scenario as ts, vec_map};
@@ -78,15 +79,15 @@ module armature_vault::dao_receipt_vault_tests {
         awar_officers: ID,
     ): vec_map::VecMap<Role, vector<Principal>> {
         let use_perms = vector[
-            vault::ou(awar_members),
-            vault::ou(wolf_members),
-            vault::player(PROTO),
+            acl::ou(awar_members),
+            acl::ou(wolf_members),
+            acl::player(PROTO),
         ];
-        let mut acl = vec_map::empty<Role, vector<Principal>>();
-        acl.insert(vault::role_deposit(), use_perms);
-        acl.insert(vault::role_withdraw(), use_perms);
-        acl.insert(vault::role_edit(), vector[vault::ou(awar_officers)]);
-        acl
+        let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        acl_map.insert(vault::role_deposit(), use_perms);
+        acl_map.insert(vault::role_withdraw(), use_perms);
+        acl_map.insert(vault::role_edit(), vector[acl::ou(awar_officers)]);
+        acl_map
     }
 
     // === Tests ===
@@ -218,7 +219,7 @@ module armature_vault::dao_receipt_vault_tests {
                 &mut v,
                 &officers_dao,
                 vector[vault::role_deposit(), vault::role_withdraw()],
-                vector[vault::player(PROTO), vault::player(PROTO)],
+                vector[acl::player(PROTO), acl::player(PROTO)],
                 scenario.ctx(),
             );
             ts::return_shared(officers_dao);
@@ -262,7 +263,7 @@ module armature_vault::dao_receipt_vault_tests {
             &mut v,
             &awar_dao,
             vector[vault::role_deposit()],
-            vector[vault::player(OUTSIDER)],
+            vector[acl::player(OUTSIDER)],
             scenario.ctx(),
         );
 
@@ -315,7 +316,7 @@ module armature_vault::dao_receipt_vault_tests {
                 &mut v,
                 &new_officers_dao,
                 vector[vault::role_edit()],
-                vector[vault::ou(officers)],
+                vector[acl::ou(officers)],
                 scenario.ctx(),
             );
             assert!(vault::principals(&v, vault::role_edit()).length() == 1, 1);
@@ -353,7 +354,7 @@ module armature_vault::dao_receipt_vault_tests {
             &mut v,
             &officers_dao,
             vector[vault::role_edit()],
-            vector[vault::ou(officers)],
+            vector[acl::ou(officers)],
             scenario.ctx(),
         );
 
@@ -398,7 +399,7 @@ module armature_vault::dao_receipt_vault_tests {
             &mut v,
             &officers_dao,
             vector[vault::role_edit()],
-            vector[vault::player(@0x0)],
+            vector[acl::player(@0x0)],
             scenario.ctx(),
         );
 
@@ -433,7 +434,7 @@ module armature_vault::dao_receipt_vault_tests {
             &mut v,
             &officers_dao,
             vector[vault::role_edit()],
-            vector[vault::ou(bogus)],
+            vector[acl::ou(bogus)],
             scenario.ctx(),
         );
 
@@ -467,7 +468,7 @@ module armature_vault::dao_receipt_vault_tests {
             &mut v,
             &officers_dao,
             vector[vault::role_edit()],
-            vector[vault::player(AWAR_OFFICER)],
+            vector[acl::player(AWAR_OFFICER)],
             scenario.ctx(),
         );
 
@@ -501,7 +502,7 @@ module armature_vault::dao_receipt_vault_tests {
             vault::grant_edit_ou(&mut v, &officers_dao, &new_officers_dao, scenario.ctx());
             let edits = vault::principals(&v, vault::role_edit());
             assert!(edits.length() == 2, 0);
-            assert!(edits.contains(&vault::ou(new_officers)), 1);
+            assert!(edits.contains(&acl::ou(new_officers)), 1);
             ts::return_shared(new_officers_dao);
             ts::return_shared(officers_dao);
             ts::return_shared(v);
@@ -556,7 +557,7 @@ module armature_vault::dao_receipt_vault_tests {
             &mut v,
             &officers_dao,
             vector[vault::role_edit()],
-            vector[vault::ou(officers)],
+            vector[acl::ou(officers)],
             scenario.ctx(),
         );
 
@@ -601,7 +602,7 @@ module armature_vault::dao_receipt_vault_tests {
                 &mut v,
                 &officers_dao,
                 vector[vault::role_deposit()],
-                vector[vault::player(PROTO)],
+                vector[acl::player(PROTO)],
                 scenario.ctx(),
             );
             ts::return_shared(officers_dao);
@@ -627,7 +628,7 @@ module armature_vault::dao_receipt_vault_tests {
                 &mut v,
                 &officers_dao,
                 vector[vault::role_deposit()],
-                vector[vault::player(OUTSIDER)],
+                vector[acl::player(OUTSIDER)],
                 scenario.ctx(),
             );
             ts::return_shared(officers_dao);
@@ -736,7 +737,7 @@ module armature_vault::dao_receipt_vault_tests {
             &mut v,
             &officers_dao,
             vector[vault::role_deposit(), vault::role_withdraw()],
-            vector[vault::player(OUTSIDER)],
+            vector[acl::player(OUTSIDER)],
             scenario.ctx(),
         );
 
@@ -1003,7 +1004,7 @@ module armature_vault::dao_receipt_vault_tests {
             &mut v,
             &officers_dao,
             vector[vault::role_deposit()],
-            vector[vault::player(OUTSIDER)],
+            vector[acl::player(OUTSIDER)],
             scenario.ctx(),
         );
 

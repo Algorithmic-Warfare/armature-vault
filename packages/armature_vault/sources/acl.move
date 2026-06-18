@@ -1,28 +1,9 @@
 /// Standalone ACL primitives for the armature-vault permission model.
 ///
-/// `Role` and `Principal` are the two axes of the access-control model used
-/// across all vault modules in this package. A caller passes a role check if
-/// they satisfy *any* principal listed for that role.
-///
-/// Extracted here so that future modules moved into this package (e.g. keyspace
-/// encrypted-entry contracts) can share the same permission model without
-/// depending on `dao_receipt_vault` directly.
+/// `Principal` is the caller-identity abstraction shared across all vault modules.
+/// Each vault module defines its own `Role` type for its specific permissions.
 module armature_vault::acl {
     use armature::dao::DAO;
-
-    // === Roles ===
-
-    public enum Role has copy, drop, store {
-        Deposit,
-        Withdraw,
-        Edit,
-    }
-
-    public fun role_deposit(): Role { Role::Deposit }
-
-    public fun role_withdraw(): Role { Role::Withdraw }
-
-    public fun role_edit(): Role { Role::Edit }
 
     // === Principals ===
 
