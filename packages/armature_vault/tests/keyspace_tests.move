@@ -1,7 +1,7 @@
 #[test_only]
-module armature_vault::acl_encrypt_tests {
+module armature_vault::keyspace_tests {
     use armature::{dao::{Self, DAO}, governance};
-    use armature_vault::{acl as acl, acl_encrypt};
+    use armature_vault::{acl as acl, keyspace};
     use std::string;
     use sui::test_scenario as ts;
 
@@ -33,14 +33,14 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let allowlist = acl_encrypt::test_create(b"My Vault", sc.ctx());
+        let allowlist = keyspace::test_create(b"My Vault", sc.ctx());
 
-        assert!(acl_encrypt::has_role(&allowlist, acl_encrypt::role_grant(), &dao, ADMIN), 0);
-        assert!(acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, ADMIN), 1);
-        assert!(acl_encrypt::has_role(&allowlist, acl_encrypt::role_write(), &dao, ADMIN), 2);
-        assert!(!acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, USER1), 3);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 0);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, ADMIN), 1);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_write(), &dao, ADMIN), 2);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 3);
 
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -53,28 +53,28 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        assert!(acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, USER1), 0);
-        assert!(!acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, USER2), 1);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER2), 1);
 
-        acl_encrypt::revoke(
+        keyspace::revoke(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        assert!(!acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, USER1), 2);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 2);
 
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -88,24 +88,24 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         ); // abort
 
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -119,17 +119,17 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
-        acl_encrypt::revoke(
+        keyspace::revoke(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         ); // abort
 
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -143,22 +143,22 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
         ts::return_shared(dao);
         sc.end();
 
         // USER2 has no Grant role — should abort
         let mut sc = ts::begin(USER2);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER2),
             &dao,
             sc.ctx(),
         ); // abort
 
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -172,18 +172,18 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
         // ADMIN is the only Grant principal — revoking them must abort
-        acl_encrypt::revoke(
+        keyspace::revoke(
             &mut allowlist,
-            acl_encrypt::role_grant(),
+            keyspace::role_grant(),
             acl::player(ADMIN),
             &dao,
             sc.ctx(),
         ); // abort
 
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -196,37 +196,37 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Team Vault", sc.ctx());
+        let mut allowlist = keyspace::test_create(b"Team Vault", sc.ctx());
 
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER2),
             &dao,
             sc.ctx(),
         );
-        assert!(acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, USER1), 0);
-        assert!(acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, USER2), 1);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER2), 1);
 
-        acl_encrypt::revoke(
+        keyspace::revoke(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        assert!(!acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, USER1), 2);
-        assert!(acl_encrypt::has_role(&allowlist, acl_encrypt::role_read(), &dao, USER2), 3);
-        assert!(acl_encrypt::has_role(&allowlist, acl_encrypt::role_grant(), &dao, ADMIN), 4);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 2);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER2), 3);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 4);
 
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -239,46 +239,46 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
         // Grant/Write changes do not bump version
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_write(),
+            keyspace::role_write(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_grant(),
+            keyspace::role_grant(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        assert!(acl_encrypt::version(&allowlist) == 0, 0);
+        assert!(keyspace::version(&allowlist) == 0, 0);
 
         // Read grant bumps version
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        assert!(acl_encrypt::version(&allowlist) == 1, 1);
+        assert!(keyspace::version(&allowlist) == 1, 1);
 
         // Read revoke bumps version again
-        acl_encrypt::revoke(
+        keyspace::revoke(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        assert!(acl_encrypt::version(&allowlist) == 2, 2);
+        assert!(keyspace::version(&allowlist) == 2, 2);
 
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -288,19 +288,19 @@ module armature_vault::acl_encrypt_tests {
     #[test]
     fun test_publish_entry_tracks_in_allowlist() {
         let mut sc = ts::begin(ADMIN);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
-        let entry = acl_encrypt::test_publish_entry(
+        let entry = keyspace::test_publish_entry(
             &mut allowlist,
             b"QmFakeCid1",
             b"first entry",
             sc.ctx(),
         );
-        assert!(acl_encrypt::entry_epoch(&entry) == 0, 0);
-        assert!(acl_encrypt::version(&allowlist) == 0, 1);
+        assert!(keyspace::entry_epoch(&entry) == 0, 0);
+        assert!(keyspace::version(&allowlist) == 0, 1);
 
-        acl_encrypt::test_destroy_entry(entry);
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy_entry(entry);
+        keyspace::test_destroy(allowlist);
         sc.end();
     }
 
@@ -312,16 +312,16 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
-        let mut entry = acl_encrypt::test_publish_entry(
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(
             &mut allowlist,
             b"QmOriginal",
             b"desc",
             sc.ctx(),
         );
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_write(),
+            keyspace::role_write(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
@@ -331,11 +331,11 @@ module armature_vault::acl_encrypt_tests {
 
         let mut sc = ts::begin(USER1);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        acl_encrypt::edit_entry(&allowlist, &mut entry, b"QmUpdatedByWriter", &dao, sc.ctx());
-        assert!(*acl_encrypt::entry_location(&entry) == b"QmUpdatedByWriter".to_string(), 0);
+        keyspace::edit_entry(&allowlist, &mut entry, b"QmUpdatedByWriter", &dao, sc.ctx());
+        assert!(*keyspace::entry_location(&entry) == b"QmUpdatedByWriter".to_string(), 0);
 
-        acl_encrypt::test_destroy_entry(entry);
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy_entry(entry);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -349,8 +349,8 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
-        let mut entry = acl_encrypt::test_publish_entry(
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(
             &mut allowlist,
             b"QmCid",
             b"desc",
@@ -362,10 +362,10 @@ module armature_vault::acl_encrypt_tests {
         // USER2 has no Write role — should abort
         let mut sc = ts::begin(USER2);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        acl_encrypt::edit_entry(&allowlist, &mut entry, b"QmHacked", &dao, sc.ctx()); // abort
+        keyspace::edit_entry(&allowlist, &mut entry, b"QmHacked", &dao, sc.ctx()); // abort
 
-        acl_encrypt::test_destroy_entry(entry);
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy_entry(entry);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -378,32 +378,32 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
-        let mut entry = acl_encrypt::test_publish_entry(
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(
             &mut allowlist,
             b"QmOld",
             b"desc",
             sc.ctx(),
         );
-        assert!(acl_encrypt::entry_epoch(&entry) == 0, 0);
+        assert!(keyspace::entry_epoch(&entry) == 0, 0);
 
         // Grant Read to USER1 → version bumps to 1
-        acl_encrypt::grant(
+        keyspace::grant(
             &mut allowlist,
-            acl_encrypt::role_read(),
+            keyspace::role_read(),
             acl::player(USER1),
             &dao,
             sc.ctx(),
         );
-        assert!(acl_encrypt::version(&allowlist) == 1, 1);
+        assert!(keyspace::version(&allowlist) == 1, 1);
 
         // ADMIN has Write — update_entry now succeeds (epoch 0 ≠ version 1)
-        acl_encrypt::update_entry(&allowlist, &mut entry, b"QmRotated", &dao, sc.ctx());
-        assert!(*acl_encrypt::entry_location(&entry) == b"QmRotated".to_string(), 2);
-        assert!(acl_encrypt::entry_epoch(&entry) == 1, 3);
+        keyspace::update_entry(&allowlist, &mut entry, b"QmRotated", &dao, sc.ctx());
+        assert!(*keyspace::entry_location(&entry) == b"QmRotated".to_string(), 2);
+        assert!(keyspace::entry_epoch(&entry) == 1, 3);
 
-        acl_encrypt::test_destroy_entry(entry);
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy_entry(entry);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
@@ -417,8 +417,8 @@ module armature_vault::acl_encrypt_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        let mut allowlist = acl_encrypt::test_create(b"Vault", sc.ctx());
-        let mut entry = acl_encrypt::test_publish_entry(
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(
             &mut allowlist,
             b"QmCid",
             b"desc",
@@ -426,10 +426,10 @@ module armature_vault::acl_encrypt_tests {
         );
 
         // epoch == version == 0 → abort
-        acl_encrypt::update_entry(&allowlist, &mut entry, b"QmNew", &dao, sc.ctx());
+        keyspace::update_entry(&allowlist, &mut entry, b"QmNew", &dao, sc.ctx());
 
-        acl_encrypt::test_destroy_entry(entry);
-        acl_encrypt::test_destroy(allowlist);
+        keyspace::test_destroy_entry(entry);
+        keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
