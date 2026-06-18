@@ -4,7 +4,7 @@
 ///   1. Creator calls `create_keyspace` → shared Keyspace.  Creator is seeded
 ///      into all three roles.
 ///   2. A `Grant` holder calls `grant` / `revoke` to manage role membership.
-///   3. Walrus Seal gates decryption-key release via `seal_approve`, which
+///   3. Seal gates decryption-key release via `seal_approve`, which
 ///      requires the `Read` role.
 ///   4. A `Write` holder calls `publish_entry` to upload a new encrypted blob
 ///      pointer, and `update_entry` / `edit_entry` to mutate it.
@@ -67,7 +67,7 @@ module armature_vault::keyspace {
     public struct EncryptedEntry has key, store {
         id: UID,
         keyspace_id: ID,
-        location: String,
+        uri: String,
         description: String,
         created_by: address,
         epoch: u64, // Keyspace version at time of encryption
@@ -95,20 +95,20 @@ module armature_vault::keyspace {
     public struct EntryPublished has copy, drop {
         entry_id: ID,
         keyspace_id: ID,
-        location: String,
+        uri: String,
         created_by: address,
     }
     public struct EntryUpdated has copy, drop {
         entry_id: ID,
         keyspace_id: ID,
-        new_location: String,
+        new_uri: String,
         new_epoch: u64,
         by: address,
     }
     public struct EntryEdited has copy, drop {
         entry_id: ID,
         keyspace_id: ID,
-        new_location: String,
+        new_uri: String,
         by: address,
     }
     public struct EntryDescriptionEdited has copy, drop {
@@ -298,7 +298,7 @@ module armature_vault::keyspace {
     /// Publish a new encrypted entry.  Requires the `Write` role.
     public fun publish_entry(
         keyspace: &mut Keyspace,
-        location: vector<u8>,
+        uri: vector<u8>,
         description: vector<u8>,
         dao: &DAO,
         ctx: &mut TxContext,
@@ -307,62 +307,62 @@ module armature_vault::keyspace {
         assert!(satisfies_role(keyspace, Role::Write, dao, creator), ENotAllowed);
         let uid = object::new(ctx);
         let entry_id = uid.to_inner();
-        let location_str = location.to_string();
+        let uri_str = uri.to_string();
         keyspace.entries.push_back(entry_id);
         event::emit(EntryPublished {
             entry_id,
             keyspace_id: keyspace.id.to_inner(),
-            location: location_str,
+            uri: uri_str,
             created_by: creator,
         });
         transfer::share_object(EncryptedEntry {
             id: uid,
             keyspace_id: keyspace.id.to_inner(),
-            location: location_str,
+            uri: uri_str,
             description: description.to_string(),
             created_by: creator,
             epoch: keyspace.version,
         });
     }
 
-    /// Re-encrypt an entry with a new location (key rotation).  Requires `Write`.
+    /// Re-encrypt an entry with a new URI (key rotation).  Requires `Write`.
     /// Entry epoch must be stale (not equal to current version).
     public fun update_entry(
         keyspace: &Keyspace,
         entry: &mut EncryptedEntry,
-        new_location: vector<u8>,
+        new_uri: vector<u8>,
         dao: &DAO,
         ctx: &TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Write, dao, ctx.sender()), ENotAllowed);
         assert!(entry.keyspace_id == keyspace.id.to_inner(), EWrongKeyspace);
         assert!(entry.epoch != keyspace.version, EAlreadyCurrentEpoch);
-        entry.location = new_location.to_string();
+        entry.uri = new_uri.to_string();
         entry.epoch = keyspace.version;
         event::emit(EntryUpdated {
             entry_id: entry.id.to_inner(),
             keyspace_id: keyspace.id.to_inner(),
-            new_location: entry.location,
+            new_uri: entry.uri,
             new_epoch: entry.epoch,
             by: ctx.sender(),
         });
     }
 
-    /// Update an entry's location without key rotation (same epoch).  Requires `Write`.
+    /// Update an entry's URI without key rotation (same epoch).  Requires `Write`.
     public fun edit_entry(
         keyspace: &Keyspace,
         entry: &mut EncryptedEntry,
-        new_location: vector<u8>,
+        new_uri: vector<u8>,
         dao: &DAO,
         ctx: &TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Write, dao, ctx.sender()), ENotAllowed);
         assert!(entry.keyspace_id == keyspace.id.to_inner(), EWrongKeyspace);
-        entry.location = new_location.to_string();
+        entry.uri = new_uri.to_string();
         event::emit(EntryEdited {
             entry_id: entry.id.to_inner(),
             keyspace_id: keyspace.id.to_inner(),
-            new_location: entry.location,
+            new_uri: entry.uri,
             by: ctx.sender(),
         });
     }
@@ -436,7 +436,7 @@ module armature_vault::keyspace {
         satisfies_role(keyspace, role, dao, sender)
     }
 
-    public fun entry_location(entry: &EncryptedEntry): &String { &entry.location }
+    public fun entry_uri(entry: &EncryptedEntry): &String { &entry.uri }
 
     public fun entry_description(entry: &EncryptedEntry): &String { &entry.description }
 
@@ -472,19 +472,19 @@ module armature_vault::keyspace {
     #[test_only]
     public fun test_publish_entry(
         keyspace: &mut Keyspace,
-        location: vector<u8>,
+        uri: vector<u8>,
         description: vector<u8>,
         ctx: &mut TxContext,
     ): EncryptedEntry {
         let creator = ctx.sender();
         let uid = object::new(ctx);
         let entry_id = uid.to_inner();
-        let location_str = location.to_string();
+        let uri_str = uri.to_string();
         keyspace.entries.push_back(entry_id);
         EncryptedEntry {
             id: uid,
             keyspace_id: keyspace.id.to_inner(),
-            location: location_str,
+            uri: uri_str,
             description: description.to_string(),
             created_by: creator,
             epoch: keyspace.version,
@@ -496,7 +496,7 @@ module armature_vault::keyspace {
         let EncryptedEntry {
             id,
             keyspace_id: _,
-            location: _,
+            uri: _,
             description: _,
             created_by: _,
             epoch: _,

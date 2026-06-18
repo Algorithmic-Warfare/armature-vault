@@ -332,7 +332,7 @@ module armature_vault::keyspace_tests {
         let mut sc = ts::begin(USER1);
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
         keyspace::edit_entry(&allowlist, &mut entry, b"QmUpdatedByWriter", &dao, sc.ctx());
-        assert!(*keyspace::entry_location(&entry) == b"QmUpdatedByWriter".to_string(), 0);
+        assert!(*keyspace::entry_uri(&entry) == b"QmUpdatedByWriter".to_string(), 0);
 
         keyspace::test_destroy_entry(entry);
         keyspace::test_destroy(allowlist);
@@ -399,7 +399,7 @@ module armature_vault::keyspace_tests {
 
         // ADMIN has Write — update_entry now succeeds (epoch 0 ≠ version 1)
         keyspace::update_entry(&allowlist, &mut entry, b"QmRotated", &dao, sc.ctx());
-        assert!(*keyspace::entry_location(&entry) == b"QmRotated".to_string(), 2);
+        assert!(*keyspace::entry_uri(&entry) == b"QmRotated".to_string(), 2);
         assert!(keyspace::entry_epoch(&entry) == 1, 3);
 
         keyspace::test_destroy_entry(entry);
