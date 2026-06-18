@@ -12,8 +12,10 @@
 #[test_only]
 module armature_vault::dao_receipt_vault_tests {
     use armature::{dao::{Self, DAO}, governance};
-    use armature_vault::acl::{Self as acl, Principal};
-    use armature_vault::dao_receipt_vault::{Self as vault, DaoReceiptVault, Role};
+    use armature_vault::{
+        acl::{Self as acl, Principal},
+        dao_receipt_vault::{Self as vault, DaoReceiptVault, Role}
+    };
     use multicoin::multicoin::{Self, Collection, CollectionCap, Balance};
     use std::string;
     use sui::{test_scenario as ts, vec_map};
@@ -78,11 +80,7 @@ module armature_vault::dao_receipt_vault_tests {
         wolf_members: ID,
         awar_officers: ID,
     ): vec_map::VecMap<Role, vector<Principal>> {
-        let use_perms = vector[
-            acl::ou(awar_members),
-            acl::ou(wolf_members),
-            acl::player(PROTO),
-        ];
+        let use_perms = vector[acl::ou(awar_members), acl::ou(wolf_members), acl::player(PROTO)];
         let mut acl_map = vec_map::empty<Role, vector<Principal>>();
         acl_map.insert(vault::role_deposit(), use_perms);
         acl_map.insert(vault::role_withdraw(), use_perms);

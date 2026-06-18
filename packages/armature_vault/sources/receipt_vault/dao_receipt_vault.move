@@ -55,7 +55,9 @@ module armature_vault::dao_receipt_vault {
     }
 
     public fun role_deposit(): Role { Role::Deposit }
+
     public fun role_withdraw(): Role { Role::Withdraw }
+
     public fun role_edit(): Role { Role::Edit }
 
     // === Errors ===
