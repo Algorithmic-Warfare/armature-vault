@@ -23,12 +23,12 @@ version = "0.0.1"
 # Until then, build/test against `-e testnet_wip` (a shared env both this package
 # and the framework declare).
 [dependencies]
-armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "main" }
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "4bd6fbaea43fab3967b0c1627b1bea679abc78c3" }
 world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "8e2e97b50fd6bbf605284bcdaae54a33a5475e89" }
 # override = true: armature (framework) transitively pins multicoin at 330d339;
 # we intentionally unify on c7a97f2 (same as warehouse-receipts / armature-trading
 # / triexbook) so `multicoin::Balance` receipts are the same on-chain type.
-multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin.git", subdir = "packages/multicoin", rev = "c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6", override = true }
+multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6", override = true }
 # F1 (#3): warehouse_receipts hosts `VaultConfig` which custodies the
 # Collection<-> StorageUnit binding. We accept `&VaultConfig` at
 # initialize_dao_vault so the SSU <-> collection_id binding is verified on-chain
@@ -51,7 +51,4 @@ multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin.git", subd
 warehouse_receipts = { git = "https://github.com/loash-industries/warehouse-receipts.git", subdir = "packages/contracts", rev = "8a2f80e857d516187c99b28efa935ff7ce42af03" }
 
 [environments]
-# Publish target (blocked until the framework declares this env — see above).
-testnet_stillness = "0x0"
-# Shared build/test env (the framework declares testnet_wip).
-testnet_wip = "0x0"
+testnet_wip = "4c78adac"
