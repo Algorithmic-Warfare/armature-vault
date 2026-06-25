@@ -10,45 +10,25 @@ version = "0.0.1"
 # in-game tribe_id. Standalone, optional package: it lives outside the
 # transitional armature_world_bridge because the vault outlives the bridge.
 #
-# Target environment: testnet_stillness — armature_vault, the framework, world,
-# and warehouse-receipts/triexbook all resolve multicoin to the same build
-# (c7a97f2), so the `multicoin::Balance` receipt type is identical across the
-# deposit boundary, and world to 8e2e97b so StorageUnit/Character match.
-#
-# BLOCKER (same as armature-trading): armature_framework on `main` declares only
-# `testnet_wip` (plus the implicit testnet/mainnet), NOT `testnet_stillness`.
-# Move's automated address management requires every transitive dep to declare the
-# build env, so `sui move build -e testnet_stillness` fails to resolve `armature`
-# until the framework adds a `testnet_stillness` entry to its [environments].
-# Until then, build/test against `-e testnet_wip` (a shared env both this package
-# and the framework declare).
+# Target environment: testnet_stillness — all deps resolve multicoin to e384bbc
+# (0x99a4c039...) and world to rev 32300a2 (0x8b8a46ed...).
 [dependencies]
-armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "4bd6fbaea43fab3967b0c1627b1bea679abc78c3" }
-world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "8e2e97b50fd6bbf605284bcdaae54a33a5475e89" }
-# override = true: armature (framework) transitively pins multicoin at 330d339;
-# we intentionally unify on c7a97f2 (same as warehouse-receipts / armature-trading
-# / triexbook) so `multicoin::Balance` receipts are the same on-chain type.
-multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6", override = true }
-# F1 (#3): warehouse_receipts hosts `VaultConfig` which custodies the
-# Collection<-> StorageUnit binding. We accept `&VaultConfig` at
-# initialize_dao_vault so the SSU <-> collection_id binding is verified on-chain
-# rather than trusted from a caller-supplied raw ID.
-#
-# Pinned to 8a2f80e (the most recent rev where the upstream package's sources
-# and tests are in sync — HEAD has a source-only `to_ssu_owner: bool` param
-# change that wasn't propagated to receipt_tests.move, which breaks
-# `sui move test` because Sui compiles transitive dep test code in test mode).
-#
-# IMPORTANT: warehouse_receipts upstream declares `multicoin = main` (floating)
-# and pins world to a different rev than we want. Type-identity with the rest
-# of the on-chain build is enforced by our `override = true` on multicoin
-# AND our top-level pins on world (the resolution algorithm picks the
-# top-level pin when overriding, regardless of what the upstream dep declares).
-# If we ever drop the multicoin override or our world pin, we will silently
-# pick up whatever upstream resolved — that would break `multicoin::Balance`
-# type identity at the deposit boundary. Bump warehouse_receipts here only
-# alongside the multicoin/world pins above.
-warehouse_receipts = { git = "https://github.com/loash-industries/warehouse-receipts.git", subdir = "packages/contracts", rev = "8a2f80e857d516187c99b28efa935ff7ce42af03" }
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "a8c51d365d1db5967ea4cb90761f04eb93c700ca", override = true }
+world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "32300a2ab6dc95c25ff42e30b89990492ad4dcaa", override = true }
+# override = true: unify all deps on the same multicoin build (e384bbc,
+# 0x99a4c039...) so `multicoin::Balance` receipts are the same on-chain type
+# across the deposit boundary.
+multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "e384bbc8670b850cfb82a5e3b9fa46798b0ff6dc", override = true }
+# override = true: warehouse_receipts is pinned to a specific rev that aligns
+# world and multicoin with the rest of this build. Drop the override only if
+# upstream revs all resolve to the same on-chain addresses.
+warehouse_receipts = { git = "https://github.com/loash-industries/warehouse-receipts.git", subdir = "packages/contracts", rev = "e872aac7a72dbf64e47f123d180ea85ec5d84552", override = true }
 
 [environments]
 testnet_wip = "4c78adac"
+testnet_stillness = "4c78adac"
+
+[dep-replacements.testnet_wip]
+multicoin = { use-environment = "testnet_stillness", published-at = "0x4a28acb02c16d4fbcead6b7b2a450fb42c2e04d77dd7e4533a65d6467f1907ac", original-id = "0x4a28acb02c16d4fbcead6b7b2a450fb42c2e04d77dd7e4533a65d6467f1907ac" }
+warehouse_receipts = { use-environment = "testnet_stillness", published-at = "0xc7c9d06e5825ba99d6ad49cdf2c62c4574daa82cba8675b354b94bca56cd32cc", original-id = "0xc7c9d06e5825ba99d6ad49cdf2c62c4574daa82cba8675b354b94bca56cd32cc" }
+world  = { use-environment = "testnet_stillness", published-at = "0xd2fd1224f881e7a705dbc211888af11655c315f2ee0f03fe680fc3176e6e4780", original-id = "0x28b497559d65ab320d9da4613bf2498d5946b2c0ae3597ccfda3072ce127448c" }
