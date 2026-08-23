@@ -16,11 +16,32 @@
 ///            kinds, and part of equality — two principals match only if kind,
 ///            id, and data all match.
 ///
-/// `satisfies` fails closed on unknown kinds, so a principal written by a later
-/// package version can never authorize under logic that predates it.
+/// ## `data` layout convention
+///
+/// `data` is either **empty** — no payload, which is how every kind ships
+/// today — or **`[payload_version, ...bcs]`**: a single leading version byte
+/// followed by that kind's BCS-encoded payload.  Use `principal_with_payload`
+/// to build one and `has_payload` / `payload_version` / `payload` to read it,
+/// rather than indexing `data` directly.
+///
+/// The version space is **per kind**: kind 7's payload v1 has nothing to do
+/// with kind 9's payload v1.  Reserving the byte now costs nothing (no kind
+/// uses `data` yet) and means a kind can later change its payload shape
+/// without the ambiguity of guessing at raw bytes — the same
+/// read-all-known-versions, fail-closed-on-unknown discipline the ACL store
+/// uses for its own schema.
+///
+/// `satisfies` fails closed on unknown kinds, and a kind that expects a
+/// payload should likewise deny when the payload is absent or carries a
+/// version it does not understand.
 module armature_vault::acl_v2 {
     use armature::dao::DAO;
     use armature_vault::acl::{Self as acl, Principal};
+
+    // === Errors ===
+
+    /// A payload accessor was called on a principal whose `data` is empty.
+    const ENoPayload: u64 = 0;
 
     // === Kinds ===
 
@@ -62,7 +83,24 @@ module armature_vault::acl_v2 {
     /// Construct an arbitrary-kind principal.  Escape hatch for kinds added
     /// after this package version; `satisfies` denies kinds it cannot evaluate,
     /// so an unknown kind grants nothing until the logic ships.
+    ///
+    /// `data` must be empty or follow the `[payload_version, ...bcs]`
+    /// convention — prefer `principal_with_payload`, which enforces it.
     public fun principal(kind: u8, id: address, data: vector<u8>): PrincipalV2 {
+        PrincipalV2 { kind, id, data }
+    }
+
+    /// Construct a principal carrying a versioned payload: `data` becomes
+    /// `payload_version` followed by `payload`.  See the `data` layout
+    /// convention in the module doc.
+    public fun principal_with_payload(
+        kind: u8,
+        id: address,
+        payload_version: u8,
+        payload: vector<u8>,
+    ): PrincipalV2 {
+        let mut data = vector[payload_version];
+        data.append(payload);
         PrincipalV2 { kind, id, data }
     }
 
@@ -96,5 +134,35 @@ module armature_vault::acl_v2 {
 
     public fun kind(principal: &PrincipalV2): u8 { principal.kind }
     public fun id(principal: &PrincipalV2): address { principal.id }
+
+    /// The raw `data` bytes, version byte included.  Prefer the payload
+    /// accessors below unless you are deliberately reading the raw encoding.
     public fun data(principal: &PrincipalV2): &vector<u8> { &principal.data }
+
+    /// True when this principal carries a payload.  A kind that expects one
+    /// should check this and deny when it is false.
+    public fun has_payload(principal: &PrincipalV2): bool {
+        !principal.data.is_empty()
+    }
+
+    /// The payload's leading version byte.  Aborts if there is no payload —
+    /// guard with `has_payload`.
+    public fun payload_version(principal: &PrincipalV2): u8 {
+        assert!(!principal.data.is_empty(), ENoPayload);
+        principal.data[0]
+    }
+
+    /// The payload bytes after the version byte (empty when the payload is
+    /// just a version tag).  Aborts if there is no payload.
+    public fun payload(principal: &PrincipalV2): vector<u8> {
+        assert!(!principal.data.is_empty(), ENoPayload);
+        let n = principal.data.length();
+        let mut out = vector[];
+        let mut i = 1;
+        while (i < n) {
+            out.push_back(principal.data[i]);
+            i = i + 1;
+        };
+        out
+    }
 }
