@@ -1,8 +1,9 @@
 /// ACL-based encryption access control — ported from loash-industries/keyspace.
 ///
 /// Flow:
-///   1. Creator calls `create_keyspace` → shared Keyspace.  Creator is seeded
-///      into all three roles.
+///   1. Creator calls `create_keyspace` (personal) or `create_keyspace_for_dao`
+///      (org-linked) → shared Keyspace.  Creator is seeded into all three roles
+///      for personal keyspaces; org keyspaces accept explicit role principal lists.
 ///   2. A `Grant` holder calls `grant` / `revoke` to manage role membership.
 ///   3. Seal gates decryption-key release via `seal_approve`, which
 ///      requires the `Read` role.
@@ -19,10 +20,15 @@
 /// Access control uses the shared `Principal` model from `armature_vault::acl`:
 /// each list member is either a bare `Player { addr }` (single wallet) or an
 /// `Ou { dao_id }` (any board member of that DAO), checked via `acl::satisfies`.
+///
+/// DAO-linked keyspaces (`create_keyspace_for_dao`) emit `registrant_dao_id` in
+/// `KeyspaceCreated` so an indexer can answer "all keyspaces for DAO X" without
+/// scanning every Grant-role membership list.  The `&DAO` witness + governance-
+/// member check makes that association unspoofable.
 module armature_vault::keyspace {
     use armature::dao::DAO;
     use armature_vault::acl::{Self as acl, Principal};
-    use std::string::String;
+    use std::{option::{Self, Option}, string::String};
     use sui::{event, vec_map::{Self, VecMap}};
 
     // ── Roles ─────────────────────────────────────────────────────────────────
@@ -48,6 +54,7 @@ module armature_vault::keyspace {
     const ELastGrantor: u64 = 5;
     const ELastWriter: u64 = 6;
     const ELastReader: u64 = 7;
+    const EEmptyGrantPrincipals: u64 = 8;
 
     // ── Objects ──────────────────────────────────────────────────────────────
 
@@ -79,6 +86,11 @@ module armature_vault::keyspace {
         id: ID,
         creator: Principal,
         name: String,
+        /// None for personal keyspaces; Some(dao_id) for org-linked keyspaces
+        /// created via `create_keyspace_for_dao`.  The DAO ID is derived from
+        /// the on-chain `&DAO` witness — not supplied by the caller — so it
+        /// cannot be spoofed.
+        registrant_dao_id: Option<ID>,
     }
     public struct AccessGranted has copy, drop {
         keyspace_id: ID,
@@ -118,6 +130,141 @@ module armature_vault::keyspace {
         by: address,
     }
 
+    // ── Indexing reference ───────────────────────────────────────────────────
+    //
+    // All state changes in this module are fully expressed through events.
+    // An indexer can reconstruct complete live state by replaying the event log
+    // in checkpoint order.  No object reads are required.
+    //
+    // ── Events ───────────────────────────────────────────────────────────────
+    //
+    // KeyspaceCreated
+    //   Emitted by: create_keyspace, create_keyspace_for_dao
+    //   Fields:
+    //     id                — Keyspace object ID (primary key)
+    //     creator           — Principal who created it (Player or Ou)
+    //     name              — human-readable label
+    //     registrant_dao_id — Option<ID>:
+    //                           None → personal keyspace (create_keyspace)
+    //                           Some → DAO-linked (create_keyspace_for_dao);
+    //                                  derived from on-chain &DAO witness,
+    //                                  cannot be spoofed by the caller
+    //   Primary index queries:
+    //     • All keyspaces for DAO X:  WHERE registrant_dao_id = Some(X)
+    //     • Keyspace by ID:           WHERE id = Y
+    //
+    // AccessGranted
+    //   Emitted by: create_keyspace (×3 for Grant/Read/Write),
+    //               create_keyspace_for_dao (once per seeded principal × role),
+    //               grant, multi_grant
+    //   Fields:
+    //     keyspace_id — parent Keyspace
+    //     role        — Grant | Read | Write
+    //     principal   — Player { addr } or Ou { dao_id }
+    //     by          — address of the caller who performed the grant
+    //   Primary index queries:
+    //     • Current role-R members of keyspace K:
+    //         AccessGranted(keyspace_id=K, role=R) − AccessRevoked(keyspace_id=K, role=R)
+    //     • All keyspaces where address A holds Read:
+    //         WHERE role=Read AND principal=Player{addr=A}
+    //     • All keyspaces where DAO D holds any role:
+    //         WHERE principal=Ou{dao_id=D}
+    //   Note: only emitted on real state changes — add_principal is a no-op
+    //   (returns false) for duplicates, so no spurious events are produced.
+    //
+    // AccessRevoked
+    //   Emitted by: revoke, multi_revoke
+    //   Fields:
+    //     keyspace_id — parent Keyspace
+    //     role        — Grant | Read | Write
+    //     principal   — the principal being removed
+    //     by          — caller address
+    //   Note: only emitted on real state changes.  A Read revocation always
+    //   accompanies a version increment (see version reconstruction below).
+    //
+    // EntryPublished
+    //   Emitted by: publish_entry
+    //   Fields:
+    //     entry_id    — EncryptedEntry object ID (primary key)
+    //     keyspace_id — parent Keyspace
+    //     uri         — initial off-chain blob URI (e.g. Walrus/IPFS CID)
+    //     created_by  — address of the Write-role caller
+    //   Primary index queries:
+    //     • All entries for keyspace K:  WHERE keyspace_id = K
+    //     • Current URI for entry E:     latest EntryUpdated or EntryEdited
+    //                                    for that entry_id, falling back to
+    //                                    this event's uri if neither exists
+    //
+    // EntryUpdated
+    //   Emitted by: update_entry (key rotation — blob re-encrypted after
+    //               Read membership change)
+    //   Fields:
+    //     entry_id    — EncryptedEntry being updated
+    //     keyspace_id — parent Keyspace
+    //     new_uri     — URI of the re-encrypted blob
+    //     new_epoch   — keyspace version at time of re-encryption
+    //     by          — caller address
+    //   Note: only emitted when entry.epoch != keyspace.version.  new_epoch
+    //   equals keyspace.version after the call.  Cross-check new_epoch against
+    //   the reconstructed version counter to detect out-of-order indexing.
+    //
+    // EntryEdited
+    //   Emitted by: edit_entry (same-epoch URI change, no key rotation)
+    //   Fields:
+    //     entry_id    — EncryptedEntry being edited
+    //     keyspace_id — parent Keyspace
+    //     new_uri     — updated URI (content changed, encryption key unchanged)
+    //     by          — caller address
+    //   Note: epoch is NOT incremented.  Distinct from EntryUpdated so the
+    //   indexer can tell content changes from key-rotation changes.
+    //
+    // EntryDescriptionEdited
+    //   Emitted by: edit_description
+    //   Fields:
+    //     entry_id        — EncryptedEntry being edited
+    //     keyspace_id     — parent Keyspace
+    //     new_description — updated label
+    //     by              — caller address
+    //
+    // ── State reconstruction ─────────────────────────────────────────────────
+    //
+    // Keyspace row
+    //   KeyspaceCreated → INSERT (id, name, registrant_dao_id, version=0)
+    //
+    // ACL (per keyspace, per role)
+    //   AccessGranted  → UPSERT principal into role membership set
+    //   AccessRevoked  → REMOVE principal from role membership set
+    //
+    // Version counter (re-encryption epoch — not emitted standalone)
+    //   AccessGranted(role=Read) → version += 1
+    //   AccessRevoked(role=Read) → version += 1
+    //   EntryUpdated.new_epoch reflects the keyspace version at rotation time
+    //   and can be used to cross-check the reconstructed counter.
+    //
+    // Entry row (per EncryptedEntry)
+    //   EntryPublished         → INSERT (entry_id, keyspace_id, uri, created_by,
+    //                                    epoch=version_at_publish)
+    //   EntryUpdated           → UPDATE uri=new_uri, epoch=new_epoch
+    //   EntryEdited            → UPDATE uri=new_uri          (epoch unchanged)
+    //   EntryDescriptionEdited → UPDATE description=new_description
+    //
+    // ── Suggested indexer endpoints ──────────────────────────────────────────
+    //
+    //   GET /v1/dao/:dao_id/keyspaces
+    //     → KeyspaceCreated WHERE registrant_dao_id = dao_id
+    //
+    //   GET /v1/keyspace/:keyspace_id/acl
+    //     → current principals per role
+    //       (AccessGranted minus AccessRevoked, grouped by role)
+    //
+    //   GET /v1/keyspace/:keyspace_id/entries
+    //     → EntryPublished + latest EntryUpdated / EntryEdited /
+    //       EntryDescriptionEdited per entry_id
+    //
+    //   GET /v1/address/:addr/keyspaces?role=Read
+    //     → AccessGranted WHERE role=Read AND principal=Player{addr}
+    //       minus AccessRevoked for the same (addr, keyspace_id, role) tuples
+
     // ── Entry functions ──────────────────────────────────────────────────────
 
     /// Create a new Keyspace (shared).  Creator is seeded into all three roles.
@@ -131,7 +278,12 @@ module armature_vault::keyspace {
         acl_map.insert(Role::Read, vector[creator]);
         acl_map.insert(Role::Write, vector[creator]);
 
-        event::emit(KeyspaceCreated { id: keyspace_id, creator, name: name.to_string() });
+        event::emit(KeyspaceCreated {
+            id: keyspace_id,
+            creator,
+            name: name.to_string(),
+            registrant_dao_id: option::none(),
+        });
         let sender = ctx.sender();
         event::emit(AccessGranted {
             keyspace_id,
@@ -151,6 +303,82 @@ module armature_vault::keyspace {
             principal: creator,
             by: sender,
         });
+
+        transfer::share_object(Keyspace {
+            id: uid,
+            acl: acl_map,
+            name: name.to_string(),
+            version: 0,
+            entries: vector::empty(),
+        });
+    }
+
+    /// Create a new Keyspace on behalf of a DAO (shared).
+    ///
+    /// The caller must be a governance member of `dao`; the DAO's on-chain ID
+    /// is recorded in `KeyspaceCreated.registrant_dao_id` so an indexer can
+    /// answer "all keyspaces for DAO X" without replaying full Grant-role lists.
+    /// Because `registrant_dao_id` is derived from the `&DAO` witness (not from
+    /// caller input), it cannot be spoofed.
+    ///
+    /// `grant_principals` must be non-empty — it becomes the Grant role, which
+    /// is the only admin path into the keyspace.  `read_principals` and
+    /// `write_principals` may be empty and populated later via `grant`.
+    ///
+    /// This mirrors the `initialize_dao_vault` pattern in `dao_receipt_vault`:
+    /// callers can express "officers hold Grant, members hold Read/Write" in a
+    /// single call by passing different principal lists per role.
+    public fun create_keyspace_for_dao(
+        name: vector<u8>,
+        dao: &DAO,
+        grant_principals: vector<Principal>,
+        read_principals: vector<Principal>,
+        write_principals: vector<Principal>,
+        ctx: &mut TxContext,
+    ) {
+        assert!(dao.is_governance_member(ctx.sender()), ENotAllowed);
+        assert!(!grant_principals.is_empty(), EEmptyGrantPrincipals);
+
+        let uid = object::new(ctx);
+        let keyspace_id = uid.to_inner();
+        let registrant_dao_id = dao.id();
+        let creator = acl::ou(registrant_dao_id);
+        let sender = ctx.sender();
+
+        let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        acl_map.insert(Role::Grant, grant_principals);
+        if (!read_principals.is_empty()) {
+            acl_map.insert(Role::Read, read_principals);
+        };
+        if (!write_principals.is_empty()) {
+            acl_map.insert(Role::Write, write_principals);
+        };
+
+        event::emit(KeyspaceCreated {
+            id: keyspace_id,
+            creator,
+            name: name.to_string(),
+            registrant_dao_id: option::some(registrant_dao_id),
+        });
+
+        // Emit AccessGranted for every seeded principal so event-sourced ACL
+        // reconstructions don't need to special-case the init path.
+        let mut role_idx = 0;
+        while (role_idx < acl_map.length()) {
+            let (role, principals) = acl_map.get_entry_by_idx(role_idx);
+            let n = principals.length();
+            let mut i = 0;
+            while (i < n) {
+                event::emit(AccessGranted {
+                    keyspace_id,
+                    role: *role,
+                    principal: principals[i],
+                    by: sender,
+                });
+                i = i + 1;
+            };
+            role_idx = role_idx + 1;
+        };
 
         transfer::share_object(Keyspace {
             id: uid,
@@ -444,7 +672,7 @@ module armature_vault::keyspace {
 
     // ── Test-only helpers ─────────────────────────────────────────────────────
 
-    /// Create an Keyspace for testing.  Creator is seeded into all three roles.
+    /// Create a Keyspace for testing.  Creator is seeded into all three roles.
     #[test_only]
     public fun test_create(name: vector<u8>, ctx: &mut TxContext): Keyspace {
         let uid = object::new(ctx);
@@ -455,6 +683,33 @@ module armature_vault::keyspace {
         acl_map.insert(Role::Write, vector[creator]);
         Keyspace {
             id: uid,
+            acl: acl_map,
+            name: name.to_string(),
+            version: 0,
+            entries: vector::empty(),
+        }
+    }
+
+    /// Create a DAO-linked Keyspace for testing, bypassing the `&DAO` witness.
+    /// `dao_id` is the sentinel DAO ID to embed in the ACL maps.
+    #[test_only]
+    public fun test_create_for_dao(
+        name: vector<u8>,
+        grant_principals: vector<Principal>,
+        read_principals: vector<Principal>,
+        write_principals: vector<Principal>,
+        ctx: &mut TxContext,
+    ): Keyspace {
+        let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        acl_map.insert(Role::Grant, grant_principals);
+        if (!read_principals.is_empty()) {
+            acl_map.insert(Role::Read, read_principals);
+        };
+        if (!write_principals.is_empty()) {
+            acl_map.insert(Role::Write, write_principals);
+        };
+        Keyspace {
+            id: object::new(ctx),
             acl: acl_map,
             name: name.to_string(),
             version: 0,

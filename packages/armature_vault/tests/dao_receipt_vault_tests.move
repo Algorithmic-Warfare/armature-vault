@@ -41,7 +41,6 @@ module armature_vault::dao_receipt_vault_tests {
         dao::create(
             &init,
             string::utf8(b"OU"),
-            string::utf8(b"ou"),
             string::utf8(b"https://example.com/i.png"),
             scenario.ctx(),
         )
@@ -775,7 +774,7 @@ module armature_vault::dao_receipt_vault_tests {
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
             // M2: tell the vault which registry slot it lives under.
-            vault::set_registry_key_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
             // Lookup under the old key works.
             assert!(vault::lookup(&reg, ssu_id, officers).is_some(), 0);
             assert!(vault::lookup(&reg, ssu_id, new_officers).is_none(), 1);
@@ -881,11 +880,13 @@ module armature_vault::dao_receipt_vault_tests {
     // --- I1: initialize_dao_vault emits AclGrantedEvent for the seeded Edit principal
 
     // I1 is verified by inspection of the source — initialize_dao_vault now emits
-    // AclGrantedEvent { role: Edit, principal: Ou{editor_dao_id} } alongside
-    // VaultInitializedEvent. The initialize path requires a real world::StorageUnit
-    // which the existing test harness intentionally bypasses (see new_for_testing's
-    // doc-comment), so this fix is not exercisable as a Move #[test] here. The
-    // follow-up issue tracking M1/M2/F1 should add an SSU-bootstrap helper.
+    // AclGrantedEvent for every principal in deposit_principals, withdraw_principals,
+    // and edit_principals alongside VaultInitializedEvent. The initialize path
+    // requires a real world::StorageUnit which the existing test harness intentionally
+    // bypasses (see new_for_testing's doc-comment), so this fix is not exercisable
+    // as a Move #[test] here. The follow-up issue tracking M1/M2/F1 should add an
+    // SSU-bootstrap helper. An EEmptyEditPrincipals guard at the top of
+    // initialize_dao_vault ensures at least one Edit principal is always provided.
 
     // =============================================================================
     // === M2: vault teardown + DOF-emptiness tracking (#5)
@@ -920,7 +921,7 @@ module armature_vault::dao_receipt_vault_tests {
             let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registry_key_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -978,7 +979,7 @@ module armature_vault::dao_receipt_vault_tests {
             let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registry_key_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1039,7 +1040,7 @@ module armature_vault::dao_receipt_vault_tests {
             let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_a_id);
-            vault::set_registry_key_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1109,7 +1110,7 @@ module armature_vault::dao_receipt_vault_tests {
             let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registry_key_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1165,7 +1166,7 @@ module armature_vault::dao_receipt_vault_tests {
             let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registry_key_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1209,7 +1210,7 @@ module armature_vault::dao_receipt_vault_tests {
             let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registry_key_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1284,7 +1285,7 @@ module armature_vault::dao_receipt_vault_tests {
             let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registry_key_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
