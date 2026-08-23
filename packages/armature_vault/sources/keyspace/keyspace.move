@@ -29,13 +29,9 @@ module armature_vault::keyspace {
     use armature::dao::DAO;
     use armature_vault::acl::{Self as acl, Principal};
     use armature_vault::acl_v2::{Self as acl_v2, PrincipalV2};
+    use armature_vault::principal_acl;
     use std::{option::{Self, Option}, string::String};
-    use sui::{
-        dynamic_field as df,
-        event,
-        vec_map::{Self, VecMap},
-        versioned::{Self, Versioned},
-    };
+    use sui::{event, vec_map::{Self, VecMap}};
 
     // ── Roles ─────────────────────────────────────────────────────────────────
 
@@ -546,32 +542,17 @@ module armature_vault::keyspace {
     // (starting with `machine`) possible: adding one is a constant plus a
     // `satisfies_v2` arm, never a layout change.
     //
-    // It lives in a dynamic field rather than a new `Keyspace` field only
-    // because struct layouts are frozen by Sui's upgrade compatibility, exactly
-    // as enum variants are.  Semantically this is the keyspace's ACL, v2: the
-    // two stores are read together everywhere (`satisfies_role`), role
-    // invariants span both, and `Read` changes bump `version` identically.
+    // The store lives in a dynamic field on `Keyspace.id` rather than a new
+    // struct field only because struct layouts are frozen by Sui's upgrade
+    // compatibility, exactly as enum variants are.  Semantically this is the
+    // keyspace's ACL, v2: the two stores are read together everywhere
+    // (`satisfies_role`), role invariants span both (`role_count`), and `Read`
+    // changes bump `version` identically.  The storage itself — including its
+    // own schema-upgrade path — lives in `principal_acl`, shared with
+    // `dao_receipt_vault`.
     //
-    // Upgrade-in-place recipe (the template for future extensions): the DF
-    // value is a `sui::versioned::Versioned` wrapping the payload.  To evolve:
-    //   1. add `PrincipalAclV2 { .. } has store`, bump PRINCIPAL_ACL_VERSION,
-    //   2. migrate lazily on first mutation inside `principal_acl_mut`:
-    //      `versioned::remove_value_for_upgrade` → build V2 → `versioned::upgrade`,
-    //   3. teach the read path (`principals_v2`) to answer for both versions
-    //      until migration saturates.
-    // Read paths tolerate every historical version; only mutations migrate.
-    // Versions newer than this code answer "no access" — fail closed.
-
-    const PRINCIPAL_ACL_VERSION: u64 = 1;
-
-    /// Dynamic-field key under `Keyspace.id` for the v2 principal ACL.
-    public struct PrincipalAclKey has copy, drop, store {}
-
-    /// Version 1 payload: the same role → principals shape as `Keyspace.acl`,
-    /// over the upgradeable `PrincipalV2`.
-    public struct PrincipalAclV1 has store {
-        acl: VecMap<Role, vector<PrincipalV2>>,
-    }
+    // Existing v1 principals can be lifted into the v2 store with
+    // `migrate_acl_to_v2`; until then both are simply read together.
 
     /// v2 twin of `AccessGranted`.  Carries the whole principal, so one event
     /// type serves every present and future kind — indexers derive
@@ -591,6 +572,17 @@ module armature_vault::keyspace {
         by: address,
     }
 
+    /// Emitted once per role by `migrate_acl_to_v2`, carrying the principals
+    /// lifted out of the v1 list.  Access is unchanged — indexers should
+    /// *replace* that keyspace/role's v1 rows with these v2 rows rather than
+    /// treating it as a revoke followed by a grant.
+    public struct AclMigratedV2 has copy, drop {
+        keyspace_id: ID,
+        role: Role,
+        principals: vector<PrincipalV2>,
+        by: address,
+    }
+
     /// Grant `principal` the `role`, in the v2 store.  Caller must satisfy
     /// `Grant`.  Accepts every principal kind — `player_v2`, `ou_v2`,
     /// `machine_v2`, and whatever kinds later upgrades add.  Bumps `version`
@@ -603,27 +595,8 @@ module armature_vault::keyspace {
         ctx: &mut TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
-        if (!df::exists_(&keyspace.id, PrincipalAclKey {})) {
-            df::add(
-                &mut keyspace.id,
-                PrincipalAclKey {},
-                versioned::create(
-                    PRINCIPAL_ACL_VERSION,
-                    PrincipalAclV1 { acl: vec_map::empty() },
-                    ctx,
-                ),
-            );
-        };
-        {
-            let store = principal_acl_mut(keyspace);
-            if (!store.acl.contains(&role)) {
-                store.acl.insert(role, vector[principal]);
-            } else {
-                let list = store.acl.get_mut(&role);
-                assert!(!list.contains(&principal), EAlreadyGranted);
-                list.push_back(principal);
-            };
-        };
+        let added = principal_acl::add(&mut keyspace.id, role, principal, ctx);
+        assert!(added, EAlreadyGranted);
         if (role == Role::Read) { keyspace.version = keyspace.version + 1 };
         event::emit(AccessGrantedV2 {
             keyspace_id: keyspace.id.to_inner(),
@@ -644,15 +617,8 @@ module armature_vault::keyspace {
         ctx: &TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
-        assert!(df::exists_(&keyspace.id, PrincipalAclKey {}), ENotGranted);
-        {
-            let store = principal_acl_mut(keyspace);
-            assert!(store.acl.contains(&role), ENotGranted);
-            let list = store.acl.get_mut(&role);
-            let (found, idx) = list.index_of(&principal);
-            assert!(found, ENotGranted);
-            list.remove(idx);
-        };
+        let removed = principal_acl::remove(&mut keyspace.id, role, principal);
+        assert!(removed, ENotGranted);
         if (role == Role::Grant) {
             assert!(role_count(keyspace, Role::Grant) > 0, ELastGrantor);
         };
@@ -674,11 +640,7 @@ module armature_vault::keyspace {
     /// v2 principals holding `role` (empty when the store is absent, or its
     /// stored version is newer than this code understands — fail closed).
     public fun principals_v2(keyspace: &Keyspace, role: Role): vector<PrincipalV2> {
-        if (!df::exists_(&keyspace.id, PrincipalAclKey {})) { return vector[] };
-        let v: &Versioned = df::borrow(&keyspace.id, PrincipalAclKey {});
-        if (v.version() != PRINCIPAL_ACL_VERSION) { return vector[] };
-        let store: &PrincipalAclV1 = v.load_value();
-        if (store.acl.contains(&role)) { *store.acl.get(&role) } else { vector[] }
+        principal_acl::principals(&keyspace.id, role)
     }
 
     /// Total principals holding `role` across both stores.  Role invariants
@@ -687,15 +649,63 @@ module armature_vault::keyspace {
         let v1 = if (keyspace.acl.contains(&role)) {
             keyspace.acl.get(&role).length()
         } else { 0 };
-        v1 + principals_v2(keyspace, role).length()
+        v1 + principal_acl::count(&keyspace.id, role)
     }
 
-    /// Mutable access to the current-version v2 payload.  The single place
-    /// future schema migrations happen (see the recipe above).
-    fun principal_acl_mut(keyspace: &mut Keyspace): &mut PrincipalAclV1 {
-        let v: &mut Versioned = df::borrow_mut(&mut keyspace.id, PrincipalAclKey {});
-        assert!(v.version() == PRINCIPAL_ACL_VERSION, EUnknownPrincipalAclVersion);
-        v.load_value_mut()
+    /// Lift every v1 principal into the v2 store, one role at a time.  Caller
+    /// must satisfy `Grant`.
+    ///
+    /// Access-neutral: each principal is lifted by `acl_v2::from_v1`, which
+    /// satisfies exactly the same senders, so `version` is deliberately **not**
+    /// bumped — doing so would mark every entry stale and force a pointless
+    /// rotation sweep.  Idempotent: a second call finds the v1 lists empty and
+    /// does nothing.  Duplicates already present in v2 are dropped rather than
+    /// double-listed.
+    ///
+    /// Gated on `Grant` rather than permissionless on purpose.  Migration is
+    /// safe on-chain, but an SDK older than the v2 release reads principals
+    /// from the object's `acl` field and would see an emptied list — so the
+    /// keyspace's own admin should choose when their clients are ready.
+    public fun migrate_acl_to_v2(keyspace: &mut Keyspace, dao: &DAO, ctx: &mut TxContext) {
+        assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        migrate_role_to_v2(keyspace, Role::Grant, ctx);
+        migrate_role_to_v2(keyspace, Role::Read, ctx);
+        migrate_role_to_v2(keyspace, Role::Write, ctx);
+    }
+
+    fun migrate_role_to_v2(keyspace: &mut Keyspace, role: Role, ctx: &mut TxContext) {
+        let legacy = if (keyspace.acl.contains(&role)) {
+            *keyspace.acl.get(&role)
+        } else { vector[] };
+        if (legacy.is_empty()) { return };
+
+        // Drain the frozen-layout v1 list.  The field's *type* is fixed; its
+        // contents are ours to clear.
+        {
+            let list = keyspace.acl.get_mut(&role);
+            *list = vector[];
+        };
+
+        let keyspace_id = keyspace.id.to_inner();
+        let sender = ctx.sender();
+        let mut lifted = vector[];
+        let n = legacy.length();
+        let mut i = 0;
+        while (i < n) {
+            let principal = acl_v2::from_v1(&legacy[i]);
+            if (principal_acl::add(&mut keyspace.id, role, principal, ctx)) {
+                lifted.push_back(principal);
+            };
+            i = i + 1;
+        };
+        if (!lifted.is_empty()) {
+            event::emit(AclMigratedV2 {
+                keyspace_id,
+                role,
+                principals: lifted,
+                by: sender,
+            });
+        };
     }
 
     /// Called by the Seal key-server inside a PTB to gate decryption-key release.
@@ -817,14 +827,7 @@ module armature_vault::keyspace {
                 i = i + 1;
             };
         };
-        let v2 = principals_v2(keyspace, role);
-        let n2 = v2.length();
-        let mut j = 0;
-        while (j < n2) {
-            if (acl_v2::satisfies(&v2[j], dao, sender)) { return true };
-            j = j + 1;
-        };
-        false
+        principal_acl::satisfies(&keyspace.id, role, dao, sender)
     }
 
     fun add_principal(keyspace: &mut Keyspace, role: Role, principal: Principal): bool {

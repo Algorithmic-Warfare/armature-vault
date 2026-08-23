@@ -41,6 +41,8 @@
 module armature_vault::dao_receipt_vault {
     use armature::dao::DAO;
     use armature_vault::acl::{Self as acl, Principal};
+    use armature_vault::acl_v2::{Self as acl_v2, PrincipalV2};
+    use armature_vault::principal_acl;
     use multicoin::multicoin::Balance;
     use sui::{dynamic_object_field as dof, event, table::{Self, Table}, vec_map::{Self, VecMap}};
     use warehouse_receipts::vault::VaultConfig;
@@ -200,22 +202,61 @@ module armature_vault::dao_receipt_vault {
         by: address,
     }
 
+    /// v2 twins of the ACL events.  These carry the whole `PrincipalV2`, so one
+    /// event type serves every present and future kind — indexers read the kind
+    /// from `acl_v2::kind` rather than the event name.
+    public struct AclGrantedEventV2 has copy, drop {
+        vault_id: ID,
+        role: Role,
+        principal: PrincipalV2,
+        by: address,
+    }
+
+    public struct AclRevokedEventV2 has copy, drop {
+        vault_id: ID,
+        role: Role,
+        principal: PrincipalV2,
+        by: address,
+    }
+
+    /// Emitted once per role by `migrate_acl_to_v2`.  Access is unchanged —
+    /// indexers should *replace* that vault/role's v1 rows with these v2 rows
+    /// rather than reading it as a revoke followed by a grant.
+    public struct AclMigratedV2 has copy, drop {
+        vault_id: ID,
+        role: Role,
+        principals: vector<PrincipalV2>,
+        by: address,
+    }
+
     // === Authorization (internal) ===
 
     /// True if `sender` satisfies *some* principal listed for `role`, using `dao` as
     /// the OU context. False if the role is absent or no principal matches.
     fun satisfies_role(vault: &DaoReceiptVault, role: Role, dao: &DAO, sender: address): bool {
-        if (!vault.acl.contains(&role)) { return false };
-        let principals = vault.acl.get(&role);
-        let n = principals.length();
-        let mut i = 0;
-        while (i < n) {
-            if (acl::satisfies(&principals[i], dao, sender)) {
-                return true
+        if (vault.acl.contains(&role)) {
+            let principals = vault.acl.get(&role);
+            let n = principals.length();
+            let mut i = 0;
+            while (i < n) {
+                if (acl::satisfies(&principals[i], dao, sender)) {
+                    return true
+                };
+                i = i + 1;
             };
-            i = i + 1;
         };
-        false
+        // v2 store (machines and any later kind) — see the ACL v2 section.
+        principal_acl::satisfies(&vault.id, role, dao, sender)
+    }
+
+    /// Total principals holding `role` across both ACL stores.  The brick
+    /// guards are defined over this, not over the v1 list alone, so a role can
+    /// migrate to v2 without tripping them.
+    public fun role_count(vault: &DaoReceiptVault, role: Role): u64 {
+        let v1 = if (vault.acl.contains(&role)) {
+            vault.acl.get(&role).length()
+        } else { 0 };
+        v1 + principal_acl::count(&vault.id, role)
     }
 
     /// Aborts with `ENotAuthorized` unless `satisfies_role` holds.
@@ -591,12 +632,9 @@ module armature_vault::dao_receipt_vault {
             i = i + 1;
         };
 
-        // Brick-guard 1: Edit list must remain non-empty.
-        let edit_role = Role::Edit;
-        assert!(
-            vault.acl.contains(&edit_role) && vault.acl.get(&edit_role).length() > 0,
-            ELastEditor,
-        );
+        // Brick-guard 1: Edit must remain non-empty, counting both ACL stores
+        // so a migrated Edit principal still satisfies it.
+        assert!(role_count(vault, Role::Edit) > 0, ELastEditor);
         // H1: brick-guard 2 — the caller must still satisfy Edit using editor_dao.
         // Prevents grant-bogus-then-revoke-self bricking attacks: a rogue can only
         // remove themselves from Edit if some other satisfiable principal remains
@@ -617,6 +655,142 @@ module armature_vault::dao_receipt_vault {
                 });
             };
             j = j + 1;
+        };
+    }
+
+    // === Public: ACL v2 (upgradeable principals, incl. machines) ===
+    //
+    // `acl::Principal` is frozen at Player/Ou, and `DaoReceiptVault.acl`'s field
+    // type is frozen with it, so machine principals live in the shared
+    // `principal_acl` store hung off this vault's UID.  Both stores are read
+    // together by `satisfies_role`, and the brick guards count both.
+    //
+    // `Edit` stays v1/OU-only.  `grant_edit_ou` exists so every Edit principal
+    // references a live `&DAO` witness — an unsatisfiable Edit principal bricks
+    // the vault.  A machine key is exactly the kind of principal that rule
+    // exists to keep out (lose the key, lose the vault), so `grant_v2` refuses
+    // `Edit` for every kind, mirroring `grant`.
+
+    /// Batch-grant v2 principals (machines included) to `Deposit` / `Withdraw`.
+    /// Caller must satisfy `Edit` using `editor_dao`.  Aborts `EEditMustBeOu`
+    /// for `Role::Edit` — see the section note.
+    public fun grant_v2(
+        vault: &mut DaoReceiptVault,
+        editor_dao: &DAO,
+        roles: vector<Role>,
+        principals: vector<PrincipalV2>,
+        ctx: &mut TxContext,
+    ) {
+        let sender = ctx.sender();
+        assert_role(vault, Role::Edit, editor_dao, sender);
+        assert!(roles.length() == principals.length(), EInvalidArguments);
+
+        let vault_id = object::id(vault);
+        let n = roles.length();
+        let mut i = 0;
+        while (i < n) {
+            let role = roles[i];
+            let principal = principals[i];
+            assert!(role != Role::Edit, EEditMustBeOu);
+            if (principal_acl::add(&mut vault.id, role, principal, ctx)) {
+                event::emit(AclGrantedEventV2 { vault_id, role, principal, by: sender });
+            };
+            i = i + 1;
+        };
+    }
+
+    /// Batch-revoke v2 principals.  Caller must satisfy `Edit`.  Applies the
+    /// same two brick guards as `revoke`, computed across both ACL stores.
+    public fun revoke_v2(
+        vault: &mut DaoReceiptVault,
+        editor_dao: &DAO,
+        roles: vector<Role>,
+        principals: vector<PrincipalV2>,
+        ctx: &TxContext,
+    ) {
+        let sender = ctx.sender();
+        assert_role(vault, Role::Edit, editor_dao, sender);
+        assert!(roles.length() == principals.length(), EInvalidArguments);
+
+        let vault_id = object::id(vault);
+        let n = roles.length();
+
+        let mut changed_mask: vector<bool> = vector[];
+        let mut i = 0;
+        while (i < n) {
+            let changed = principal_acl::remove(&mut vault.id, roles[i], principals[i]);
+            changed_mask.push_back(changed);
+            i = i + 1;
+        };
+
+        assert!(role_count(vault, Role::Edit) > 0, ELastEditor);
+        assert!(satisfies_role(vault, Role::Edit, editor_dao, sender), EEditorWouldLockSelf);
+
+        let mut j = 0;
+        while (j < n) {
+            if (changed_mask[j]) {
+                event::emit(AclRevokedEventV2 {
+                    vault_id,
+                    role: roles[j],
+                    principal: principals[j],
+                    by: sender,
+                });
+            };
+            j = j + 1;
+        };
+    }
+
+    /// v2 principals holding `role` (empty when the store is absent or its
+    /// version is newer than this code understands — fail closed).
+    public fun principals_v2(vault: &DaoReceiptVault, role: Role): vector<PrincipalV2> {
+        principal_acl::principals(&vault.id, role)
+    }
+
+    /// Lift every v1 principal into the v2 store, one role at a time.  Caller
+    /// must satisfy `Edit`.
+    ///
+    /// Access-neutral — `acl_v2::from_v1` preserves exactly which senders each
+    /// principal admits — and idempotent: a second call finds the v1 lists
+    /// empty and does nothing.  Gated on `Edit` rather than permissionless
+    /// because an SDK older than the v2 release reads principals from the
+    /// object's `acl` field and would see an emptied list.
+    public fun migrate_acl_to_v2(
+        vault: &mut DaoReceiptVault,
+        editor_dao: &DAO,
+        ctx: &mut TxContext,
+    ) {
+        assert_role(vault, Role::Edit, editor_dao, ctx.sender());
+        migrate_role_to_v2(vault, Role::Deposit, ctx);
+        migrate_role_to_v2(vault, Role::Withdraw, ctx);
+        migrate_role_to_v2(vault, Role::Edit, ctx);
+    }
+
+    fun migrate_role_to_v2(vault: &mut DaoReceiptVault, role: Role, ctx: &mut TxContext) {
+        let legacy = if (vault.acl.contains(&role)) {
+            *vault.acl.get(&role)
+        } else { vector[] };
+        if (legacy.is_empty()) { return };
+
+        // The v1 field's type is frozen; its contents are ours to clear.
+        {
+            let list = vault.acl.get_mut(&role);
+            *list = vector[];
+        };
+
+        let vault_id = object::id(vault);
+        let sender = ctx.sender();
+        let mut lifted = vector[];
+        let n = legacy.length();
+        let mut i = 0;
+        while (i < n) {
+            let principal = acl_v2::from_v1(&legacy[i]);
+            if (principal_acl::add(&mut vault.id, role, principal, ctx)) {
+                lifted.push_back(principal);
+            };
+            i = i + 1;
+        };
+        if (!lifted.is_empty()) {
+            event::emit(AclMigratedV2 { vault_id, role, principals: lifted, by: sender });
         };
     }
 

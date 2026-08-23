@@ -672,6 +672,134 @@ module armature_vault::keyspace_tests {
         sc.end();
     }
 
+    // ── Migration ─────────────────────────────────────────────────────────────
+
+    // Migration lifts v1 principals into the v2 store without changing who can
+    // read, and without bumping version (which would strand every entry).
+    #[test]
+    fun test_migrate_acl_to_v2_preserves_access() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        let version_before = keyspace::version(&allowlist);
+        assert!(keyspace::principals_v2(&allowlist, keyspace::role_read()).is_empty(), 0);
+
+        keyspace::migrate_acl_to_v2(&mut allowlist, &dao, sc.ctx());
+
+        // Same access, now sourced from the v2 store.
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 1);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 2);
+        assert!(keyspace::principals_v2(&allowlist, keyspace::role_read()).length() == 2, 3);
+        // The v1 list is drained, so the count must come from v2 alone.
+        assert!(keyspace::role_count(&allowlist, keyspace::role_read()) == 2, 4);
+        // Access is unchanged, so entries must not be marked stale.
+        assert!(keyspace::version(&allowlist) == version_before, 5);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // Migration is idempotent and does not duplicate principals already in v2.
+    #[test]
+    fun test_migrate_acl_to_v2_is_idempotent() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        // ADMIN already holds Read in v2 as well as v1 — migration must dedup.
+        keyspace::grant_v2(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl_v2::player(ADMIN),
+            &dao,
+            sc.ctx(),
+        );
+
+        keyspace::migrate_acl_to_v2(&mut allowlist, &dao, sc.ctx());
+        let after_first = keyspace::role_count(&allowlist, keyspace::role_read());
+
+        keyspace::migrate_acl_to_v2(&mut allowlist, &dao, sc.ctx());
+        assert!(keyspace::role_count(&allowlist, keyspace::role_read()) == after_first, 0);
+        assert!(after_first == 1, 1);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, ADMIN), 2);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // Grant/revoke keep working against a fully migrated keyspace.
+    #[test]
+    fun test_grant_and_revoke_after_migration() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::migrate_acl_to_v2(&mut allowlist, &dao, sc.ctx());
+        // ADMIN's Grant role now lives in v2 and must still authorize.
+        keyspace::grant_v2(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl_v2::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
+
+        keyspace::revoke_v2(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl_v2::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 1);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // A caller without Grant cannot migrate.
+    #[test]
+    #[expected_failure]
+    fun test_unauthorized_migrate_aborts() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+        ts::return_shared(dao);
+        sc.end();
+
+        let mut sc = ts::begin(USER2);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        keyspace::migrate_acl_to_v2(&mut allowlist, &dao, sc.ctx()); // abort
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
     // Granting the same v2 principal the same role twice must abort.
     #[test]
     #[expected_failure]
