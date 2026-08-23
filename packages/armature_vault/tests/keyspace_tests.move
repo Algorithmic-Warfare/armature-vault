@@ -17,7 +17,6 @@ module armature_vault::keyspace_tests {
         dao::create(
             &init,
             string::utf8(b"DAO"),
-            string::utf8(b"dao"),
             string::utf8(b"https://example.com/i.png"),
             sc.ctx(),
         )
