@@ -39,89 +39,26 @@ module armature_vault::acl {
         }
     }
 
-    // === Principals (v2, upgradeable) ===
+    // === Interop with acl_v2 ===
     //
-    // Same abstraction as `Principal` — a caller identity that `satisfies` can
-    // evaluate against a sender and a `&DAO` witness — re-expressed so it can
-    // grow.  The kind is *data*, not a type variant, so adding a principal
-    // kind is a new constant plus a `satisfies_v2` arm: a function-body change,
-    // which Sui upgrades allow.  Nothing about the layout moves.
-    //
-    // Designed so a `PrincipalV2` should never be needed:
-    //   - `id`   carries the 32-byte identity every kind so far needs
-    //            (wallet address, OU id, machine address)
-    //   - `data` is a BCS escape hatch for a future kind that needs more
-    //            (an expiry, a type tag, a threshold set).  Empty for all
-    //            current kinds, and part of equality — two principals match
-    //            only if kind, id, and data all match.
-    //
-    // Kind tags are dense u8s.  `satisfies_v2` fails closed on unknown kinds,
-    // so an off-chain reader that predates a kind denies rather than guesses.
+    // Enum variants can only be matched in their defining module, so these
+    // accessors are how `acl_v2::from_v1` lifts a legacy principal without
+    // this module needing to know anything about v2 kinds.
 
-    const KIND_PLAYER: u8 = 0;
-    const KIND_OU: u8 = 1;
-    const KIND_MACHINE: u8 = 2;
-
-    public struct PrincipalV2 has copy, drop, store {
-        kind: u8,
-        id: address,
-        data: vector<u8>,
-    }
-
-    /// A v2 principal satisfied by a single wallet address (`player:*`).
-    public fun player_v2(addr: address): PrincipalV2 {
-        PrincipalV2 { kind: KIND_PLAYER, id: addr, data: vector[] }
-    }
-
-    /// A v2 principal satisfied by any board member of this DAO/OU (`ou:*`).
-    public fun ou_v2(dao_id: ID): PrincipalV2 {
-        PrincipalV2 { kind: KIND_OU, id: dao_id.to_address(), data: vector[] }
-    }
-
-    /// A v2 principal satisfied by a machine key's address (`machine:*`) — a
-    /// server-held keypair rather than a human wallet.  Authorization is the
-    /// same address check as `player`; the distinct kind is what lets
-    /// indexers, ACL UIs, and audits tell machine access from human access.
-    public fun machine_v2(addr: address): PrincipalV2 {
-        PrincipalV2 { kind: KIND_MACHINE, id: addr, data: vector[] }
-    }
-
-    /// Construct an arbitrary-kind principal.  Escape hatch for kinds added
-    /// after this package version; `satisfies_v2` denies kinds it can't
-    /// evaluate, so an unknown kind grants nothing until the logic ships.
-    public fun principal_v2(kind: u8, id: address, data: vector<u8>): PrincipalV2 {
-        PrincipalV2 { kind, id, data }
-    }
-
-    /// Lift a legacy `Principal` into its v2 equivalent.  Used to migrate
-    /// existing grants; the result satisfies exactly the same senders.
-    public fun to_v2(principal: &Principal): PrincipalV2 {
+    /// True if this is an `Ou` principal (false for `Player`).
+    public fun is_ou(principal: &Principal): bool {
         match (principal) {
-            Principal::Player { addr } => player_v2(*addr),
-            Principal::Ou { dao_id } => ou_v2(*dao_id),
+            Principal::Player { .. } => false,
+            Principal::Ou { .. } => true,
         }
     }
 
-    /// v2 counterpart of `satisfies`.  Unknown kinds return false — an
-    /// unrecognized principal must never authorize.
-    public(package) fun satisfies_v2(principal: &PrincipalV2, dao: &DAO, sender: address): bool {
-        if (principal.kind == KIND_PLAYER) {
-            principal.id == sender
-        } else if (principal.kind == KIND_OU) {
-            dao.id().to_address() == principal.id && dao.is_governance_member(sender)
-        } else if (principal.kind == KIND_MACHINE) {
-            principal.id == sender
-        } else {
-            false
+    /// The principal's identity as an address: the wallet for `Player`, the
+    /// DAO/OU id for `Ou` (an `ID` has the same 32-byte representation).
+    public fun identity(principal: &Principal): address {
+        match (principal) {
+            Principal::Player { addr } => *addr,
+            Principal::Ou { dao_id } => dao_id.to_address(),
         }
     }
-
-    // Kind tags, exposed as functions because Move constants aren't public.
-    public fun kind_player(): u8 { KIND_PLAYER }
-    public fun kind_ou(): u8 { KIND_OU }
-    public fun kind_machine(): u8 { KIND_MACHINE }
-
-    public fun v2_kind(principal: &PrincipalV2): u8 { principal.kind }
-    public fun v2_id(principal: &PrincipalV2): address { principal.id }
-    public fun v2_data(principal: &PrincipalV2): &vector<u8> { &principal.data }
 }

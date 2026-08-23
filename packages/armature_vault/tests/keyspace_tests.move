@@ -1,7 +1,7 @@
 #[test_only]
 module armature_vault::keyspace_tests {
     use armature::{dao::{Self, DAO}, governance};
-    use armature_vault::{acl as acl, keyspace};
+    use armature_vault::{acl as acl, acl_v2 as acl_v2, keyspace};
     use std::string;
     use sui::test_scenario as ts;
 
@@ -450,7 +450,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         );
@@ -461,7 +461,7 @@ module armature_vault::keyspace_tests {
         keyspace::revoke_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         );
@@ -487,7 +487,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_write(),
-            acl::player_v2(USER1),
+            acl_v2::player(USER1),
             &dao,
             sc.ctx(),
         );
@@ -497,7 +497,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::ou_v2(dao_id),
+            acl_v2::ou(dao_id),
             &dao,
             sc.ctx(),
         );
@@ -522,7 +522,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_write(),
-            acl::principal_v2(200, USER1, vector[]),
+            acl_v2::principal(200, USER1, vector[]),
             &dao,
             sc.ctx(),
         );
@@ -548,7 +548,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         );
@@ -557,7 +557,7 @@ module armature_vault::keyspace_tests {
         keyspace::revoke_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         );
@@ -582,7 +582,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::player_v2(USER1),
+            acl_v2::player(USER1),
             &dao,
             sc.ctx(),
         );
@@ -590,7 +590,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         );
@@ -599,7 +599,7 @@ module armature_vault::keyspace_tests {
         keyspace::revoke_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         );
@@ -625,7 +625,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         );
@@ -652,7 +652,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_grant(),
-            acl::player_v2(ADMIN),
+            acl_v2::player(ADMIN),
             &dao,
             sc.ctx(),
         );
@@ -686,14 +686,14 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         );
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         ); // abort
@@ -717,7 +717,7 @@ module armature_vault::keyspace_tests {
         keyspace::revoke_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         ); // abort
@@ -746,7 +746,7 @@ module armature_vault::keyspace_tests {
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
-            acl::machine_v2(USER1),
+            acl_v2::machine(USER1),
             &dao,
             sc.ctx(),
         ); // abort

@@ -27,7 +27,8 @@
 /// member check makes that association unspoofable.
 module armature_vault::keyspace {
     use armature::dao::DAO;
-    use armature_vault::acl::{Self as acl, Principal, PrincipalV2};
+    use armature_vault::acl::{Self as acl, Principal};
+    use armature_vault::acl_v2::{Self as acl_v2, PrincipalV2};
     use std::{option::{Self, Option}, string::String};
     use sui::{
         dynamic_field as df,
@@ -279,7 +280,7 @@ module armature_vault::keyspace {
     //   AccessRevokedV2 { keyspace_id, role, principal, by }
     //     → mark the matching grant inactive
     //
-    //   kind_name: 0 → 'player', 1 → 'ou', 2 → 'machine'.  Later upgrades add
+    //   kind_name (see acl_v2): 0 → 'player', 1 → 'ou', 2 → 'machine'.  Later upgrades add
     //   kinds without new event types, so indexers should map unknown kinds to
     //   a stable fallback (e.g. 'kind_<n>') and keep ingesting rather than
     //   dropping the row.  `principal.data` is empty for all current kinds.
@@ -540,7 +541,7 @@ module armature_vault::keyspace {
     // ── Upgradeable principal ACL (v2) ───────────────────────────────────────
     //
     // Same ACL model as `Keyspace.acl` — principals grouped by role, evaluated
-    // by `acl::satisfies*` — but holding `acl::PrincipalV2`, whose kind is data
+    // by `satisfies` — but holding `acl_v2::PrincipalV2`, whose kind is data
     // rather than an enum variant.  That is what makes new principal kinds
     // (starting with `machine`) possible: adding one is a constant plus a
     // `satisfies_v2` arm, never a layout change.
@@ -820,7 +821,7 @@ module armature_vault::keyspace {
         let n2 = v2.length();
         let mut j = 0;
         while (j < n2) {
-            if (acl::satisfies_v2(&v2[j], dao, sender)) { return true };
+            if (acl_v2::satisfies(&v2[j], dao, sender)) { return true };
             j = j + 1;
         };
         false
