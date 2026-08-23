@@ -29,7 +29,12 @@ module armature_vault::keyspace {
     use armature::dao::DAO;
     use armature_vault::acl::{Self as acl, Principal};
     use std::{option::{Self, Option}, string::String};
-    use sui::{event, vec_map::{Self, VecMap}};
+    use sui::{
+        dynamic_field as df,
+        event,
+        vec_map::{Self, VecMap},
+        versioned::{Self, Versioned},
+    };
 
     // ── Roles ─────────────────────────────────────────────────────────────────
 
@@ -55,6 +60,7 @@ module armature_vault::keyspace {
     const ELastWriter: u64 = 6;
     const ELastReader: u64 = 7;
     const EEmptyGrantPrincipals: u64 = 8;
+    const EUnknownMachineAclVersion: u64 = 9;
 
     // ── Objects ──────────────────────────────────────────────────────────────
 
@@ -264,6 +270,22 @@ module armature_vault::keyspace {
     //   GET /v1/address/:addr/keyspaces?role=Read
     //     → AccessGranted WHERE role=Read AND principal=Player{addr}
     //       minus AccessRevoked for the same (addr, keyspace_id, role) tuples
+
+    // ── Machine ACL events (v3) ──────────────────────────────────────────────
+    //
+    //   MachineGranted  { keyspace_id, role, machine, by }
+    //     → INSERT principal_kind='machine', principal_value=machine
+    //   MachineRevoked  { keyspace_id, role, machine, by }
+    //     → mark the matching machine grant inactive
+    //
+    //   Machine principals live in a versioned dynamic field on the Keyspace
+    //   UID (see the Machine ACL section below), not in `acl` — the object's
+    //   own JSON never shows them.  Event-sourced reconstructions treat these
+    //   exactly like AccessGranted/AccessRevoked with a third principal kind:
+    //
+    //   GET /v1/address/:addr/keyspaces?role=Read additionally matches
+    //     → MachineGranted WHERE role=Read AND machine=addr
+    //       minus MachineRevoked for the same (addr, keyspace_id, role)
 
     // ── Entry functions ──────────────────────────────────────────────────────
 
@@ -511,6 +533,158 @@ module armature_vault::keyspace {
         };
     }
 
+    // ── Machine ACL (v3 extension) ───────────────────────────────────────────
+    //
+    // Machine principals are server-held keypairs (bots, enrichment services)
+    // granted access by address, distinguished from human `Player` principals
+    // at the type level. They CANNOT live in `acl::Principal`: Sui's upgrade
+    // compatibility freezes a published enum's variant set (and `Keyspace`'s
+    // struct layout), so the machine ACL lives in a dynamic field on the
+    // Keyspace UID instead — additive state, reachable from the frozen layout.
+    //
+    // Upgrade-in-place recipe (this is the template for all future Keyspace
+    // extensions): the DF value is a `sui::versioned::Versioned` wrapping a
+    // versioned payload struct. To evolve the schema in a later upgrade:
+    //   1. add `MachineAclV2 { .. } has store` and bump MACHINE_ACL_VERSION,
+    //   2. in `machine_acl_mut`, migrate lazily on first mutation:
+    //      `versioned::remove_value_for_upgrade` → build V2 → `versioned::upgrade`,
+    //   3. teach the read path (`machine_principals`) to answer for both
+    //      versions until migration has saturated.
+    // Read paths must tolerate every historical version; only mutation paths
+    // migrate. Unknown (newer) versions answer "no access" — fail closed.
+
+    const MACHINE_ACL_VERSION: u64 = 1;
+
+    /// Dynamic-field key under `Keyspace.id` for the machine ACL extension.
+    public struct MachineAclKey has copy, drop, store {}
+
+    /// Version 1 payload: machine addresses per role, mirroring the shape of
+    /// `Keyspace.acl`. Addresses, not `Principal`s — a machine's identity is
+    /// its address, and the enum cannot be extended (see module note above).
+    public struct MachineAclV1 has store {
+        acl: VecMap<Role, vector<address>>,
+    }
+
+    /// Emitted when a machine address is granted `role`. The machine-ACL twin
+    /// of `AccessGranted`; indexers should record `principal_kind = 'machine'`.
+    public struct MachineGranted has copy, drop {
+        keyspace_id: ID,
+        role: Role,
+        machine: address,
+        by: address,
+    }
+
+    /// Emitted when a machine address is revoked from `role`.
+    public struct MachineRevoked has copy, drop {
+        keyspace_id: ID,
+        role: Role,
+        machine: address,
+        by: address,
+    }
+
+    /// Grant `machine` the `role`.  Caller must satisfy `Grant`.
+    /// Bumps `version` when the `Read` set changes (same epoch semantics as
+    /// `grant`).  Aborts with `EAlreadyGranted` if already held.
+    public fun grant_machine(
+        keyspace: &mut Keyspace,
+        role: Role,
+        machine: address,
+        dao: &DAO,
+        ctx: &mut TxContext,
+    ) {
+        assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        if (!df::exists_(&keyspace.id, MachineAclKey {})) {
+            df::add(
+                &mut keyspace.id,
+                MachineAclKey {},
+                versioned::create(
+                    MACHINE_ACL_VERSION,
+                    MachineAclV1 { acl: vec_map::empty() },
+                    ctx,
+                ),
+            );
+        };
+        {
+            let macl = machine_acl_mut(keyspace);
+            if (!macl.acl.contains(&role)) {
+                macl.acl.insert(role, vector[machine]);
+            } else {
+                let list = macl.acl.get_mut(&role);
+                assert!(!list.contains(&machine), EAlreadyGranted);
+                list.push_back(machine);
+            };
+        };
+        if (role == Role::Read) { keyspace.version = keyspace.version + 1 };
+        event::emit(MachineGranted {
+            keyspace_id: keyspace.id.to_inner(),
+            role,
+            machine,
+            by: ctx.sender(),
+        });
+    }
+
+    /// Revoke `machine` from `role`.  Caller must satisfy `Grant`.
+    /// Bumps `version` when the `Read` set changes.  The "at least one reader
+    /// remains" invariant spans both principal sets, since org keyspaces may
+    /// have no keyspace-level `Read` principals at all.
+    public fun revoke_machine(
+        keyspace: &mut Keyspace,
+        role: Role,
+        machine: address,
+        dao: &DAO,
+        ctx: &TxContext,
+    ) {
+        assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        assert!(df::exists_(&keyspace.id, MachineAclKey {}), ENotGranted);
+        {
+            let macl = machine_acl_mut(keyspace);
+            assert!(macl.acl.contains(&role), ENotGranted);
+            let list = macl.acl.get_mut(&role);
+            let (found, idx) = list.index_of(&machine);
+            assert!(found, ENotGranted);
+            list.remove(idx);
+        };
+        if (role == Role::Read) {
+            let main_readers = if (keyspace.acl.contains(&Role::Read)) {
+                keyspace.acl.get(&Role::Read).length()
+            } else { 0 };
+            assert!(
+                main_readers > 0 || machine_principals(keyspace, Role::Read).length() > 0,
+                ELastReader,
+            );
+            keyspace.version = keyspace.version + 1;
+        };
+        event::emit(MachineRevoked {
+            keyspace_id: keyspace.id.to_inner(),
+            role,
+            machine,
+            by: ctx.sender(),
+        });
+    }
+
+    /// Machine addresses holding `role` (empty if the extension is absent or
+    /// its stored version is newer than this code understands — fail closed).
+    public fun machine_principals(keyspace: &Keyspace, role: Role): vector<address> {
+        if (!df::exists_(&keyspace.id, MachineAclKey {})) { return vector[] };
+        let v: &Versioned = df::borrow(&keyspace.id, MachineAclKey {});
+        if (v.version() != MACHINE_ACL_VERSION) { return vector[] };
+        let macl: &MachineAclV1 = v.load_value();
+        if (macl.acl.contains(&role)) { *macl.acl.get(&role) } else { vector[] }
+    }
+
+    /// True if `machine` holds `role` via the machine ACL.
+    public fun machine_has_role(keyspace: &Keyspace, role: Role, machine: address): bool {
+        machine_principals(keyspace, role).contains(&machine)
+    }
+
+    /// Mutable access to the current-version machine ACL payload.  This is the
+    /// single place future schema migrations happen (see the recipe above).
+    fun machine_acl_mut(keyspace: &mut Keyspace): &mut MachineAclV1 {
+        let v: &mut Versioned = df::borrow_mut(&mut keyspace.id, MachineAclKey {});
+        assert!(v.version() == MACHINE_ACL_VERSION, EUnknownMachineAclVersion);
+        v.load_value_mut()
+    }
+
     /// Called by the Seal key-server inside a PTB to gate decryption-key release.
     /// Requires the `Read` role.
     entry fun seal_approve(id: vector<u8>, keyspace: &Keyspace, dao: &DAO, ctx: &TxContext) {
@@ -617,6 +791,10 @@ module armature_vault::keyspace {
     // ── Internal ─────────────────────────────────────────────────────────────
 
     fun satisfies_role(keyspace: &Keyspace, role: Role, dao: &DAO, sender: address): bool {
+        // Machine ACL first: every consumer of this check — grant/revoke
+        // authorization, has_role, publish/edit gating, and seal_approve —
+        // honors machine principals through this single line.
+        if (machine_has_role(keyspace, role, sender)) { return true };
         if (!keyspace.acl.contains(&role)) { return false };
         let principals = keyspace.acl.get(&role);
         let n = principals.length();

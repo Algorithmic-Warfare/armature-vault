@@ -7,12 +7,13 @@ module armature_vault::acl {
 
     // === Principals ===
 
-    // BCS encodes enums as a ULEB128 variant index — indexers decode stored
-    // event bytes by position, so variant order is load-bearing: append only.
+    // Frozen by Sui upgrade compatibility: a published enum can never gain,
+    // lose, or reorder variants (move-binary-format compatibility check).
+    // New principal kinds must be modeled OUTSIDE this enum — see the machine
+    // ACL in keyspace.move for the versioned-dynamic-field pattern to follow.
     public enum Principal has copy, drop, store {
         Player { addr: address },
         Ou { dao_id: ID },
-        Machine { addr: address },
     }
 
     /// A principal satisfied by a single wallet address.
@@ -25,24 +26,15 @@ module armature_vault::acl {
         Principal::Ou { dao_id }
     }
 
-    /// A principal satisfied by a single machine-held key's address — a
-    /// server-side keypair rather than a human wallet. Same authorization rule
-    /// as `Player`; the separate variant types the identity so indexers and
-    /// UIs can distinguish machine access from human access.
-    public fun machine(addr: address): Principal {
-        Principal::Machine { addr }
-    }
-
     // === Authorization ===
 
     /// True if `sender` satisfies `principal` given the `&DAO` the caller is acting
-    /// as. For `Player` and `Machine` principals the DAO is irrelevant; for an `Ou`
-    /// principal the passed DAO must be that OU and `sender` must be on its board.
+    /// as. For a `Player` principal the DAO is irrelevant; for an `Ou` principal the
+    /// passed DAO must be that OU and `sender` must be on its board.
     public(package) fun satisfies(principal: &Principal, dao: &DAO, sender: address): bool {
         match (principal) {
             Principal::Player { addr } => *addr == sender,
             Principal::Ou { dao_id } => dao.id() == *dao_id && dao.is_governance_member(sender),
-            Principal::Machine { addr } => *addr == sender,
         }
     }
 }
