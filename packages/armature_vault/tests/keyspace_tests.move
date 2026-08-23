@@ -433,4 +433,111 @@ module armature_vault::keyspace_tests {
         ts::return_shared(dao);
         sc.end();
     }
+
+    // ── Machine principals ────────────────────────────────────────────────────
+
+    // Grant a Machine Read principal → has_role for that address; revoke → gone.
+    // Same authorization rule as Player: the address matches the sender and the
+    // DAO witness is irrelevant.
+    #[test]
+    fun test_grant_and_revoke_read_machine() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER2), 1);
+
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 2);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // Player and Machine principals for the same address are distinct entries:
+    // both can be granted, and revoking one leaves the other's access intact.
+    #[test]
+    fun test_machine_and_player_principals_are_distinct() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        // Not a duplicate grant: Machine { USER1 } != Player { USER1 }.
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
+
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        // The Player grant still satisfies Read for USER1.
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 1);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // A Machine principal never satisfies via the DAO: a board member who is not
+    // the machine's address gains nothing from the machine grant.
+    #[test]
+    fun test_machine_grant_does_not_leak_to_board() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN, USER2]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        // USER2 is on the DAO board but is not the machine address.
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER2), 0);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
 }
