@@ -20,9 +20,9 @@
 /// Access control uses the shared kind-tagged `Principal` model from
 /// `armature_vault::acl`: each list member is a player (single wallet), an ou
 /// (any board member of that DAO), or a machine (single automation-held
-/// wallet), checked via `acl::satisfies`. Machines may hold `Read` and `Write`
-/// but never `Grant` — a hot server key must not be an ACL administrator
-/// (same rationale as the vault's Ou-only `Edit` rule).
+/// wallet), checked via `acl::satisfies`. All three kinds are eligible for
+/// every role, including `Grant` — a machine grantor administers the ACL with
+/// the same authority (and the same key-custody risk) as a player grantor.
 ///
 /// DAO-linked keyspaces (`create_keyspace_for_dao`) emit `registrant_dao_id` in
 /// `KeyspaceCreated` so an indexer can answer "all keyspaces for DAO X" without
@@ -58,8 +58,7 @@ module armature_vault::keyspace {
     const ELastWriter: u64 = 6;
     const ELastReader: u64 = 7;
     const EEmptyGrantPrincipals: u64 = 8;
-    const EMachineCannotHoldGrant: u64 = 9;
-    const EGrantorWouldLockSelf: u64 = 10;
+    const EGrantorWouldLockSelf: u64 = 9;
 
     // ── Objects ──────────────────────────────────────────────────────────────
 
@@ -347,13 +346,6 @@ module armature_vault::keyspace {
     ) {
         assert!(dao.is_governance_member(ctx.sender()), ENotAllowed);
         assert!(!grant_principals.is_empty(), EEmptyGrantPrincipals);
-        // Machines are barred from Grant at seeding time too, so the init path
-        // cannot smuggle in what `grant` refuses.
-        let mut gi = 0;
-        while (gi < grant_principals.length()) {
-            assert!(!acl::is_machine(&grant_principals[gi]), EMachineCannotHoldGrant);
-            gi = gi + 1;
-        };
 
         let uid = object::new(ctx);
         let keyspace_id = uid.to_inner();
@@ -406,8 +398,7 @@ module armature_vault::keyspace {
     }
 
     /// Grant `principal` the `role`.  Caller must satisfy `Grant`.
-    /// Bumps `version` when the `Read` set changes.  Machine principals may
-    /// hold `Read`/`Write` but never `Grant` (`EMachineCannotHoldGrant`).
+    /// Bumps `version` when the `Read` set changes.
     public fun grant(
         keyspace: &mut Keyspace,
         role: Role,
@@ -416,7 +407,6 @@ module armature_vault::keyspace {
         ctx: &TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
-        assert!(!(role == Role::Grant && acl::is_machine(&principal)), EMachineCannotHoldGrant);
         let changed = add_principal(keyspace, role, principal);
         assert!(changed, EAlreadyGranted);
         if (role == Role::Read) { keyspace.version = keyspace.version + 1 };
@@ -442,10 +432,6 @@ module armature_vault::keyspace {
         let mut i = 0;
         while (i < n) {
             let role = roles[i];
-            assert!(
-                !(role == Role::Grant && acl::is_machine(&principal)),
-                EMachineCannotHoldGrant,
-            );
             let changed = add_principal(keyspace, role, principal);
             assert!(changed, EAlreadyGranted);
             if (role == Role::Read) { keyspace.version = keyspace.version + 1 };

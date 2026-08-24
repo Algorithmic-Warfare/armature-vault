@@ -26,8 +26,10 @@ module armature_vault::acl {
     /// Satisfied by a single wallet address held by an automated service (bot,
     /// backend worker). The trust model is identical to a player key — pure
     /// key possession — the distinct kind exists so contracts and indexers can
-    /// apply machine-specific policy (e.g. machines are barred from admin
-    /// roles) and so UIs can tell automation apart from humans on-chain.
+    /// apply machine-specific policy where a module wants it, and so UIs can
+    /// tell automation apart from humans on-chain. (The receipt vault's Edit
+    /// role excludes machines only the way it excludes every bare key: Edit is
+    /// Ou-only.)
     const KIND_MACHINE: u8 = 2;
 
     // === Principals ===

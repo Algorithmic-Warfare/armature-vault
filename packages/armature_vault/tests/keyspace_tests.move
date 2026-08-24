@@ -465,6 +465,7 @@ module armature_vault::keyspace_tests {
         );
         assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, BOT), 0);
         assert!(keyspace::has_role(&allowlist, keyspace::role_write(), &dao, BOT), 1);
+        // Not granted Grant — no implicit role escalation.
         assert!(!keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, BOT), 2);
         // Machine Read grant bumps version (re-encryption epoch), Write does not.
         assert!(keyspace::version(&allowlist) == 1, 3);
@@ -519,10 +520,10 @@ module armature_vault::keyspace_tests {
         sc.end();
     }
 
-    // Machines can never hold Grant (EMachineCannotHoldGrant).
+    // A machine can hold Grant and administer the ACL exactly like a player
+    // grantor: once granted, the machine grants Read to another principal.
     #[test]
-    #[expected_failure]
-    fun test_machine_cannot_hold_grant() {
+    fun test_machine_can_hold_grant_and_administer() {
         let mut sc = ts::begin(ADMIN);
         let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
 
@@ -536,17 +537,30 @@ module armature_vault::keyspace_tests {
             acl::machine(BOT),
             &dao,
             sc.ctx(),
-        ); // abort
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, BOT), 0);
+        ts::return_shared(dao);
+
+        // The machine now performs a grant as sender.
+        ts::next_tx(&mut sc, BOT);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 1);
 
         keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
 
-    // multi_grant enforces the machine/Grant restriction too.
+    // multi_grant accepts Grant for a machine principal too.
     #[test]
-    #[expected_failure]
-    fun test_multi_grant_machine_rejects_grant_role() {
+    fun test_multi_grant_machine_includes_grant_role() {
         let mut sc = ts::begin(ADMIN);
         let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
 
@@ -560,17 +574,18 @@ module armature_vault::keyspace_tests {
             acl::machine(BOT),
             &dao,
             sc.ctx(),
-        ); // abort
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, BOT), 0);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, BOT), 1);
 
         keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();
     }
 
-    // create_keyspace_for_dao rejects machine principals in the Grant seed list.
+    // create_keyspace_for_dao accepts machine principals in the Grant seed list.
     #[test]
-    #[expected_failure]
-    fun test_create_for_dao_rejects_machine_grantor() {
+    fun test_create_for_dao_accepts_machine_grantor() {
         let mut sc = ts::begin(ADMIN);
         let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
 
@@ -583,8 +598,14 @@ module armature_vault::keyspace_tests {
             vector[],
             vector[],
             sc.ctx(),
-        ); // abort
+        );
+        ts::return_shared(dao);
 
+        ts::next_tx(&mut sc, BOT);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let ks = ts::take_shared<keyspace::Keyspace>(&sc);
+        assert!(keyspace::has_role(&ks, keyspace::role_grant(), &dao, BOT), 0);
+        ts::return_shared(ks);
         ts::return_shared(dao);
         sc.end();
     }
