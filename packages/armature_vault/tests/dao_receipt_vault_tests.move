@@ -14,6 +14,7 @@ module armature_vault::dao_receipt_vault_tests {
     use armature::{dao::{Self, DAO}, governance};
     use armature_vault::{
         acl::{Self as acl, Principal},
+        acl_v2 as acl_v2,
         dao_receipt_vault::{Self as vault, DaoReceiptVault, Role}
     };
     use multicoin::multicoin::{Self, Collection, CollectionCap, Balance};
@@ -1329,6 +1330,131 @@ module armature_vault::dao_receipt_vault_tests {
             ts::return_shared(new_officers_dao);
             ts::return_shared(v);
             ts::return_shared(reg);
+        };
+
+        ts::end(scenario);
+    }
+
+    // ── Regression tests for the pre-publish security review ──────────────────
+
+    #[test]
+    /// `deinitialize_dao_vault` must clear BOTH principal stores.
+    ///
+    /// It used to drain only the frozen v1 map. Since `satisfies_role` reads the
+    /// union of both, a migrated vault kept every role — Deposit, Withdraw and
+    /// Edit — after being "destroyed": the registry slot was freed and a fresh
+    /// vault could take it while the orphan still accepted deposits and honored
+    /// withdrawals for the migrated principals.
+    fun deinit_clears_v2_store_after_migration() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+        let ssu_id = object::id_from_address(@0x5511);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        vault::init_for_testing(scenario.ctx());
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            ssu_id,
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        let v_id = object::id(&v);
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        {
+            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            ts::return_shared(v);
+            ts::return_shared(reg);
+        };
+
+        // Move every role into the v2 store, then deinitialize.
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+
+            vault::migrate_acl_to_v2(&mut v, &officers_dao, scenario.ctx());
+            assert!(vault::principals_v2(&v, vault::role_edit()).length() > 0, 0);
+
+            vault::deinitialize_dao_vault(&mut reg, &mut v, &officers_dao, scenario.ctx());
+
+            assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 1);
+            // Both stores are empty, so nothing can satisfy any role.
+            assert!(vault::principals_v2(&v, vault::role_edit()).is_empty(), 2);
+            assert!(vault::principals_v2(&v, vault::role_deposit()).is_empty(), 3);
+            assert!(vault::principals_v2(&v, vault::role_withdraw()).is_empty(), 4);
+            assert!(vault::role_count(&v, vault::role_edit()) == 0, 5);
+            assert!(vault::role_count(&v, vault::role_deposit()) == 0, 6);
+            assert!(vault::role_count(&v, vault::role_withdraw()) == 0, 7);
+
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+            ts::return_shared(reg);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// A v1-API revoke must still remove a principal that migration relocated to
+    /// the v2 store. Before the fix `remove_principal` searched only the drained
+    /// v1 list, so the call succeeded, emitted no event, and left the principal
+    /// authorized — a silent failure of the vault's primary access-removal path.
+    fun v1_revoke_reaches_migrated_principal() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+        let ssu_id = object::id_from_address(@0x5512);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        vault::init_for_testing(scenario.ctx());
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            ssu_id,
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+
+            vault::migrate_acl_to_v2(&mut v, &officers_dao, scenario.ctx());
+
+            // WOLF's Deposit principal now lives in the v2 store.
+            let wolf_v2 = acl_v2::from_v1(&acl::ou(wolf));
+            assert!(vault::principals_v2(&v, vault::role_deposit()).contains(&wolf_v2), 0);
+            let before = vault::role_count(&v, vault::role_deposit());
+
+            // Revoke through the v1 API; the principal now lives in v2.
+            vault::revoke(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_deposit()],
+                vector[acl::ou(wolf)],
+                scenario.ctx(),
+            );
+            assert!(!vault::principals_v2(&v, vault::role_deposit()).contains(&wolf_v2), 1);
+            assert!(vault::role_count(&v, vault::role_deposit()) == before - 1, 2);
+
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
         };
 
         ts::end(scenario);

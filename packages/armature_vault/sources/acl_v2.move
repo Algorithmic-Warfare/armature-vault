@@ -37,6 +37,7 @@
 module armature_vault::acl_v2 {
     use armature::dao::DAO;
     use armature_vault::acl::{Self as acl, Principal};
+    use std::option::{Self, Option};
 
     // === Errors ===
 
@@ -109,6 +110,24 @@ module armature_vault::acl_v2 {
     public fun from_v1(legacy: &Principal): PrincipalV2 {
         let kind = if (acl::is_ou(legacy)) { KIND_OU } else { KIND_PLAYER };
         PrincipalV2 { kind, id: acl::identity(legacy), data: vector[] }
+    }
+
+    /// The exact inverse of `from_v1`: the legacy principal this one was lifted
+    /// from, or `none` when it has no v1 equivalent (a kind the frozen enum
+    /// cannot express, or any payload — `from_v1` never produces one).
+    ///
+    /// Both stores are read together by `satisfies_role`, so the same identity
+    /// can be present in each.  This is what lets a revoke in either store also
+    /// clear its counterpart in the other, instead of leaving access behind.
+    public fun to_v1(principal: &PrincipalV2): Option<Principal> {
+        if (!principal.data.is_empty()) { return option::none() };
+        if (principal.kind == KIND_PLAYER) {
+            option::some(acl::player(principal.id))
+        } else if (principal.kind == KIND_OU) {
+            option::some(acl::ou(principal.id.to_id()))
+        } else {
+            option::none()
+        }
     }
 
     // === Authorization ===

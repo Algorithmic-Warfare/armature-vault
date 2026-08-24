@@ -627,7 +627,7 @@ module armature_vault::dao_receipt_vault {
         while (i < n) {
             let role = roles[i];
             let principal = principals[i];
-            let changed = remove_principal(vault, role, principal);
+            let changed = remove_principal_everywhere(vault, role, principal);
             changed_mask.push_back(changed);
             i = i + 1;
         };
@@ -718,7 +718,7 @@ module armature_vault::dao_receipt_vault {
         let mut changed_mask: vector<bool> = vector[];
         let mut i = 0;
         while (i < n) {
-            let changed = principal_acl::remove(&mut vault.id, roles[i], principals[i]);
+            let changed = remove_v2_everywhere(vault, roles[i], principals[i]);
             changed_mask.push_back(changed);
             i = i + 1;
         };
@@ -878,9 +878,21 @@ module armature_vault::dao_receipt_vault {
         let freed_registrant_dao_id = vault.registrant_dao_id;
 
         // Brick the ACL. Any subsequent assert_role aborts ENotAuthorized.
+        //
+        // BOTH stores must go: `satisfies_role` reads their union, so clearing
+        // only the v1 map would leave every v2 principal holding its role on a
+        // vault the registry has already released. On a migrated vault that is
+        // all three roles — the orphan would still accept deposits and honor
+        // withdrawals, while a fresh vault occupies its freed registry slot.
         while (!vault.acl.is_empty()) {
             vault.acl.pop();
         };
+        principal_acl::destroy<Role>(&mut vault.id);
+        // Nothing can satisfy any role now — the invariant this function's doc
+        // promises, asserted rather than assumed.
+        assert!(role_count(vault, Role::Deposit) == 0, ELastEditor);
+        assert!(role_count(vault, Role::Withdraw) == 0, ELastEditor);
+        assert!(role_count(vault, Role::Edit) == 0, ELastEditor);
 
         event::emit(VaultDeinitializedEvent {
             vault_id,
@@ -903,6 +915,46 @@ module armature_vault::dao_receipt_vault {
         };
         list.push_back(principal);
         true
+    }
+
+    /// Remove a legacy principal from `role` in BOTH stores, returning true if
+    /// either held it.
+    ///
+    /// `satisfies_role` reads the union, and `grant`/`grant_v2` each write only
+    /// their own store without consulting the other, so one identity can sit in
+    /// both. Clearing a single store would report success (`revoke` emits per
+    /// changed pair and never aborts on a no-op) while leaving the principal
+    /// authorized — the failure mode is silent, which is what makes it dangerous
+    /// for a vault holding assets. Revocation is therefore identity-wide.
+    fun remove_principal_everywhere(
+        vault: &mut DaoReceiptVault,
+        role: Role,
+        principal: Principal,
+    ): bool {
+        let from_v1 = remove_principal(vault, role, principal);
+        let from_v2 = principal_acl::remove(
+            &mut vault.id,
+            role,
+            acl_v2::from_v1(&principal),
+        );
+        from_v1 || from_v2
+    }
+
+    /// The `PrincipalV2` counterpart of `remove_principal_everywhere`. Kinds with
+    /// no v1 equivalent live only in the v2 store.
+    fun remove_v2_everywhere(
+        vault: &mut DaoReceiptVault,
+        role: Role,
+        principal: PrincipalV2,
+    ): bool {
+        let from_v2 = principal_acl::remove(&mut vault.id, role, principal);
+        let legacy = acl_v2::to_v1(&principal);
+        let from_v1 = if (legacy.is_some()) {
+            remove_principal(vault, role, *legacy.borrow())
+        } else {
+            false
+        };
+        from_v1 || from_v2
     }
 
     /// Returns true iff the principal was actually removed (i.e. state changed).

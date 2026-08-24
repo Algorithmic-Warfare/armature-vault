@@ -42,22 +42,32 @@ module armature_vault::principal_acl {
 
     // === Reads ===
 
-    /// True when `uid` carries a v2 principal store.
-    public(package) fun exists_for(uid: &UID): bool {
-        df::exists_(uid, PrincipalAclKey {})
-    }
-
     /// Principals holding `role`.  Empty when the store is absent, or when its
     /// stored version is newer than this code understands — fail closed.
+    ///
+    /// Versions at or below `STORE_VERSION` are read normally; only version 1
+    /// exists today, so `load_value` below is unambiguous.  When `STORE_VERSION`
+    /// grows, add a branch per historical version here — the read path must keep
+    /// answering for every version still in the wild until migration saturates.
     public(package) fun principals<R: copy + drop + store>(
         uid: &UID,
         role: R,
     ): vector<PrincipalV2> {
         if (!df::exists_(uid, PrincipalAclKey {})) { return vector[] };
         let wrapper: &Versioned = df::borrow(uid, PrincipalAclKey {});
-        if (wrapper.version() != STORE_VERSION) { return vector[] };
+        if (wrapper.version() > STORE_VERSION) { return vector[] };
         let store: &PrincipalAclV1<R> = wrapper.load_value();
         if (store.acl.contains(&role)) { *store.acl.get(&role) } else { vector[] }
+    }
+
+    /// True when the v2 store already lists this exact principal for `role`.
+    /// Used to keep one identity from being granted in both stores at once.
+    public(package) fun contains<R: copy + drop + store>(
+        uid: &UID,
+        role: R,
+        principal: &PrincipalV2,
+    ): bool {
+        principals<R>(uid, role).contains(principal)
     }
 
     /// Number of principals holding `role`.
@@ -124,10 +134,34 @@ module armature_vault::principal_acl {
     }
 
     /// Mutable access to the current-version payload.  The single place a future
-    /// schema migration happens (see the module doc).
+    /// schema migration happens (see the module doc): when `STORE_VERSION` grows,
+    /// upgrade an older payload in place here — via
+    /// `versioned::remove_value_for_upgrade` / `versioned::upgrade` — before
+    /// returning, so writers always see the current shape.  A version NEWER than
+    /// this code understands aborts rather than silently writing a shape the
+    /// owner cannot read back.
     fun borrow_mut<R: copy + drop + store>(uid: &mut UID): &mut PrincipalAclV1<R> {
         let wrapper: &mut Versioned = df::borrow_mut(uid, PrincipalAclKey {});
-        assert!(wrapper.version() == STORE_VERSION, EUnknownStoreVersion);
+        assert!(wrapper.version() <= STORE_VERSION, EUnknownStoreVersion);
         wrapper.load_value_mut()
+    }
+
+    // === Teardown ===
+
+    /// Delete the whole v2 store from `uid`, dropping every principal it holds.
+    ///
+    /// Exists so an owner that tears down its parent object can revoke v2
+    /// principals as well as v1 ones.  Draining only the caller's own v1 field
+    /// would leave this store authorizing every role it held, since
+    /// `satisfies_role` reads both — see `dao_receipt_vault::deinitialize_dao_vault`.
+    ///
+    /// No-op when the store is absent.  Aborts on a payload version this code
+    /// cannot destructure, rather than orphaning it.
+    public(package) fun destroy<R: copy + drop + store>(uid: &mut UID) {
+        if (!df::exists_(uid, PrincipalAclKey {})) { return };
+        let wrapper: Versioned = df::remove(uid, PrincipalAclKey {});
+        assert!(wrapper.version() <= STORE_VERSION, EUnknownStoreVersion);
+        let store: PrincipalAclV1<R> = wrapper.destroy();
+        let PrincipalAclV1 { acl: _ } = store;
     }
 }

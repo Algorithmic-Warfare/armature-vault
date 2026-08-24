@@ -641,7 +641,69 @@ module armature_vault::keyspace_tests {
     // the last v1 Grant principal can be revoked (this is what makes migrating
     // a role off the frozen v1 store possible).
     #[test]
-    fun test_v2_grant_covers_last_v1_grantor() {
+    /// `migrate_acl_to_v2` is how a role moves off the frozen v1 store: access is
+    /// preserved, the identity ends up in exactly one store, and `role_count`
+    /// spans both so the last-grantor guard still sees it.
+    ///
+    /// This previously granted `acl_v2::player(ADMIN)` alongside the existing v1
+    /// `acl::player(ADMIN)` and then revoked the v1 copy. That is no longer
+    /// allowed: one identity in both stores is what let a revoke report success
+    /// while leaving the sender authorized, so `grant_v2` now rejects it
+    /// (`test_grant_v2_rejects_identity_already_in_v1`).
+    fun test_migration_moves_last_grantor_to_v2() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::migrate_acl_to_v2(&mut allowlist, &dao, sc.ctx());
+
+        // Access is unchanged, and Grant now lives solely in the v2 store.
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 0);
+        assert!(keyspace::role_count(&allowlist, keyspace::role_grant()) == 1, 1);
+        assert!(keyspace::principals(&allowlist, keyspace::role_grant()).is_empty(), 2);
+        assert!(keyspace::principals_v2(&allowlist, keyspace::role_grant()).length() == 1, 3);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // ── Regression tests for the pre-publish security review ──────────────────
+
+    #[test]
+    #[expected_failure]
+    /// One identity must never be grantable into both stores: the union read
+    /// would authorize it twice, and a single-store revoke would then look
+    /// successful while leaving access intact.
+    fun test_grant_v2_rejects_identity_already_in_v1() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        // ADMIN already holds Grant in v1 from test_create.
+        keyspace::grant_v2(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl_v2::player(ADMIN),
+            &dao,
+            sc.ctx(),
+        );
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    #[test]
+    #[expected_failure]
+    /// The same rule in the other direction.
+    fun test_grant_rejects_identity_already_in_v2() {
         let mut sc = ts::begin(ADMIN);
         let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
 
@@ -651,12 +713,83 @@ module armature_vault::keyspace_tests {
 
         keyspace::grant_v2(
             &mut allowlist,
-            keyspace::role_grant(),
-            acl_v2::player(ADMIN),
+            keyspace::role_read(),
+            acl_v2::player(USER1),
             &dao,
             sc.ctx(),
         );
-        // ADMIN is the only v1 Grant principal, but the v2 grant covers it.
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    #[test]
+    /// A v1-API revoke must still remove a principal that migration relocated to
+    /// the v2 store. Before the fix this removed nothing while `AccessRevoked`
+    /// was emitted and `version` bumped — the caller believed access was gone.
+    fun test_v1_revoke_reaches_migrated_principal() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        keyspace::migrate_acl_to_v2(&mut allowlist, &dao, sc.ctx());
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
+
+        // Revoke through the v1 API even though the principal now lives in v2.
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 1);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    #[test]
+    #[expected_failure]
+    /// The brick: grant a principal nobody can satisfy (an unknown kind), then
+    /// revoke the only real grantor. `role_count` stays at 1 so `ELastGrantor`
+    /// passes, but nothing could ever administer the keyspace again — including
+    /// changing `Read`, so `seal_approve` access could never be revoked.
+    fun test_cannot_revoke_self_behind_unsatisfiable_grantor() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        // Kind 200 is not evaluatable, so `satisfies` denies it for every sender.
+        keyspace::grant_v2(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl_v2::principal(200, @0x0, vector[]),
+            &dao,
+            sc.ctx(),
+        );
         keyspace::revoke(
             &mut allowlist,
             keyspace::role_grant(),
@@ -664,8 +797,42 @@ module armature_vault::keyspace_tests {
             &dao,
             sc.ctx(),
         );
-        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 0);
-        assert!(keyspace::role_count(&allowlist, keyspace::role_grant()) == 1, 1);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    #[test]
+    /// A grantor can still hand off and be removed — by the successor, who is
+    /// demonstrably satisfiable. This is what `EWouldLockSelf` leaves open.
+    fun test_successor_can_revoke_previous_grantor() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN, USER1]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+
+        // USER1 (the successor) removes ADMIN — USER1 still satisfies Grant.
+        ts::next_tx(&mut sc, USER1);
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl::player(ADMIN),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, USER1), 0);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 1);
 
         keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
@@ -721,15 +888,14 @@ module armature_vault::keyspace_tests {
         let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
-        // ADMIN already holds Read in v2 as well as v1 — migration must dedup.
-        keyspace::grant_v2(
-            &mut allowlist,
-            keyspace::role_read(),
-            acl_v2::player(ADMIN),
-            &dao,
-            sc.ctx(),
-        );
-
+        // ADMIN holds Read in v1 from test_create. A second migration must find
+        // the v1 list already drained and change nothing.
+        //
+        // This used to pre-seed `acl_v2::player(ADMIN)` alongside the v1 entry to
+        // exercise migration's dedup branch. The public API no longer allows one
+        // identity in both stores (see
+        // `test_grant_v2_rejects_identity_already_in_v1`), so that branch is now
+        // defensive only and unreachable from here.
         keyspace::migrate_acl_to_v2(&mut allowlist, &dao, sc.ctx());
         let after_first = keyspace::role_count(&allowlist, keyspace::role_read());
 
