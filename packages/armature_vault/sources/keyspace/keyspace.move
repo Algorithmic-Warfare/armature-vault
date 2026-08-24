@@ -59,6 +59,8 @@ module armature_vault::keyspace {
     const EEmptyGrantPrincipals: u64 = 8;
     /// A revocation would leave the caller unable to satisfy `Grant`.
     const EWouldLockSelf: u64 = 9;
+    /// `Role::Grant` cannot be granted through the v2 store — see `grant_v2`.
+    const EGrantRoleV1Only: u64 = 10;
 
     // ── Objects ──────────────────────────────────────────────────────────────
 
@@ -477,8 +479,8 @@ module armature_vault::keyspace {
         ctx: &TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
-        let changed = remove_principal_everywhere(keyspace, role, principal);
-        assert!(changed, ENotGranted);
+        let (cleared_v1, cleared_v2) = remove_principal_everywhere(keyspace, role, principal);
+        assert!(cleared_v1.is_some() || !cleared_v2.is_empty(), ENotGranted);
         // Guards count both stores (see `role_count`): a v2 grant can cover a
         // removed v1 one, which is what makes migrating a role off the frozen
         // v1 store possible at all.
@@ -493,12 +495,7 @@ module armature_vault::keyspace {
             keyspace.version = keyspace.version + 1;
         };
         assert_grant_still_satisfiable(keyspace, dao, ctx.sender());
-        event::emit(AccessRevoked {
-            keyspace_id: keyspace.id.to_inner(),
-            role,
-            principal,
-            by: ctx.sender(),
-        });
+        emit_revocations(keyspace, role, cleared_v1, cleared_v2, ctx.sender());
     }
 
     /// Post-state guard: the caller must STILL satisfy `Grant` after a removal.
@@ -532,8 +529,8 @@ module armature_vault::keyspace {
         let mut i = 0;
         while (i < n) {
             let role = roles[i];
-            let changed = remove_principal_everywhere(keyspace, role, principal);
-            assert!(changed, ENotGranted);
+            let (cleared_v1, cleared_v2) = remove_principal_everywhere(keyspace, role, principal);
+            assert!(cleared_v1.is_some() || !cleared_v2.is_empty(), ENotGranted);
             if (role == Role::Grant) {
                 assert!(role_count(keyspace, Role::Grant) > 0, ELastGrantor);
             };
@@ -544,12 +541,7 @@ module armature_vault::keyspace {
                 assert!(role_count(keyspace, Role::Read) > 0, ELastReader);
                 keyspace.version = keyspace.version + 1;
             };
-            event::emit(AccessRevoked {
-                keyspace_id: keyspace.id.to_inner(),
-                role,
-                principal,
-                by: ctx.sender(),
-            });
+            emit_revocations(keyspace, role, cleared_v1, cleared_v2, ctx.sender());
             i = i + 1;
         };
         assert_grant_still_satisfiable(keyspace, dao, ctx.sender());
@@ -608,6 +600,13 @@ module armature_vault::keyspace {
     /// `Grant`.  Accepts every principal kind — `player_v2`, `ou_v2`,
     /// `machine_v2`, and whatever kinds later upgrades add.  Bumps `version`
     /// when the `Read` set changes, exactly like `grant`.
+    ///
+    /// Refuses `Role::Grant` (`EGrantRoleV1Only`): administration stays on the
+    /// v1 path, mirroring `dao_receipt_vault`'s treatment of `Edit`.  Existing
+    /// admin principals still move between stores via `migrate_acl_to_v2`.
+    ///
+    /// A grant is refused when the same *identity* already holds the role in
+    /// either store — `machine(x)` and `player(x)` are one authority, not two.
     public fun grant_v2(
         keyspace: &mut Keyspace,
         role: Role,
@@ -616,6 +615,13 @@ module armature_vault::keyspace {
         ctx: &mut TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        // `Role::Grant` is administration, and this path accepts every kind —
+        // including `machine`, whose whole point is a server-held key. An admin
+        // principal nobody can produce a signature for makes the keyspace
+        // permanently unadministrable, and `Read` then permanently unrevokable.
+        // `dao_receipt_vault::grant_v2` refuses `Edit` for the same reason.
+        // Admin still moves between stores via `migrate_acl_to_v2`.
+        assert!(role != Role::Grant, EGrantRoleV1Only);
         assert_not_held_in_v1(keyspace, role, &principal);
         let added = principal_acl::add(&mut keyspace.id, role, principal, ctx);
         assert!(added, EAlreadyGranted);
@@ -631,6 +637,10 @@ module armature_vault::keyspace {
     /// Revoke `principal` from `role` in the v2 store.  Caller must satisfy
     /// `Grant`.  Last-principal guards count both stores, so the v1 grant of a
     /// role can cover for a removed v2 one and vice versa.
+    ///
+    /// Identity-wide: revoking `machine(x)` also clears a v1 `Player { x }`,
+    /// because both admit exactly the same sender.  One event is emitted per
+    /// store entry actually cleared.
     public fun revoke_v2(
         keyspace: &mut Keyspace,
         role: Role,
@@ -639,8 +649,8 @@ module armature_vault::keyspace {
         ctx: &TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
-        let removed = remove_v2_everywhere(keyspace, role, principal);
-        assert!(removed, ENotGranted);
+        let (cleared_v1, cleared_v2) = remove_v2_everywhere(keyspace, role, principal);
+        assert!(cleared_v1.is_some() || !cleared_v2.is_empty(), ENotGranted);
         if (role == Role::Grant) {
             assert!(role_count(keyspace, Role::Grant) > 0, ELastGrantor);
         };
@@ -652,12 +662,7 @@ module armature_vault::keyspace {
             keyspace.version = keyspace.version + 1;
         };
         assert_grant_still_satisfiable(keyspace, dao, ctx.sender());
-        event::emit(AccessRevokedV2 {
-            keyspace_id: keyspace.id.to_inner(),
-            role,
-            principal,
-            by: ctx.sender(),
-        });
+        emit_revocations(keyspace, role, cleared_v1, cleared_v2, ctx.sender());
     }
 
     /// v2 principals holding `role` (empty when the store is absent, or its
@@ -866,6 +871,10 @@ module armature_vault::keyspace {
 
     /// Reject a v1 grant of an identity the v2 store already holds for `role`.
     ///
+    /// "Identity", not "principal": `principal_acl::contains` matches across
+    /// address-satisfied kinds, so a v1 `Player { x }` is refused when the v2
+    /// store holds either `player(x)` or `machine(x)`.
+    ///
     /// The two stores are read as a union, so granting the same identity in both
     /// is pure redundancy — and dangerous redundancy: a later single-store revoke
     /// would emit `AccessRevoked`, bump `version`, and leave the sender still
@@ -880,8 +889,14 @@ module armature_vault::keyspace {
     }
 
     /// The `PrincipalV2` direction of `assert_not_held_in_v2`.
+    ///
+    /// Uses `to_v1_equivalent`, not `to_v1`: a `machine(x)` grant has to be
+    /// refused when v1 already holds `Player { x }`, even though `machine` has
+    /// no v1 form to round-trip to. `to_v1` returns `none` there and the guard
+    /// waved the grant through — which is how the same identity ended up in
+    /// both stores under two kinds, one of them invisible to a v1 revoke.
     fun assert_not_held_in_v1(keyspace: &Keyspace, role: Role, principal: &PrincipalV2) {
-        let legacy = acl_v2::to_v1(principal);
+        let legacy = acl_v2::to_v1_equivalent(principal);
         if (legacy.is_none()) { return };
         let held = keyspace.acl.contains(&role)
             && keyspace.acl.get(&role).contains(legacy.borrow());
@@ -902,14 +917,18 @@ module armature_vault::keyspace {
         keyspace: &mut Keyspace,
         role: Role,
         principal: Principal,
-    ): bool {
-        let from_v1 = remove_principal(keyspace, role, principal);
+    ): (Option<Principal>, vector<PrincipalV2>) {
+        let from_v1 = if (remove_principal(keyspace, role, principal)) {
+            option::some(principal)
+        } else {
+            option::none()
+        };
         let from_v2 = principal_acl::remove(
             &mut keyspace.id,
             role,
             acl_v2::from_v1(&principal),
         );
-        from_v1 || from_v2
+        (from_v1, from_v2)
     }
 
     /// The `PrincipalV2` counterpart of `remove_principal_everywhere`. Kinds with
@@ -919,15 +938,50 @@ module armature_vault::keyspace {
         keyspace: &mut Keyspace,
         role: Role,
         principal: PrincipalV2,
-    ): bool {
+    ): (Option<Principal>, vector<PrincipalV2>) {
         let from_v2 = principal_acl::remove(&mut keyspace.id, role, principal);
-        let legacy = acl_v2::to_v1(&principal);
+        let legacy = acl_v2::to_v1_equivalent(&principal);
         let from_v1 = if (legacy.is_some()) {
-            remove_principal(keyspace, role, *legacy.borrow())
+            let twin = *legacy.borrow();
+            if (remove_principal(keyspace, role, twin)) {
+                option::some(twin)
+            } else {
+                option::none()
+            }
         } else {
-            false
+            option::none()
         };
-        from_v1 || from_v2
+        (from_v1, from_v2)
+    }
+
+    /// Emit one event per store entry a revocation actually cleared.
+    ///
+    /// Revocation is identity-wide, so a v1 revoke can clear a v2 twin and the
+    /// reverse. Emitting only the event matching the kind the *caller* named
+    /// would leave an indexer showing a grant the chain no longer holds — the
+    /// mirror of the bug identity-wide removal exists to fix.
+    fun emit_revocations(
+        keyspace: &Keyspace,
+        role: Role,
+        cleared_v1: Option<Principal>,
+        cleared_v2: vector<PrincipalV2>,
+        by: address,
+    ) {
+        let keyspace_id = keyspace.id.to_inner();
+        if (cleared_v1.is_some()) {
+            event::emit(AccessRevoked {
+                keyspace_id,
+                role,
+                principal: *cleared_v1.borrow(),
+                by,
+            });
+        };
+        let n = cleared_v2.length();
+        let mut i = 0;
+        while (i < n) {
+            event::emit(AccessRevokedV2 { keyspace_id, role, principal: cleared_v2[i], by });
+            i = i + 1;
+        };
     }
 
     fun remove_principal(keyspace: &mut Keyspace, role: Role, principal: Principal): bool {

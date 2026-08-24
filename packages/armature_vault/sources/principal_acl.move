@@ -60,14 +60,26 @@ module armature_vault::principal_acl {
         if (store.acl.contains(&role)) { *store.acl.get(&role) } else { vector[] }
     }
 
-    /// True when the v2 store already lists this exact principal for `role`.
-    /// Used to keep one identity from being granted in both stores at once.
+    /// True when the v2 store holds any principal admitting the same senders as
+    /// `principal` for `role`.
+    ///
+    /// Compares by identity, not bytes: `player(x)` and `machine(x)` are one
+    /// authority under `acl_v2::satisfies`, so counting them as separate grants
+    /// would let either hide behind the other.  Used to keep one identity from
+    /// being granted in both stores at once, or twice in this one.
     public(package) fun contains<R: copy + drop + store>(
         uid: &UID,
         role: R,
         principal: &PrincipalV2,
     ): bool {
-        principals<R>(uid, role).contains(principal)
+        let list = principals<R>(uid, role);
+        let n = list.length();
+        let mut i = 0;
+        while (i < n) {
+            if (acl_v2::same_identity(&list[i], principal)) { return true };
+            i = i + 1;
+        };
+        false
     }
 
     /// Number of principals holding `role`.
@@ -95,7 +107,11 @@ module armature_vault::principal_acl {
     // === Mutations ===
 
     /// Add `principal` to `role`, creating the store on first use.
-    /// Returns false (no-op) when the principal already holds the role.
+    ///
+    /// Returns false (no-op) when an *identity-equivalent* principal already
+    /// holds the role: `player(x)` blocks `machine(x)` and the reverse, because
+    /// both admit exactly the same sender and a later revoke must be able to
+    /// clear "x" without knowing which label it was filed under.
     public(package) fun add<R: copy + drop + store>(
         uid: &mut UID,
         role: R,
@@ -112,25 +128,46 @@ module armature_vault::principal_acl {
             return true
         };
         let list = store.acl.get_mut(&role);
-        if (list.contains(&principal)) { return false };
+        let n = list.length();
+        let mut i = 0;
+        while (i < n) {
+            if (acl_v2::same_identity(&list[i], &principal)) { return false };
+            i = i + 1;
+        };
         list.push_back(principal);
         true
     }
 
-    /// Remove `principal` from `role`.  Returns false when it wasn't there.
+    /// Remove every principal admitting the same senders as `principal` from
+    /// `role`, returning the ones actually removed.
+    ///
+    /// Identity-wide rather than byte-exact: revoking `player(x)` has to clear
+    /// `machine(x)` too, or the revoke succeeds, emits its event, and leaves x
+    /// still holding the role — a silent failure on an ACL guarding assets and
+    /// decryption keys.  `add` refuses to create such a pair in the first place,
+    /// so in practice this returns at most one principal; it returns a vector so
+    /// the guarantee does not rest on that, and so callers can emit one event
+    /// per entry they really cleared rather than assuming which kind it was.
+    ///
+    /// Iterates high-to-low so a removal does not skip the following element.
     public(package) fun remove<R: copy + drop + store>(
         uid: &mut UID,
         role: R,
         principal: PrincipalV2,
-    ): bool {
-        if (!df::exists_(uid, PrincipalAclKey {})) { return false };
+    ): vector<PrincipalV2> {
+        let mut removed = vector[];
+        if (!df::exists_(uid, PrincipalAclKey {})) { return removed };
         let store = borrow_mut<R>(uid);
-        if (!store.acl.contains(&role)) { return false };
+        if (!store.acl.contains(&role)) { return removed };
         let list = store.acl.get_mut(&role);
-        let (found, idx) = list.index_of(&principal);
-        if (!found) { return false };
-        list.remove(idx);
-        true
+        let mut i = list.length();
+        while (i > 0) {
+            i = i - 1;
+            if (acl_v2::same_identity(&list[i], &principal)) {
+                removed.push_back(list.remove(i));
+            };
+        };
+        removed
     }
 
     /// Mutable access to the current-version payload.  The single place a future

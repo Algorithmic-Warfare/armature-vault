@@ -568,10 +568,13 @@ module armature_vault::keyspace_tests {
         sc.end();
     }
 
-    // Kind is part of identity: machine_v2(A) and player_v2(A) are different
-    // principals, so revoking one leaves the other's access intact.
+    // player_v2(A) and machine_v2(A) authorize the same sender, so the store
+    // holds them as ONE identity: the second grant is refused rather than
+    // stacking a differently-labelled twin that a revoke of the first would
+    // leave standing.
     #[test]
-    fun test_v2_kinds_are_distinct_identities() {
+    #[expected_failure]
+    fun test_v2_address_kinds_are_one_identity() {
         let mut sc = ts::begin(ADMIN);
         let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
 
@@ -586,7 +589,7 @@ module armature_vault::keyspace_tests {
             &dao,
             sc.ctx(),
         );
-        // Same address, different kind — not a duplicate grant.
+        // Same address, different kind — same authority, so EAlreadyGranted.
         keyspace::grant_v2(
             &mut allowlist,
             keyspace::role_read(),
@@ -594,7 +597,71 @@ module armature_vault::keyspace_tests {
             &dao,
             sc.ctx(),
         );
-        assert!(keyspace::principals_v2(&allowlist, keyspace::role_read()).length() == 2, 0);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // A machine principal planted in the v2 store does not survive the ordinary
+    // v1 revoke of the same address. This is the backdoor the audit found: the
+    // v2 store is a dynamic field and never appears in the keyspace object's
+    // `acl` field, so an admin cleaning up after a departing holder sees nothing
+    // left behind while the holder keeps the role.
+    #[test]
+    fun test_v1_revoke_clears_machine_twin() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant_v2(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl_v2::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
+
+        // Revoke names the *player* kind — the only one an admin reading the
+        // object would know about.
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 1);
+        assert!(keyspace::principals_v2(&allowlist, keyspace::role_read()).is_empty(), 2);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // The reverse direction: revoking machine(A) clears a v1 Player { A }, since
+    // the two admit the same sender.
+    #[test]
+    fun test_v2_machine_revoke_clears_v1_player() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
 
         keyspace::revoke_v2(
             &mut allowlist,
@@ -603,8 +670,33 @@ module armature_vault::keyspace_tests {
             &dao,
             sc.ctx(),
         );
-        // The player_v2 grant still satisfies Read for USER1.
-        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 1);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 1);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // Grant is administration: it cannot be handed to a machine key (or any
+    // other v2 kind) through the v2 store. Losing that key would leave the
+    // keyspace unadministrable and Read permanently unrevokable.
+    #[test]
+    #[expected_failure]
+    fun test_grant_v2_refuses_the_grant_role() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant_v2(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl_v2::machine(USER1),
+            &dao,
+            sc.ctx(),
+        );
 
         keyspace::test_destroy(allowlist);
         ts::return_shared(dao);

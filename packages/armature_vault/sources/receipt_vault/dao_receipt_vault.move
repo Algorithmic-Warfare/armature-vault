@@ -566,8 +566,17 @@ module armature_vault::dao_receipt_vault {
             // H1/M3: Edit principals must come through grant_edit_ou, which validates
             // the &DAO witness and refuses bare-Player and unverifiable-Ou principals.
             assert!(role != Role::Edit, EEditMustBeOu);
+            // Keep one identity in one store. If the v2 store already admits this
+            // sender for the role, a second grant here adds no access and makes a
+            // later single-store revoke ambiguous. Matched across kinds, so a v1
+            // `Player { x }` is skipped when v2 holds `machine(x)`.
+            let held_in_v2 = principal_acl::contains(
+                &vault.id,
+                role,
+                &acl_v2::from_v1(&principal),
+            );
             // L1: only emit on real state change.
-            let changed = add_principal(vault, role, principal);
+            let changed = !held_in_v2 && add_principal(vault, role, principal);
             if (changed) {
                 event::emit(AclGrantedEvent { vault_id, role, principal, by: sender });
             };
@@ -619,16 +628,17 @@ module armature_vault::dao_receipt_vault {
         let vault_id = object::id(vault);
         let n = roles.length();
 
-        // L1: track which (role, principal) pairs actually changed state. Defer all
-        // event emission until after the brick-guards (F2) and only emit for real
-        // changes (L1).
-        let mut changed_mask: vector<bool> = vector[];
+        // L1: track what each (role, principal) pair actually cleared, per store.
+        // Defer all event emission until after the brick-guards (F2) and only emit
+        // for real changes (L1). Revocation is identity-wide, so a v1 revoke can
+        // clear a v2 twin — both are reported, so indexers stay in step.
+        let mut cleared_v1: vector<Option<Principal>> = vector[];
+        let mut cleared_v2: vector<vector<PrincipalV2>> = vector[];
         let mut i = 0;
         while (i < n) {
-            let role = roles[i];
-            let principal = principals[i];
-            let changed = remove_principal_everywhere(vault, role, principal);
-            changed_mask.push_back(changed);
+            let (v1, v2) = remove_principal_everywhere(vault, roles[i], principals[i]);
+            cleared_v1.push_back(v1);
+            cleared_v2.push_back(v2);
             i = i + 1;
         };
 
@@ -646,14 +656,7 @@ module armature_vault::dao_receipt_vault {
         // F2 + L1: emit events only now (after guards), and only for state-changing pairs.
         let mut j = 0;
         while (j < n) {
-            if (changed_mask[j]) {
-                event::emit(AclRevokedEvent {
-                    vault_id,
-                    role: roles[j],
-                    principal: principals[j],
-                    by: sender,
-                });
-            };
+            emit_revocations(vault_id, roles[j], cleared_v1[j], cleared_v2[j], sender);
             j = j + 1;
         };
     }
@@ -692,7 +695,10 @@ module armature_vault::dao_receipt_vault {
             let role = roles[i];
             let principal = principals[i];
             assert!(role != Role::Edit, EEditMustBeOu);
-            if (principal_acl::add(&mut vault.id, role, principal, ctx)) {
+            // Mirror of the v1 path: skip when the frozen store already admits
+            // this identity for the role.
+            let dup = held_in_v1(vault, role, &principal);
+            if (!dup && principal_acl::add(&mut vault.id, role, principal, ctx)) {
                 event::emit(AclGrantedEventV2 { vault_id, role, principal, by: sender });
             };
             i = i + 1;
@@ -715,11 +721,13 @@ module armature_vault::dao_receipt_vault {
         let vault_id = object::id(vault);
         let n = roles.length();
 
-        let mut changed_mask: vector<bool> = vector[];
+        let mut cleared_v1: vector<Option<Principal>> = vector[];
+        let mut cleared_v2: vector<vector<PrincipalV2>> = vector[];
         let mut i = 0;
         while (i < n) {
-            let changed = remove_v2_everywhere(vault, roles[i], principals[i]);
-            changed_mask.push_back(changed);
+            let (v1, v2) = remove_v2_everywhere(vault, roles[i], principals[i]);
+            cleared_v1.push_back(v1);
+            cleared_v2.push_back(v2);
             i = i + 1;
         };
 
@@ -728,14 +736,7 @@ module armature_vault::dao_receipt_vault {
 
         let mut j = 0;
         while (j < n) {
-            if (changed_mask[j]) {
-                event::emit(AclRevokedEventV2 {
-                    vault_id,
-                    role: roles[j],
-                    principal: principals[j],
-                    by: sender,
-                });
-            };
+            emit_revocations(vault_id, roles[j], cleared_v1[j], cleared_v2[j], sender);
             j = j + 1;
         };
     }
@@ -797,8 +798,15 @@ module armature_vault::dao_receipt_vault {
     // === Registry maintenance ===
 
     /// F4: re-key the registry entry for this vault after a registrant DAO migration.
-    /// The caller must satisfy the current `Edit` role using `editor_dao`. The old
-    /// key is derived from `vault.registrant_dao_id`; the new key uses
+    ///
+    /// The caller must satisfy the current `Edit` role using `editor_dao` AND be a
+    /// governance member of `new_registrant_dao` — a registry slot keyed by a DAO
+    /// can only be claimed by that DAO's board, the same rule
+    /// `initialize_dao_vault` applies when a slot is first created. A migration
+    /// therefore has to be signed by someone on the successor DAO's board, which
+    /// whoever just created that DAO will be.
+    ///
+    /// The old key is derived from `vault.registrant_dao_id`; the new key uses
     /// `new_registrant_dao.id()`. Aborts if no entry exists for the old key or if
     /// an entry already exists for the new key.
     ///
@@ -813,6 +821,20 @@ module armature_vault::dao_receipt_vault {
     ) {
         let sender = ctx.sender();
         assert_role(vault, Role::Edit, editor_dao, sender);
+        // Claiming a registry slot keyed by a DAO requires membership of that
+        // DAO — the same rule `initialize_dao_vault` applies when a slot is
+        // first created, now applied when one is moved.
+        //
+        // Without it, Edit on *any* vault was enough to move that vault into
+        // *any* DAO's slot. `initialize_dao_vault_v2` needs no `OwnerCap`, so an
+        // attacker could register a vault against someone else's SSU under a DAO
+        // they control, then re-key it to the victim's DAO. The victim could
+        // then neither register their own vault for that SSU
+        // (`EVaultAlreadyExists`) nor free the slot (they hold no Edit on the
+        // squatter), and `lookup` — the intended discovery path — resolved their
+        // key to the attacker's vault. Granting the victim's OU `Deposit` but
+        // not `Withdraw` turned that into a funnel.
+        assert!(new_registrant_dao.is_governance_member(sender), ENotAuthorized);
 
         let old_key = VaultKey {
             storage_unit_id: vault.storage_unit_id,
@@ -930,31 +952,79 @@ module armature_vault::dao_receipt_vault {
         vault: &mut DaoReceiptVault,
         role: Role,
         principal: Principal,
-    ): bool {
-        let from_v1 = remove_principal(vault, role, principal);
+    ): (Option<Principal>, vector<PrincipalV2>) {
+        let from_v1 = if (remove_principal(vault, role, principal)) {
+            option::some(principal)
+        } else {
+            option::none()
+        };
         let from_v2 = principal_acl::remove(
             &mut vault.id,
             role,
             acl_v2::from_v1(&principal),
         );
-        from_v1 || from_v2
+        (from_v1, from_v2)
     }
 
     /// The `PrincipalV2` counterpart of `remove_principal_everywhere`. Kinds with
     /// no v1 equivalent live only in the v2 store.
+    ///
+    /// Pairs with `to_v1_equivalent`, not `to_v1`: revoking `machine(x)` must
+    /// clear a v1 `Player { x }` as well, since the two admit the same sender.
     fun remove_v2_everywhere(
         vault: &mut DaoReceiptVault,
         role: Role,
         principal: PrincipalV2,
-    ): bool {
+    ): (Option<Principal>, vector<PrincipalV2>) {
         let from_v2 = principal_acl::remove(&mut vault.id, role, principal);
-        let legacy = acl_v2::to_v1(&principal);
+        let legacy = acl_v2::to_v1_equivalent(&principal);
         let from_v1 = if (legacy.is_some()) {
-            remove_principal(vault, role, *legacy.borrow())
+            let twin = *legacy.borrow();
+            if (remove_principal(vault, role, twin)) {
+                option::some(twin)
+            } else {
+                option::none()
+            }
         } else {
-            false
+            option::none()
         };
-        from_v1 || from_v2
+        (from_v1, from_v2)
+    }
+
+    /// True when the frozen v1 list for `role` already holds a principal
+    /// admitting the same senders as `principal`.
+    fun held_in_v1(vault: &DaoReceiptVault, role: Role, principal: &PrincipalV2): bool {
+        let legacy = acl_v2::to_v1_equivalent(principal);
+        if (legacy.is_none()) { return false };
+        vault.acl.contains(&role) && vault.acl.get(&role).contains(legacy.borrow())
+    }
+
+    /// Emit one event per store entry a revocation actually cleared.
+    ///
+    /// Revocation is identity-wide, so a v1 revoke can clear a v2 twin and the
+    /// reverse. Emitting only the event matching the kind the *caller* named
+    /// would leave an indexer showing a grant the chain no longer holds.
+    fun emit_revocations(
+        vault_id: ID,
+        role: Role,
+        cleared_v1: Option<Principal>,
+        cleared_v2: vector<PrincipalV2>,
+        by: address,
+    ) {
+        if (cleared_v1.is_some()) {
+            event::emit(AclRevokedEvent {
+                vault_id,
+                role,
+                principal: *cleared_v1.borrow(),
+                by,
+            });
+        };
+        let n = cleared_v2.length();
+        let mut i = 0;
+        while (i < n) {
+            event::emit(AclRevokedEventV2 { vault_id, role, principal: cleared_v2[i], by });
+            i = i + 1;
+        };
     }
 
     /// Returns true iff the principal was actually removed (i.e. state changed).

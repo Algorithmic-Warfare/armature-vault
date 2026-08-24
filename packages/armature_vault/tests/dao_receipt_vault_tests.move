@@ -744,6 +744,68 @@ module armature_vault::dao_receipt_vault_tests {
 
     // --- F4: registry key is updatable after DAO migration
 
+    /// AV-01: re-keying a vault into a DAO's registry slot requires membership
+    /// of that DAO. Without this, Edit on any vault was enough to squat any
+    /// other DAO's (SSU, DAO) slot — permanently, since the victim can neither
+    /// register their own vault nor free the squatter's.
+    #[test]
+    #[expected_failure]
+    fun update_registry_key_rejects_foreign_registrant_dao() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        // The victim DAO. AWAR_OFFICER is deliberately NOT on its board.
+        let victim = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+        let ssu_id = object::id_from_address(@0x5502);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        vault::init_for_testing(scenario.ctx());
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            ssu_id,
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        let v_id = object::id(&v);
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        {
+            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            ts::return_shared(v);
+            ts::return_shared(reg);
+        };
+
+        // AWAR_OFFICER holds Edit on this vault, but is not a member of `victim`.
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            let victim_dao = ts::take_shared_by_id<DAO>(&scenario, victim);
+            vault::update_registry_key(
+                &mut reg,
+                &mut v,
+                &officers_dao,
+                &victim_dao,
+                scenario.ctx(),
+            );
+            ts::return_shared(victim_dao);
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+            ts::return_shared(reg);
+        };
+
+        scenario.end();
+    }
+
     #[test]
     fun update_registry_key_remaps_vault_after_migration() {
         let mut scenario = ts::begin(AWAR_M1);

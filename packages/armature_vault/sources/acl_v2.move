@@ -130,6 +130,52 @@ module armature_vault::acl_v2 {
         }
     }
 
+    // === Identity equivalence ===
+
+    /// True when `kind` authorizes purely by matching `id` against the sender.
+    /// Every kind in this class is the same authority wearing a different
+    /// label: the label is for indexers, ACL UIs and audits, never for the
+    /// check itself.
+    public fun is_address_kind(kind: u8): bool {
+        kind == KIND_PLAYER || kind == KIND_MACHINE
+    }
+
+    /// True when `a` and `b` admit exactly the same senders.
+    ///
+    /// `player` and `machine` both reduce to `id == sender` in `satisfies`, so
+    /// holding one is indistinguishable from holding the other.  A revoke that
+    /// cleared `player(x)` and left `machine(x)` standing would report success,
+    /// emit its event, and change nothing — which is why the ACL store compares
+    /// with this rather than with `==`.  Any future kind that authorizes by
+    /// address alone must join `is_address_kind` for the same reason.
+    ///
+    /// Payload-bearing principals are never merged across kinds: `data` is part
+    /// of what they mean, and no kind interprets it yet.
+    public fun same_identity(a: &PrincipalV2, b: &PrincipalV2): bool {
+        if (a.id != b.id || a.data != b.data) { return false };
+        a.kind == b.kind
+            || (a.data.is_empty() && is_address_kind(a.kind) && is_address_kind(b.kind))
+    }
+
+    /// The v1 principal admitting the same senders as this one, or `none` when
+    /// no v1 shape can.
+    ///
+    /// Unlike `to_v1` this is about *authority*, not round-tripping.  A
+    /// `machine` principal has no v1 twin to round-trip to — the frozen enum
+    /// cannot express the kind — but `Player { id }` admits exactly the senders
+    /// it does, so revoking one has to clear the other.  Use `to_v1` when you
+    /// need the exact inverse of `from_v1`; use this when you are revoking.
+    public fun to_v1_equivalent(principal: &PrincipalV2): Option<Principal> {
+        if (!principal.data.is_empty()) { return option::none() };
+        if (is_address_kind(principal.kind)) {
+            option::some(acl::player(principal.id))
+        } else if (principal.kind == KIND_OU) {
+            option::some(acl::ou(principal.id.to_id()))
+        } else {
+            option::none()
+        }
+    }
+
     // === Authorization ===
 
     /// True if `sender` satisfies `principal` given the `&DAO` the caller is
