@@ -21,17 +21,25 @@
 ///     `Deposit`/`Withdraw` roles via `grant`/`revoke`. The people who can
 ///     *administer* the vault need not be the people who can *use* it — e.g. AWAR
 ///     officers hold `Edit` while AWAR/WOLF members hold `Deposit`/`Withdraw`.
-///   - `Edit` itself can only be granted via `grant_edit_ou`, which takes a
-///     live `&DAO` witness. `grant` aborts `EEditMustBeOu` on `Role::Edit`, and
-///     the initializers reject non-ou principals in `edit_principals`. This
-///     forces every `Edit` principal to reference a real on-chain DAO and closes
-///     brick-by-unsatisfiable-principal attacks (bogus dao ids, player @0x0)
-///     plus bare-key Edit backdoors (player or machine) that would defeat OU
-///     migration.
+///   - Any principal kind may hold `Edit`, so an org can put a machine key in
+///     the admin role and automate ACL maintenance without a governance
+///     proposal for every change. Two rules keep that flexible without making
+///     the vault brickable:
+///       * `Ou` principals enter `Edit` only via `grant_edit_ou`, which takes a
+///         live `&DAO` witness (`grant` aborts `EOuEditNeedsWitness` for an ou
+///         on `Role::Edit`). Every ou editor therefore provably references a
+///         real on-chain DAO — a bogus dao id can never masquerade as the
+///         vault's recovery anchor.
+///       * `Edit` must always retain at least one *recoverable* principal
+///         (`acl::is_recoverable` — today, an ou), enforced on both revoke and
+///         init (`ENoRecoverableEditor`). Bare keys are welcome as additional
+///         editors; they just can't be the last line, because a lost bare key
+///         is unrecoverable and would strand deposited assets forever.
 ///   - Invariants on `revoke`: (1) `Edit` can never be emptied (`ELastEditor`),
-///     and (2) the caller must still satisfy `Edit` via `editor_dao` after the
-///     batch (`EEditorWouldLockSelf`). Together they prevent both empty-Edit
-///     bricks and grant-bogus-then-revoke-self brick paths.
+///     (2) `Edit` must retain a recoverable principal (`ENoRecoverableEditor`),
+///     and (3) the caller must still satisfy `Edit` via `editor_dao` after the
+///     batch (`EEditorWouldLockSelf`). Together they prevent empty-Edit bricks,
+///     decay into dead keys, and grant-bogus-then-revoke-self capture paths.
 ///
 /// Why the OU indirection (and not a flat address list): it makes board-membership
 /// changes and DAO *migration* work without re-listing addresses. A migrated DAO
@@ -88,7 +96,8 @@ module armature_vault::dao_receipt_vault {
     #[error(code = 6)]
     const EZeroAmount: vector<u8> = b"Amount must be greater than zero";
     #[error(code = 7)]
-    const EEditMustBeOu: vector<u8> = b"Edit role only accepts Ou principals — use grant_edit_ou";
+    const EOuEditNeedsWitness: vector<u8> =
+        b"Ou principals enter the Edit role only via grant_edit_ou (&DAO witness)";
     #[error(code = 8)]
     const EEditorWouldLockSelf: vector<u8> =
         b"Revocation would leave the caller unable to administer the vault";
@@ -105,6 +114,9 @@ module armature_vault::dao_receipt_vault {
     #[error(code = 13)]
     const EEmptyEditPrincipals: vector<u8> =
         b"edit_principals must be non-empty — vault would have no administrator";
+    #[error(code = 14)]
+    const ENoRecoverableEditor: vector<u8> =
+        b"Edit must retain at least one recoverable principal (an Ou) as the vault's recovery anchor";
 
     // === Structs ===
 
@@ -229,6 +241,34 @@ module armature_vault::dao_receipt_vault {
         assert!(satisfies_role(vault, role, dao, sender), ENotAuthorized);
     }
 
+    /// True if `Edit` holds at least one principal whose satisfying set can be
+    /// changed outside this vault's ACL (see `acl::is_recoverable`) — the
+    /// vault's recovery anchor if every bare-key editor is lost.
+    fun has_recoverable_editor(vault: &DaoReceiptVault): bool {
+        let edit_role = Role::Edit;
+        if (!vault.acl.contains(&edit_role)) { return false };
+        let editors = vault.acl.get(&edit_role);
+        let n = editors.length();
+        let mut i = 0;
+        while (i < n) {
+            if (acl::is_recoverable(&editors[i])) { return true };
+            i = i + 1;
+        };
+        false
+    }
+
+    /// Aborts unless `edit_principals` contains a recoverable principal. Used by
+    /// the init paths, which build the ACL before a vault value exists.
+    fun assert_seeded_recoverable_editor(edit_principals: &vector<Principal>) {
+        let n = edit_principals.length();
+        let mut i = 0;
+        while (i < n) {
+            if (acl::is_recoverable(&edit_principals[i])) { return };
+            i = i + 1;
+        };
+        abort ENoRecoverableEditor
+    }
+
     // === Public: lifecycle ===
 
     /// Initialize a vault on a given StorageUnit.
@@ -290,14 +330,9 @@ module armature_vault::dao_receipt_vault {
     ) {
         assert!(registrant_dao.is_governance_member(ctx.sender()), ENotAuthorized);
         assert!(!edit_principals.is_empty(), EEmptyEditPrincipals);
-        // Edit is Ou-only from the very first grant: the init path must not
-        // smuggle in the bare-key (player/machine) Edit principals that
-        // `grant` refuses via EEditMustBeOu.
-        let mut ei = 0;
-        while (ei < edit_principals.length()) {
-            assert!(acl::is_ou(&edit_principals[ei]), EEditMustBeOu);
-            ei = ei + 1;
-        };
+        // The vault must start with a recovery anchor; bare-key editors may be
+        // seeded alongside it for automation.
+        assert_seeded_recoverable_editor(&edit_principals);
 
         let storage_unit_id = object::id(storage_unit);
         // M1: caller's OwnerCap must authorize this SSU.
@@ -378,12 +413,8 @@ module armature_vault::dao_receipt_vault {
     ) {
         assert!(registrant_dao.is_governance_member(ctx.sender()), ENotAuthorized);
         assert!(!edit_principals.is_empty(), EEmptyEditPrincipals);
-        // Edit is Ou-only from the very first grant (see initialize_dao_vault).
-        let mut ei = 0;
-        while (ei < edit_principals.length()) {
-            assert!(acl::is_ou(&edit_principals[ei]), EEditMustBeOu);
-            ei = ei + 1;
-        };
+        // See initialize_dao_vault: start with a recovery anchor.
+        assert_seeded_recoverable_editor(&edit_principals);
 
         let storage_unit_id = object::id(storage_unit);
         // F1: the VaultConfig's bound SSU must match the passed StorageUnit.
@@ -524,6 +555,12 @@ module armature_vault::dao_receipt_vault {
     /// Batch-grant principals to roles. The caller must satisfy the `Edit` role using
     /// `editor_dao` as their OU context. `roles` and `principals` are parallel vectors
     /// (same length); each (role, principal) pair is added if not already present.
+    ///
+    /// Bare-key principals (player, machine) may be granted `Edit` here — that is
+    /// how an org hands routine ACL maintenance to automation. Ou principals must
+    /// instead go through `grant_edit_ou` so the DAO they name is witnessed on
+    /// chain; an unwitnessed ou could otherwise pose as the recovery anchor that
+    /// `ENoRecoverableEditor` counts.
     public fun grant(
         vault: &mut DaoReceiptVault,
         editor_dao: &DAO,
@@ -542,9 +579,12 @@ module armature_vault::dao_receipt_vault {
         while (i < n) {
             let role = roles[i];
             let principal = principals[i];
-            // H1/M3: Edit principals must come through grant_edit_ou, which validates
-            // the &DAO witness and refuses bare-Player and unverifiable-Ou principals.
-            assert!(role != Role::Edit, EEditMustBeOu);
+            // H1: an ou entering Edit must be witnessed by a live &DAO, so a bogus
+            // dao id can never be counted as the vault's recovery anchor.
+            assert!(
+                !(role == Role::Edit && acl::is_ou(&principal)),
+                EOuEditNeedsWitness,
+            );
             // L1: only emit on real state change.
             let changed = add_principal(vault, role, principal);
             if (changed) {
@@ -582,7 +622,8 @@ module armature_vault::dao_receipt_vault {
 
     /// Batch-revoke principals from roles. The caller must satisfy the `Edit` role
     /// using `editor_dao`. Each (role, principal) pair is removed if present.
-    /// Aborts (`ELastEditor`) if a revocation would leave `Edit` with no principals.
+    /// Aborts (`ELastEditor`) if a revocation would leave `Edit` with no principals,
+    /// or (`ENoRecoverableEditor`) if it would leave `Edit` holding only bare keys.
     public fun revoke(
         vault: &mut DaoReceiptVault,
         editor_dao: &DAO,
@@ -617,6 +658,11 @@ module armature_vault::dao_receipt_vault {
             vault.acl.contains(&edit_role) && vault.acl.get(&edit_role).length() > 0,
             ELastEditor,
         );
+        // Brick-guard 1b: Edit must keep a recovery anchor. Bare-key editors can
+        // administer day to day, but they cannot become the only way in — losing
+        // those keys would strand the vault's assets with no path to restore
+        // authority. An ou survives key loss because its board is governable.
+        assert!(has_recoverable_editor(vault), ENoRecoverableEditor);
         // H1: brick-guard 2 — the caller must still satisfy Edit using editor_dao.
         // Prevents grant-bogus-then-revoke-self bricking attacks: a rogue can only
         // remove themselves from Edit if some other satisfiable principal remains

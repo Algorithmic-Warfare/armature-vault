@@ -72,6 +72,26 @@ module armature_vault::acl {
 
     public fun is_machine(principal: &Principal): bool { principal.kind == KIND_MACHINE }
 
+    // === Kind properties ===
+    //
+    // Consumer modules gate policy on what a kind *can do*, not on which kind
+    // it is. A new kind declares its properties here once and every module
+    // inherits the policy — these predicates, not `kind` comparisons, are the
+    // extension point.
+
+    /// True if the set of addresses satisfying this principal can be changed
+    /// without going through the ACL this principal administers — i.e. losing
+    /// a key is recoverable. An ou's board is mutable by DAO governance, so an
+    /// ou is recoverable. A bare key (player or machine) is not: lose it and
+    /// nothing can restore the authority it held.
+    ///
+    /// Modules guarding an asset-custody admin role require at least one
+    /// recoverable principal to remain, so the role can never decay into a set
+    /// of dead keys while the assets stay locked.
+    public fun is_recoverable(principal: &Principal): bool {
+        principal.kind == KIND_OU
+    }
+
     // === Authorization ===
 
     /// True if `sender` satisfies `principal` given the `&DAO` the caller is

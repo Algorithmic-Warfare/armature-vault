@@ -368,14 +368,72 @@ module armature_vault::dao_receipt_vault_tests {
     // === then flipped here to verify the fix shipped in PR #2.
     // =============================================================================
 
-    // --- H1/M3: Edit role must be granted via grant_edit_ou (rejects Player + bogus Ou)
+    // --- H1/M3: Ou editors need a &DAO witness; bare keys may edit but can never
+    // --- become the vault's only recovery anchor.
 
-    /// Original H1 (Player variant): bypass attempted via Player{@0x0}. Post-fix the
-    /// grant() call rejects the Edit role itself with EEditMustBeOu, before the
-    /// Principal value is ever inspected.
+    /// A bare player key CAN hold Edit — this is how an org delegates routine ACL
+    /// maintenance without a governance proposal per change. What the vault
+    /// guarantees is not "no bare-key editors" but "never only bare-key editors"
+    /// (see revoke_rejects_removing_last_recoverable_editor).
     #[test]
-    #[expected_failure(abort_code = vault::EEditMustBeOu)]
-    fun grant_rejects_player_for_edit_role() {
+    fun grant_accepts_player_for_edit_role() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        // Officer delegates Edit to PROTO's bare key.
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            vault::grant(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_edit()],
+                vector[acl::player(PROTO)],
+                scenario.ctx(),
+            );
+            assert!(vault::principals(&v, vault::role_edit()).length() == 2, 0);
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
+
+        // PROTO now administers the vault with their own key — no DAO needed. Any
+        // &DAO may be passed since the Edit principal is satisfied by address.
+        ts::next_tx(&mut scenario, PROTO);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let any_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+            vault::grant(
+                &mut v,
+                &any_dao,
+                vector[vault::role_deposit()],
+                vector[acl::machine(BOT)],
+                scenario.ctx(),
+            );
+            assert!(vault::principals(&v, vault::role_deposit()).contains(&acl::machine(BOT)), 1);
+            ts::return_shared(any_dao);
+            ts::return_shared(v);
+        };
+
+        ts::end(scenario);
+    }
+
+    /// A machine key can hold Edit too — the automation case: a bot maintains the
+    /// vault's ACL without a governance cycle per change.
+    #[test]
+    fun grant_accepts_machine_for_edit_role() {
         let mut scenario = ts::begin(AWAR_M1);
         let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
         let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
@@ -392,23 +450,48 @@ module armature_vault::dao_receipt_vault_tests {
         vault::share_for_testing(v);
 
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-        vault::grant(
-            &mut v,
-            &officers_dao,
-            vector[vault::role_edit()],
-            vector[acl::player(@0x0)],
-            scenario.ctx(),
-        );
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            vault::grant(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_edit()],
+                vector[acl::machine(BOT)],
+                scenario.ctx(),
+            );
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
 
-        abort
+        // The machine administers as sender.
+        ts::next_tx(&mut scenario, BOT);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let any_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+            vault::grant(
+                &mut v,
+                &any_dao,
+                vector[vault::role_withdraw()],
+                vector[acl::player(OUTSIDER)],
+                scenario.ctx(),
+            );
+            assert!(
+                vault::principals(&v, vault::role_withdraw()).contains(&acl::player(OUTSIDER)),
+                0,
+            );
+            ts::return_shared(any_dao);
+            ts::return_shared(v);
+        };
+
+        ts::end(scenario);
     }
 
-    /// Original H1 (Ou variant): bypass attempted via Ou{bogus_dao_id}. Post-fix the
-    /// grant() call rejects the Edit role itself — bogus Ou ids are no longer reachable.
+    /// Original H1 (Ou variant): bypass attempted via Ou{bogus_dao_id}. An ou
+    /// entering Edit still requires the &DAO witness, so a bogus dao id can never
+    /// pose as the recovery anchor that ENoRecoverableEditor counts.
     #[test]
-    #[expected_failure(abort_code = vault::EEditMustBeOu)]
+    #[expected_failure(abort_code = vault::EOuEditNeedsWitness)]
     fun grant_rejects_bogus_ou_for_edit_role() {
         let mut scenario = ts::begin(AWAR_M1);
         let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
@@ -440,11 +523,14 @@ module armature_vault::dao_receipt_vault_tests {
         abort
     }
 
-    /// Original M3: rogue self-grants Player Edit then revokes the OU. Post-fix the
-    /// initial grant aborts EEditMustBeOu — the bare-Player Edit backdoor is closed.
+    /// Original M3, re-aimed at the current policy: a rogue officer self-grants a
+    /// bare-key Edit principal (now allowed) and then tries to revoke the OU, which
+    /// would leave the vault administrable only by their personal key and beyond
+    /// the org's reach. The recovery-anchor guard blocks the second step, so the
+    /// capture path stays closed even though the first step succeeds.
     #[test]
-    #[expected_failure(abort_code = vault::EEditMustBeOu)]
-    fun grant_rejects_player_self_grant_for_edit() {
+    #[expected_failure(abort_code = vault::ENoRecoverableEditor)]
+    fun revoke_rejects_removing_last_recoverable_editor() {
         let mut scenario = ts::begin(AWAR_M1);
         let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
         let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
@@ -460,18 +546,92 @@ module armature_vault::dao_receipt_vault_tests {
         );
         vault::share_for_testing(v);
 
+        // Step 1: self-grant a personal key as editor — permitted.
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            vault::grant(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_edit()],
+                vector[acl::player(AWAR_OFFICER)],
+                scenario.ctx(),
+            );
+            assert!(vault::principals(&v, vault::role_edit()).length() == 2, 0);
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
+
+        // Step 2: revoke the OU, leaving only the personal key. ELastEditor passes
+        // (one editor remains) and EEditorWouldLockSelf passes (the rogue still
+        // satisfies Edit via their own key) — only the recovery-anchor guard stops
+        // this. Must abort ENoRecoverableEditor.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
         let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-        vault::grant(
+        vault::revoke(
             &mut v,
             &officers_dao,
             vector[vault::role_edit()],
-            vector[acl::player(AWAR_OFFICER)],
+            vector[acl::ou(officers)],
             scenario.ctx(),
         );
 
         abort
+    }
+
+    /// The anchor guard counts, not forbids: with two OU editors, revoking one is
+    /// fine — the OU migration path (grant new, revoke old) still works.
+    #[test]
+    fun revoke_allows_removing_an_ou_editor_when_another_remains() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+        let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        // Add a bare-key editor and a second OU, then drop the original OU.
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
+            vault::grant(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_edit()],
+                vector[acl::machine(BOT)],
+                scenario.ctx(),
+            );
+            vault::grant_edit_ou(&mut v, &officers_dao, &new_officers_dao, scenario.ctx());
+            vault::revoke(
+                &mut v,
+                &new_officers_dao,
+                vector[vault::role_edit()],
+                vector[acl::ou(officers)],
+                scenario.ctx(),
+            );
+            let editors = vault::principals(&v, vault::role_edit());
+            assert!(editors.length() == 2, 0);
+            assert!(editors.contains(&acl::ou(new_officers)), 1);
+            assert!(editors.contains(&acl::machine(BOT)), 2);
+            ts::return_shared(new_officers_dao);
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
+
+        ts::end(scenario);
     }
 
     /// H1 positive: grant_edit_ou succeeds with a real &DAO witness and emits an event.
@@ -984,40 +1144,6 @@ module armature_vault::dao_receipt_vault_tests {
         let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
         let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
         vault::deposit_receipt(&mut v, &awar_dao, r, scenario.ctx());
-
-        abort
-    }
-
-    /// Machines can never be granted Edit: the grant() Edit-role gate fires
-    /// before the principal is inspected, same as for players.
-    #[test]
-    #[expected_failure(abort_code = vault::EEditMustBeOu)]
-    fun grant_rejects_machine_for_edit_role() {
-        let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
-        let collection_id = make_collection(&mut scenario, AWAR_M1);
-
-        ts::next_tx(&mut scenario, AWAR_M1);
-        let v = vault::new_for_testing(
-            object::id_from_address(@0x5501),
-            collection_id,
-            example_acl(awar, wolf, officers),
-            scenario.ctx(),
-        );
-        vault::share_for_testing(v);
-
-        ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-        vault::grant(
-            &mut v,
-            &officers_dao,
-            vector[vault::role_edit()],
-            vector[acl::machine(BOT)],
-            scenario.ctx(),
-        );
 
         abort
     }
