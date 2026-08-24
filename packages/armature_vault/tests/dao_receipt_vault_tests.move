@@ -32,6 +32,8 @@ module armature_vault::dao_receipt_vault_tests {
     const OUTSIDER: address = @0x0E;
     // A machine-held wallet (automation keypair).
     const BOT: address = @0xB07;
+    // A second machine wallet, granted operational roles by the first.
+    const BOT2: address = @0xB08;
 
     const ASSET: u64 = 7;
 
@@ -1589,6 +1591,212 @@ module armature_vault::dao_receipt_vault_tests {
             ts::return_shared(new_officers_dao);
             ts::return_shared(v);
             ts::return_shared(reg);
+        };
+
+        ts::end(scenario);
+    }
+
+    // === Regression: AV-1, registry slot hijack ===
+
+    // update_registry_key must assert board membership in the *destination* DAO,
+    // not just Edit on the vault being moved. Without it, any Edit holder could
+    // re-key their own vault onto an unclaimed (ssu, victim_dao) slot and have
+    // `lookup` resolve the victim's canonical slot to a vault they control.
+    #[test]
+    #[expected_failure(abort_code = vault::ENotAuthorized)]
+    fun update_registry_key_rejects_foreign_registrant_dao() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        // The victim DAO. AWAR_OFFICER is not on its board.
+        let victim = make_dao(&mut scenario, OUTSIDER, vector[OUTSIDER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+        let ssu_id = object::id_from_address(@0x5501);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        vault::init_for_testing(scenario.ctx());
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            ssu_id,
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        let v_id = object::id(&v);
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        {
+            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            // The victim's canonical slot is unclaimed — the squattable state.
+            assert!(vault::lookup(&reg, ssu_id, victim).is_none(), 0);
+            ts::return_shared(v);
+            ts::return_shared(reg);
+        };
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let victim_dao = ts::take_shared_by_id<DAO>(&scenario, victim);
+        assert!(!victim_dao.is_governance_member(AWAR_OFFICER), 1);
+        vault::update_registry_key(
+            &mut reg,
+            &mut v,
+            &officers_dao,
+            &victim_dao,
+            scenario.ctx(),
+        ); // abort ENotAuthorized
+
+        ts::return_shared(victim_dao);
+        ts::return_shared(officers_dao);
+        ts::return_shared(v);
+        ts::return_shared(reg);
+        ts::end(scenario);
+    }
+
+    // === Regression: AV-12, recovery-anchor substitution ===
+
+    /// ACL for the shape 7556c73 is built for: an OU recovery anchor plus a
+    /// delegated bare key that administers day to day.
+    fun anchor_plus_bot_acl(
+        anchor_dao: ID,
+        extra_anchor: Option<ID>,
+    ): vec_map::VecMap<Role, vector<Principal>> {
+        let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        let mut editors = vector[acl::ou(anchor_dao), acl::machine(BOT)];
+        if (extra_anchor.is_some()) {
+            editors.push_back(acl::ou(*extra_anchor.borrow()));
+        };
+        acl_map.insert(vault::role_edit(), editors);
+        acl_map.insert(vault::role_withdraw(), vector[acl::ou(anchor_dao)]);
+        acl_map
+    }
+
+    // Positive coverage: the delegated bot still administers everything it should —
+    // Deposit/Withdraw membership and other bare-key editors — it just can't touch
+    // the anchor set. This is the automation win 7556c73 was written for.
+    #[test]
+    fun bare_key_editor_still_administers_non_anchor_acl() {
+        let mut scenario = ts::begin(AWAR_OFFICER);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_OFFICER);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            anchor_plus_bot_acl(officers, option::none()),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, BOT);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            // Rotate an operational principal and delegate to a second bare key.
+            vault::grant(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_deposit(), vault::role_edit()],
+                vector[acl::player(PROTO), acl::player(AWAR_M1)],
+                scenario.ctx(),
+            );
+            assert!(vault::principals(&v, vault::role_deposit()).contains(&acl::player(PROTO)), 0);
+            assert!(vault::principals(&v, vault::role_edit()).contains(&acl::player(AWAR_M1)), 1);
+
+            vault::revoke(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_deposit(), vault::role_edit()],
+                vector[acl::player(PROTO), acl::player(AWAR_M1)],
+                scenario.ctx(),
+            );
+            assert!(!vault::principals(&v, vault::role_deposit()).contains(&acl::player(PROTO)), 2);
+            // The anchor is untouched throughout.
+            assert!(vault::principals(&v, vault::role_edit()).contains(&acl::ou(officers)), 3);
+
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
+        ts::end(scenario);
+    }
+
+    // A bare-key editor is the automation shape 7556c73 enables: it must be able
+    // to hand a machine wallet Deposit/Withdraw and have that wallet actually move
+    // funds, without any OU in the loop. The anchor rules constrain only who may
+    // change the Edit anchor set — they must not narrow operational roles.
+    #[test]
+    fun bare_key_editor_grants_machine_deposit_and_withdraw() {
+        let mut scenario = ts::begin(AWAR_OFFICER);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_OFFICER);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            anchor_plus_bot_acl(officers, option::none()),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        // The delegated bare key — not an officer — grants a second machine both
+        // operational roles.
+        ts::next_tx(&mut scenario, BOT);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            vault::grant(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_deposit(), vault::role_withdraw()],
+                vector[acl::machine(BOT2), acl::machine(BOT2)],
+                scenario.ctx(),
+            );
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
+
+        // That machine deposits and withdraws for real, passing any &DAO as context.
+        let r = mint(&mut scenario, AWAR_OFFICER, collection_id, ASSET, 100);
+        ts::next_tx(&mut scenario, BOT2);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let any_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            vault::deposit_receipt(&mut v, &any_dao, r, scenario.ctx());
+            assert!(vault::vault_balance(&v, ASSET) == 100, 0);
+
+            let out = vault::withdraw_receipt(&mut v, &any_dao, ASSET, 40, scenario.ctx());
+            assert!(out.value() == 40, 1);
+            assert!(vault::vault_balance(&v, ASSET) == 60, 2);
+            transfer::public_transfer(out, BOT2);
+
+            ts::return_shared(any_dao);
+            ts::return_shared(v);
+        };
+
+        // And the bare-key editor can revoke those roles again.
+        ts::next_tx(&mut scenario, BOT);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            vault::revoke(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_deposit(), vault::role_withdraw()],
+                vector[acl::machine(BOT2), acl::machine(BOT2)],
+                scenario.ctx(),
+            );
+            assert!(!vault::principals(&v, vault::role_withdraw()).contains(&acl::machine(BOT2)), 3);
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
         };
 
         ts::end(scenario);

@@ -41,6 +41,13 @@
 ///     batch (`EEditorWouldLockSelf`). Together they prevent empty-Edit bricks,
 ///     decay into dead keys, and grant-bogus-then-revoke-self capture paths.
 ///
+///     Note what the recoverable-editor rule does and does not promise. It
+///     guarantees *an* ou always remains in `Edit`; it does not pin *which* ou.
+///     A bare-key editor may add an ou via `grant_edit_ou` and revoke an
+///     existing one, so a leaked bare key can substitute the recovery anchor as
+///     well as drain the vault via a self-granted `Withdraw`. Delegating `Edit`
+///     to a bare key is therefore a full trust delegation, not a scoped one.
+///
 /// Why the OU indirection (and not a flat address list): it makes board-membership
 /// changes and DAO *migration* work without re-listing addresses. A migrated DAO
 /// gets a new object id; the guaranteed migration path is — create the new DAO,
@@ -153,6 +160,21 @@ module armature_vault::dao_receipt_vault {
         /// `deinitialize_dao_vault` uses this to find the right slot to remove,
         /// so the caller doesn't need to track migration history out-of-band.
         registrant_dao_id: ID,
+        /// True only if an `OwnerCap<StorageUnit>` authorizing this SSU was
+        /// presented at initialization — i.e. the vault was registered by
+        /// someone who could prove the SSU's authority surface.
+        ///
+        /// `initialize_dao_vault_v2` deliberately omits that gate so the SSU
+        /// owner and the registering board member can be different accounts,
+        /// which means **registry presence alone does not imply SSU-owner
+        /// consent**. Anyone can create a DAO and register a vault against any
+        /// SSU whose `VaultConfig` exists. Consumers that need "the SSU owner
+        /// signed off on this vault" must read this flag; consumers that only
+        /// need "a member of the registrant DAO put it here" can ignore it.
+        ///
+        /// Set once at init and never mutated — an unattested vault cannot be
+        /// upgraded to attested, because the cap check is what the flag records.
+        ssu_attested: bool,
     }
 
     // === Module initializer ===
@@ -171,6 +193,10 @@ module armature_vault::dao_receipt_vault {
         registrant_dao_id: ID,
         storage_unit_id: ID,
         collection_id: ID,
+        /// Whether an `OwnerCap<StorageUnit>` was presented at init. Indexers
+        /// should surface this — an unattested vault is registered against an
+        /// SSU by someone who never proved any authority over it.
+        ssu_attested: bool,
     }
 
     /// M2: emitted when a vault is deinitialized — its registry slot is freed and
@@ -362,6 +388,8 @@ module armature_vault::dao_receipt_vault {
             acl: vault_acl,
             non_empty_assets: 0,
             registrant_dao_id,
+            // The OwnerCap was verified above — this vault is SSU-attested.
+            ssu_attested: true,
         };
         let vault_id = object::id(&vault);
 
@@ -370,6 +398,7 @@ module armature_vault::dao_receipt_vault {
             registrant_dao_id,
             storage_unit_id,
             collection_id,
+            ssu_attested: true,
         });
 
         // I1: emit AclGrantedEvent for each seeded principal so event-sourced
@@ -401,6 +430,16 @@ module armature_vault::dao_receipt_vault {
     /// require an `OwnerCap<StorageUnit>`. Any board member of `registrant_dao`
     /// may call this — the SSU-owner gate is intentionally absent. Prefer this
     /// when the SSU owner and the DAO board member are different accounts.
+    ///
+    /// Security consequence, which callers must not paper over: `StorageUnit`
+    /// and `VaultConfig` are both shared objects and `armature::dao::create` is
+    /// permissionless, so *any* address can create a DAO and register a vault
+    /// against *any* SSU through this path. The M1 guarantee documented on
+    /// `initialize_dao_vault` therefore does not hold vault-wide — it holds only
+    /// for vaults where `ssu_attested()` is true. Vaults created here are marked
+    /// `ssu_attested: false` in both the object and `VaultInitializedEvent`, and
+    /// UIs that present a vault as "the vault for this SSU" should say which
+    /// kind they are showing.
     public fun initialize_dao_vault_v2(
         registry: &mut DaoReceiptVaultRegistry,
         storage_unit: &StorageUnit,
@@ -441,6 +480,10 @@ module armature_vault::dao_receipt_vault {
             acl: vault_acl,
             non_empty_assets: 0,
             registrant_dao_id,
+            // No OwnerCap was presented. Registry presence here says only that a
+            // board member of `registrant_dao` registered the vault — nothing
+            // about the SSU owner's consent.
+            ssu_attested: false,
         };
         let vault_id = object::id(&vault);
 
@@ -449,6 +492,7 @@ module armature_vault::dao_receipt_vault {
             registrant_dao_id,
             storage_unit_id,
             collection_id,
+            ssu_attested: false,
         });
 
         let sender = ctx.sender();
@@ -595,9 +639,9 @@ module armature_vault::dao_receipt_vault {
     }
 
     /// H1: grant the Edit role to an OU, validated by a live `&DAO` witness. This
-    /// is the only path that can add an Edit principal — it forces every Edit grant
-    /// to reference a real DAO with at least one governance member, closing the
-    /// brick-by-unsatisfiable-principal attack and the bare-Player Edit backdoor.
+    /// is the only path that can add an ou Edit principal — it forces every such
+    /// grant to reference a real DAO with at least one governance member, closing
+    /// the brick-by-unsatisfiable-principal attack.
     public fun grant_edit_ou(
         vault: &mut DaoReceiptVault,
         editor_dao: &DAO,
@@ -705,6 +749,14 @@ module armature_vault::dao_receipt_vault {
     ) {
         let sender = ctx.sender();
         assert_role(vault, Role::Edit, editor_dao, sender);
+        // The caller must stand on *both* sides of the move. `initialize_dao_vault`
+        // asserts board membership in the registrant DAO, which is what makes the
+        // key `(ssu, dao)` mean "a member of `dao` put this vault here". Without the
+        // same assertion on the destination, any Edit holder could re-key their own
+        // vault onto an unclaimed `(ssu, victim_dao)` slot — `lookup` would then
+        // resolve the victim's canonical slot to an attacker-controlled vault, and
+        // the victim could never register their own (EVaultAlreadyExists).
+        assert!(new_registrant_dao.is_governance_member(sender), ENotAuthorized);
 
         let old_key = VaultKey {
             storage_unit_id: vault.storage_unit_id,
@@ -835,6 +887,14 @@ module armature_vault::dao_receipt_vault {
         vault.collection_id
     }
 
+    /// True if an `OwnerCap<StorageUnit>` was presented when this vault was
+    /// registered. Read this before treating a vault as the SSU's endorsed
+    /// vault — `lookup` returning a vault proves only that a member of the
+    /// registrant DAO registered it, not that the SSU owner agreed.
+    public fun ssu_attested(vault: &DaoReceiptVault): bool {
+        vault.ssu_attested
+    }
+
     /// Returns the list of principals for a role (empty if the role is unset).
     public fun principals(vault: &DaoReceiptVault, role: Role): vector<Principal> {
         if (vault.acl.contains(&role)) {
@@ -882,6 +942,8 @@ module armature_vault::dao_receipt_vault {
             acl: acl_map,
             non_empty_assets: 0,
             registrant_dao_id: object::id_from_address(@0x0),
+            // Test vaults bypass both initializers, so nothing was attested.
+            ssu_attested: false,
         }
     }
 
