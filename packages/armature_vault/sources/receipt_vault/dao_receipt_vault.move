@@ -96,14 +96,17 @@ module armature_vault::dao_receipt_vault {
     #[error(code = 12)]
     const EUnauthorizedForStorageUnit: vector<u8> =
         b"Caller's OwnerCap does not authorize this StorageUnit";
+    #[error(code = 13)]
+    const EEmptyEditPrincipals: vector<u8> =
+        b"edit_principals must be non-empty — vault would have no administrator";
 
     // === Structs ===
 
-    /// Composite key used in the registry table. Keyed by the *initial editor* DAO,
-    /// which scopes a vault to the OU that bootstrapped it on a given SSU.
+    /// Composite key used in the registry table. Keyed by the *registrant* DAO,
+    /// which scopes a vault to the OU it was registered for on a given SSU.
     public struct VaultKey has copy, drop, store {
         storage_unit_id: ID,
-        editor_dao_id: ID,
+        registrant_dao_id: ID,
     }
 
     /// Shared singleton registry mapping (storage_unit_id, editor_dao_id) → vault id.
@@ -127,11 +130,11 @@ module armature_vault::dao_receipt_vault {
         /// `deinitialize_dao_vault` asserts this is zero before freeing the
         /// registry slot.
         non_empty_assets: u64,
-        /// M2: which `editor_dao_id` the registry currently keys this vault under.
-        /// Set at init from `editor_dao.id()`; updated by `update_registry_key`.
+        /// M2: which registrant DAO the registry currently keys this vault under.
+        /// Set at init from `registrant_dao.id()`; updated by `update_registry_key`.
         /// `deinitialize_dao_vault` uses this to find the right slot to remove,
         /// so the caller doesn't need to track migration history out-of-band.
-        registry_key_dao_id: ID,
+        registrant_dao_id: ID,
     }
 
     // === Module initializer ===
@@ -147,7 +150,7 @@ module armature_vault::dao_receipt_vault {
 
     public struct VaultInitializedEvent has copy, drop {
         vault_id: ID,
-        editor_dao_id: ID,
+        registrant_dao_id: ID,
         storage_unit_id: ID,
         collection_id: ID,
     }
@@ -158,12 +161,12 @@ module armature_vault::dao_receipt_vault {
     /// no caller can satisfy any role on it.
     public struct VaultDeinitializedEvent has copy, drop {
         vault_id: ID,
-        /// The `editor_dao_id` component of the `VaultKey` that was freed —
-        /// equivalently `vault.registry_key_dao_id` at the moment of deinit. After
-        /// a prior `update_registry_key` migration this is the *current* DAO id,
-        /// not the original initializer's. Indexers should treat it as the
+        /// The `registrant_dao_id` component of the `VaultKey` that was freed —
+        /// equivalently `vault.registrant_dao_id` at the moment of deinit. After
+        /// a prior `update_registry_key` migration this is the *current* registrant
+        /// DAO id, not the original initializer's. Indexers should treat it as the
         /// registry-key half, not the caller's identity.
-        editor_dao_id: ID,
+        registrant_dao_id: ID,
         by: address,
     }
 
@@ -222,10 +225,27 @@ module armature_vault::dao_receipt_vault {
 
     // === Public: lifecycle ===
 
-    /// Initialize a vault on a given StorageUnit. The caller must be a board member
-    /// of `editor_dao`, which is seeded as the sole initial `Edit` principal; the
-    /// ACL is otherwise empty (grant deposit/withdraw principals via `grant`).
-    /// Reverts if a vault for this (SSU, editor_dao) pair already exists.
+    /// Initialize a vault on a given StorageUnit.
+    ///
+    /// The caller must be a board member of `registrant_dao`. `registrant_dao` is
+    /// used only as the registry key and for caller authorization — it is NOT
+    /// automatically seeded into the Edit role. Pass the desired Edit principals
+    /// explicitly via `edit_principals`; at least one must be supplied
+    /// (`EEmptyEditPrincipals`).
+    ///
+    /// `deposit_principals`, `withdraw_principals`, and `edit_principals` are the
+    /// caller-supplied initial ACL entries for those roles — pass empty vectors for
+    /// Deposit/Withdraw to leave those roles unpopulated at init and populate later
+    /// via `grant`/`grant_edit_ou`.
+    ///
+    /// This separation lets deployers express "officers have Edit, members have
+    /// Deposit/Withdraw" in a single init call: pass the officer DAO's Ou principal
+    /// in `edit_principals` and the member DAO's Ou principal in
+    /// `deposit_principals`/`withdraw_principals`, with the member DAO as
+    /// `registrant_dao` so the vault is directly discoverable under the member
+    /// DAO's registry key.
+    ///
+    /// Reverts if a vault for this (SSU, registrant_dao) pair already exists.
     ///
     /// F1 (#3): `vault_config` is the `warehouse_receipts::vault::VaultConfig` for
     /// this SSU. It is the on-chain authoritative record that a specific
@@ -244,9 +264,9 @@ module armature_vault::dao_receipt_vault {
     /// are verified by witness, not trusted from input.
     ///
     /// Trust assumption (not verified on-chain): the caller — a governance member
-    /// of `editor_dao` who possesses `OwnerCap<StorageUnit>` — is acting on behalf
-    /// of the DAO. M1 verifies (caller passes board-membership check) AND (caller
-    /// can produce the OwnerCap), but does NOT verify the DAO *collectively*
+    /// of `registrant_dao` who possesses `OwnerCap<StorageUnit>` — is acting on
+    /// behalf of the DAO. M1 verifies (caller passes board-membership check) AND
+    /// (caller can produce the OwnerCap), but does NOT verify the DAO *collectively*
     /// controls the cap. A board member personally holding the cap can unilaterally
     /// bind that SSU to their DAO's vault. If you need cap-custody under DAO
     /// governance, custody the cap in the DAO's treasury and borrow it via the
@@ -255,11 +275,15 @@ module armature_vault::dao_receipt_vault {
         registry: &mut DaoReceiptVaultRegistry,
         storage_unit: &StorageUnit,
         owner_cap: &OwnerCap<StorageUnit>,
-        editor_dao: &DAO,
+        registrant_dao: &DAO,
         vault_config: &VaultConfig,
+        deposit_principals: vector<Principal>,
+        withdraw_principals: vector<Principal>,
+        edit_principals: vector<Principal>,
         ctx: &mut TxContext,
     ) {
-        assert!(editor_dao.is_governance_member(ctx.sender()), ENotAuthorized);
+        assert!(registrant_dao.is_governance_member(ctx.sender()), ENotAuthorized);
+        assert!(!edit_principals.is_empty(), EEmptyEditPrincipals);
 
         let storage_unit_id = object::id(storage_unit);
         // M1: caller's OwnerCap must authorize this SSU.
@@ -269,13 +293,18 @@ module armature_vault::dao_receipt_vault {
         assert!(vault_config.storage_unit_id() == storage_unit_id, EStorageUnitMismatch);
         let collection_id = vault_config.collection_id();
 
-        let editor_dao_id = editor_dao.id();
-        let key = VaultKey { storage_unit_id, editor_dao_id };
+        let registrant_dao_id = registrant_dao.id();
+        let key = VaultKey { storage_unit_id, registrant_dao_id };
         assert!(!table::contains(&registry.vaults, key), EVaultAlreadyExists);
 
-        let seed_principal = acl::ou(editor_dao_id);
         let mut vault_acl = vec_map::empty<Role, vector<Principal>>();
-        vault_acl.insert(Role::Edit, vector[seed_principal]);
+        if (!deposit_principals.is_empty()) {
+            vault_acl.insert(Role::Deposit, deposit_principals);
+        };
+        if (!withdraw_principals.is_empty()) {
+            vault_acl.insert(Role::Withdraw, withdraw_principals);
+        };
+        vault_acl.insert(Role::Edit, edit_principals);
 
         let vault = DaoReceiptVault {
             id: object::new(ctx),
@@ -283,27 +312,114 @@ module armature_vault::dao_receipt_vault {
             collection_id,
             acl: vault_acl,
             non_empty_assets: 0,
-            registry_key_dao_id: editor_dao_id,
+            registrant_dao_id,
         };
         let vault_id = object::id(&vault);
 
-        table::add(&mut registry.vaults, key, vault_id);
-        transfer::share_object(vault);
-
         event::emit(VaultInitializedEvent {
             vault_id,
-            editor_dao_id,
+            registrant_dao_id,
             storage_unit_id,
             collection_id,
         });
-        // I1: also emit AclGrantedEvent for the seeded Edit principal so event-sourced
-        // ACL reconstructions don't need to hardcode the seeding rule.
-        event::emit(AclGrantedEvent {
+
+        // I1: emit AclGrantedEvent for each seeded principal so event-sourced
+        // ACL reconstructions don't need to hardcode the seeding rule. We borrow
+        // from the vault before sharing so we can iterate the stored vectors.
+        let sender = ctx.sender();
+        let mut role_idx = 0;
+        while (role_idx < vault.acl.length()) {
+            let (role, principals) = vault.acl.get_entry_by_idx(role_idx);
+            let n = principals.length();
+            let mut i = 0;
+            while (i < n) {
+                event::emit(AclGrantedEvent {
+                    vault_id,
+                    role: *role,
+                    principal: principals[i],
+                    by: sender,
+                });
+                i = i + 1;
+            };
+            role_idx = role_idx + 1;
+        };
+
+        table::add(&mut registry.vaults, key, vault_id);
+        transfer::share_object(vault);
+    }
+
+    /// Governance-member-only variant of `initialize_dao_vault` that does not
+    /// require an `OwnerCap<StorageUnit>`. Any board member of `registrant_dao`
+    /// may call this — the SSU-owner gate is intentionally absent. Prefer this
+    /// when the SSU owner and the DAO board member are different accounts.
+    public fun initialize_dao_vault_v2(
+        registry: &mut DaoReceiptVaultRegistry,
+        storage_unit: &StorageUnit,
+        registrant_dao: &DAO,
+        vault_config: &VaultConfig,
+        deposit_principals: vector<Principal>,
+        withdraw_principals: vector<Principal>,
+        edit_principals: vector<Principal>,
+        ctx: &mut TxContext,
+    ) {
+        assert!(registrant_dao.is_governance_member(ctx.sender()), ENotAuthorized);
+        assert!(!edit_principals.is_empty(), EEmptyEditPrincipals);
+
+        let storage_unit_id = object::id(storage_unit);
+        // F1: the VaultConfig's bound SSU must match the passed StorageUnit.
+        assert!(vault_config.storage_unit_id() == storage_unit_id, EStorageUnitMismatch);
+        let collection_id = vault_config.collection_id();
+
+        let registrant_dao_id = registrant_dao.id();
+        let key = VaultKey { storage_unit_id, registrant_dao_id };
+        assert!(!table::contains(&registry.vaults, key), EVaultAlreadyExists);
+
+        let mut vault_acl = vec_map::empty<Role, vector<Principal>>();
+        if (!deposit_principals.is_empty()) {
+            vault_acl.insert(Role::Deposit, deposit_principals);
+        };
+        if (!withdraw_principals.is_empty()) {
+            vault_acl.insert(Role::Withdraw, withdraw_principals);
+        };
+        vault_acl.insert(Role::Edit, edit_principals);
+
+        let vault = DaoReceiptVault {
+            id: object::new(ctx),
+            storage_unit_id,
+            collection_id,
+            acl: vault_acl,
+            non_empty_assets: 0,
+            registrant_dao_id,
+        };
+        let vault_id = object::id(&vault);
+
+        event::emit(VaultInitializedEvent {
             vault_id,
-            role: Role::Edit,
-            principal: seed_principal,
-            by: ctx.sender(),
+            registrant_dao_id,
+            storage_unit_id,
+            collection_id,
         });
+
+        let sender = ctx.sender();
+        let mut role_idx = 0;
+        while (role_idx < vault.acl.length()) {
+            let (role, principals) = vault.acl.get_entry_by_idx(role_idx);
+            let n = principals.length();
+            let mut i = 0;
+            while (i < n) {
+                event::emit(AclGrantedEvent {
+                    vault_id,
+                    role: *role,
+                    principal: principals[i],
+                    by: sender,
+                });
+                i = i + 1;
+            };
+            role_idx = role_idx + 1;
+        };
+
+        table::add(&mut registry.vaults, key, vault_id);
+        transfer::share_object(vault);
     }
 
     // === Public: deposit / withdraw ===
@@ -506,19 +622,19 @@ module armature_vault::dao_receipt_vault {
 
     // === Registry maintenance ===
 
-    /// F4: re-key the registry entry for this vault after a DAO migration. The caller
-    /// must satisfy the *current* `Edit` role using `editor_dao`. The new key uses
-    /// `new_editor_dao.id()` for the `editor_dao_id` component. Aborts if no entry
-    /// exists for the old key or if an entry already exists for the new key.
+    /// F4: re-key the registry entry for this vault after a registrant DAO migration.
+    /// The caller must satisfy the current `Edit` role using `editor_dao`. The old
+    /// key is derived from `vault.registrant_dao_id`; the new key uses
+    /// `new_registrant_dao.id()`. Aborts if no entry exists for the old key or if
+    /// an entry already exists for the new key.
     ///
-    /// Note: this does NOT alter the ACL — granting `Ou { new_editor_dao.id() }` the
-    /// `Edit` role is a separate `grant_edit_ou` call. This function only keeps
-    /// `lookup(...)` discoverable under the new DAO's identity.
+    /// This does NOT alter the ACL. This function only keeps `lookup(...)` discoverable
+    /// under the new registrant DAO's identity.
     public fun update_registry_key(
         registry: &mut DaoReceiptVaultRegistry,
         vault: &mut DaoReceiptVault,
         editor_dao: &DAO,
-        new_editor_dao: &DAO,
+        new_registrant_dao: &DAO,
         ctx: &TxContext,
     ) {
         let sender = ctx.sender();
@@ -526,11 +642,11 @@ module armature_vault::dao_receipt_vault {
 
         let old_key = VaultKey {
             storage_unit_id: vault.storage_unit_id,
-            editor_dao_id: editor_dao.id(),
+            registrant_dao_id: vault.registrant_dao_id,
         };
         let new_key = VaultKey {
             storage_unit_id: vault.storage_unit_id,
-            editor_dao_id: new_editor_dao.id(),
+            registrant_dao_id: new_registrant_dao.id(),
         };
         assert!(table::contains(&registry.vaults, old_key), EInvalidArguments);
         // Cross-vault safety: a caller with Edit on this vault who also has the
@@ -542,9 +658,9 @@ module armature_vault::dao_receipt_vault {
 
         let vault_id = table::remove(&mut registry.vaults, old_key);
         table::add(&mut registry.vaults, new_key, vault_id);
-        // M2: keep the vault's self-reported registry key in sync so
+        // M2: keep the vault's self-reported registrant dao in sync so
         // `deinitialize_dao_vault` can later find the right slot to free.
-        vault.registry_key_dao_id = new_editor_dao.id();
+        vault.registrant_dao_id = new_registrant_dao.id();
     }
 
     /// M2: free the registry slot for this vault's (SSU, current editor_dao) key
@@ -578,14 +694,14 @@ module armature_vault::dao_receipt_vault {
 
         let key = VaultKey {
             storage_unit_id: vault.storage_unit_id,
-            editor_dao_id: vault.registry_key_dao_id,
+            registrant_dao_id: vault.registrant_dao_id,
         };
         // The registry slot must exist and point at *this* vault. Mirrors the
         // cross-vault safety check in `update_registry_key`.
         assert!(table::contains(&registry.vaults, key), EInvalidArguments);
         assert!(*table::borrow(&registry.vaults, key) == object::id(vault), EVaultRegistryMismatch);
         let vault_id = table::remove(&mut registry.vaults, key);
-        let freed_key_dao_id = vault.registry_key_dao_id;
+        let freed_registrant_dao_id = vault.registrant_dao_id;
 
         // Brick the ACL. Any subsequent assert_role aborts ENotAuthorized.
         while (!vault.acl.is_empty()) {
@@ -594,7 +710,7 @@ module armature_vault::dao_receipt_vault {
 
         event::emit(VaultDeinitializedEvent {
             vault_id,
-            editor_dao_id: freed_key_dao_id,
+            registrant_dao_id: freed_registrant_dao_id,
             by: sender,
         });
     }
@@ -631,13 +747,13 @@ module armature_vault::dao_receipt_vault {
 
     // === View Functions ===
 
-    /// Look up the vault id for a (storage_unit_id, editor_dao_id) pair.
+    /// Look up the vault id for a (storage_unit_id, registrant_dao_id) pair.
     public fun lookup(
         registry: &DaoReceiptVaultRegistry,
         storage_unit_id: ID,
-        editor_dao_id: ID,
+        registrant_dao_id: ID,
     ): Option<ID> {
-        let key = VaultKey { storage_unit_id, editor_dao_id };
+        let key = VaultKey { storage_unit_id, registrant_dao_id };
         if (table::contains(&registry.vaults, key)) {
             option::some(*table::borrow(&registry.vaults, key))
         } else {
@@ -684,10 +800,10 @@ module armature_vault::dao_receipt_vault {
         acl_map: VecMap<Role, vector<Principal>>,
         ctx: &mut TxContext,
     ): DaoReceiptVault {
-        // `registry_key_dao_id` is set to a sentinel zero-id by default. Tests
+        // `registrant_dao_id` is set to a sentinel zero-id by default. Tests
         // that *only* exercise ACL paths (most of the suite) can leave it alone.
         // Tests that touch the registry (lookup / update_registry_key /
-        // deinitialize) MUST call `set_registry_key_dao_id_for_testing` after
+        // deinitialize) MUST call `set_registrant_dao_id_for_testing` after
         // construction to match the key they register — otherwise
         // `deinitialize_dao_vault` will look up the sentinel slot and abort
         // `EInvalidArguments`. We intentionally don't assert non-zero in deinit
@@ -699,13 +815,16 @@ module armature_vault::dao_receipt_vault {
             collection_id,
             acl: acl_map,
             non_empty_assets: 0,
-            registry_key_dao_id: object::id_from_address(@0x0),
+            registrant_dao_id: object::id_from_address(@0x0),
         }
     }
 
     #[test_only]
-    public fun set_registry_key_dao_id_for_testing(vault: &mut DaoReceiptVault, editor_dao_id: ID) {
-        vault.registry_key_dao_id = editor_dao_id;
+    public fun set_registrant_dao_id_for_testing(
+        vault: &mut DaoReceiptVault,
+        registrant_dao_id: ID,
+    ) {
+        vault.registrant_dao_id = registrant_dao_id;
     }
 
     #[test_only]
@@ -722,9 +841,9 @@ module armature_vault::dao_receipt_vault {
     public fun register_for_testing(
         registry: &mut DaoReceiptVaultRegistry,
         storage_unit_id: ID,
-        editor_dao_id: ID,
+        registrant_dao_id: ID,
         vault_id: ID,
     ) {
-        table::add(&mut registry.vaults, VaultKey { storage_unit_id, editor_dao_id }, vault_id);
+        table::add(&mut registry.vaults, VaultKey { storage_unit_id, registrant_dao_id }, vault_id);
     }
 }
