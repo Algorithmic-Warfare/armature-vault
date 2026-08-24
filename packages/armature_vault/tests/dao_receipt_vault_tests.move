@@ -30,6 +30,8 @@ module armature_vault::dao_receipt_vault_tests {
     const AWAR_OFFICER: address = @0xD1;
     // Nobody
     const OUTSIDER: address = @0x0E;
+    // A machine-held wallet (automation keypair).
+    const BOT: address = @0xB07;
 
     const ASSET: u64 = 7;
 
@@ -887,6 +889,138 @@ module armature_vault::dao_receipt_vault_tests {
     // as a Move #[test] here. The follow-up issue tracking M1/M2/F1 should add an
     // SSU-bootstrap helper. An EEmptyEditPrincipals guard at the top of
     // initialize_dao_vault ensures at least one Edit principal is always provided.
+
+    // =============================================================================
+    // === Machine principals
+    // =============================================================================
+
+    /// An editor grants a machine wallet Deposit + Withdraw via the normal
+    /// grant() path; the machine then deposits and withdraws exactly like a
+    /// bare player (key possession, any &DAO context).
+    #[test]
+    fun machine_can_deposit_and_withdraw() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        // Officer grants the machine Deposit + Withdraw.
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            vault::grant(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_deposit(), vault::role_withdraw()],
+                vector[acl::machine(BOT), acl::machine(BOT)],
+                scenario.ctx(),
+            );
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
+
+        // The machine deposits 100 (receipt minted by the collection owner and
+        // handed to the machine), passing any &DAO as context.
+        let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 100);
+        ts::next_tx(&mut scenario, BOT);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let any_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &any_dao, r, scenario.ctx());
+            assert!(vault::vault_balance(&v, ASSET) == 100, 0);
+            ts::return_shared(any_dao);
+            ts::return_shared(v);
+        };
+
+        // The machine withdraws 40.
+        ts::next_tx(&mut scenario, BOT);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let any_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+            let out = vault::withdraw_receipt(&mut v, &any_dao, ASSET, 40, scenario.ctx());
+            assert!(out.value() == 40, 1);
+            assert!(vault::vault_balance(&v, ASSET) == 60, 2);
+            transfer::public_transfer(out, BOT);
+            ts::return_shared(any_dao);
+            ts::return_shared(v);
+        };
+
+        ts::end(scenario);
+    }
+
+    /// A machine wallet with no principal cannot deposit — same fail-closed
+    /// behavior as any outsider.
+    #[test]
+    #[expected_failure(abort_code = vault::ENotAuthorized)]
+    fun ungranted_machine_cannot_deposit() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 10);
+        ts::next_tx(&mut scenario, BOT);
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+        vault::deposit_receipt(&mut v, &awar_dao, r, scenario.ctx());
+
+        abort
+    }
+
+    /// Machines can never be granted Edit: the grant() Edit-role gate fires
+    /// before the principal is inspected, same as for players.
+    #[test]
+    #[expected_failure(abort_code = vault::EEditMustBeOu)]
+    fun grant_rejects_machine_for_edit_role() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        vault::grant(
+            &mut v,
+            &officers_dao,
+            vector[vault::role_edit()],
+            vector[acl::machine(BOT)],
+            scenario.ctx(),
+        );
+
+        abort
+    }
 
     // =============================================================================
     // === M2: vault teardown + DOF-emptiness tracking (#5)

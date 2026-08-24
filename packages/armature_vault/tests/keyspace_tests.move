@@ -8,6 +8,8 @@ module armature_vault::keyspace_tests {
     const ADMIN: address = @0xA;
     const USER1: address = @0xB;
     const USER2: address = @0xC;
+    // A machine-held wallet (automation keypair).
+    const BOT: address = @0xF;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -17,7 +19,6 @@ module armature_vault::keyspace_tests {
         dao::create(
             &init,
             string::utf8(b"DAO"),
-            string::utf8(b"dao"),
             string::utf8(b"https://example.com/i.png"),
             sc.ctx(),
         )
@@ -429,6 +430,230 @@ module armature_vault::keyspace_tests {
         keyspace::update_entry(&allowlist, &mut entry, b"QmNew", &dao, sc.ctx());
 
         keyspace::test_destroy_entry(entry);
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // ── Machine principals ────────────────────────────────────────────────────
+
+    // A machine principal can hold Read and Write; satisfaction is key
+    // possession (sender == machine address), and a Read grant bumps version
+    // exactly like a player grant.
+    #[test]
+    fun test_machine_can_hold_read_and_write() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::machine(BOT),
+            &dao,
+            sc.ctx(),
+        );
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_write(),
+            acl::machine(BOT),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, BOT), 0);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_write(), &dao, BOT), 1);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, BOT), 2);
+        // Machine Read grant bumps version (re-encryption epoch), Write does not.
+        assert!(keyspace::version(&allowlist) == 1, 3);
+
+        // Revoking the machine's Read bumps version again.
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::machine(BOT),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, BOT), 4);
+        assert!(keyspace::version(&allowlist) == 2, 5);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // A machine granted only Read is not a player: the same address granted as
+    // a machine principal must not be revocable as a player principal (kind is
+    // part of identity).
+    #[test]
+    #[expected_failure]
+    fun test_machine_grant_not_revocable_as_player() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::machine(BOT),
+            &dao,
+            sc.ctx(),
+        );
+        // Wrong kind — ENotGranted.
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(BOT),
+            &dao,
+            sc.ctx(),
+        ); // abort
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // Machines can never hold Grant (EMachineCannotHoldGrant).
+    #[test]
+    #[expected_failure]
+    fun test_machine_cannot_hold_grant() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl::machine(BOT),
+            &dao,
+            sc.ctx(),
+        ); // abort
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // multi_grant enforces the machine/Grant restriction too.
+    #[test]
+    #[expected_failure]
+    fun test_multi_grant_machine_rejects_grant_role() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::multi_grant(
+            &mut allowlist,
+            vector[keyspace::role_read(), keyspace::role_grant()],
+            acl::machine(BOT),
+            &dao,
+            sc.ctx(),
+        ); // abort
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // create_keyspace_for_dao rejects machine principals in the Grant seed list.
+    #[test]
+    #[expected_failure]
+    fun test_create_for_dao_rejects_machine_grantor() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        keyspace::create_keyspace_for_dao(
+            b"Org Vault",
+            &dao,
+            vector[acl::ou(dao_id), acl::machine(BOT)],
+            vector[],
+            vector[],
+            sc.ctx(),
+        ); // abort
+
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // ── Grantor self-lock guard ───────────────────────────────────────────────
+
+    // A grantor may remove another grantor while remaining satisfied themselves.
+    #[test]
+    fun test_grantor_can_revoke_other_grantor() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 0);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, USER1), 1);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(dao);
+        sc.end();
+    }
+
+    // A grantor cannot revoke their own last satisfiable Grant principal even
+    // when another (unsatisfiable-for-them) grantor remains — the post-state
+    // guard fires (EGrantorWouldLockSelf).
+    #[test]
+    #[expected_failure]
+    fun test_revoke_aborts_if_grantor_would_lock_self() {
+        let mut sc = ts::begin(ADMIN);
+        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        // Add USER1 as a second grantor, then ADMIN removes themselves. The
+        // last-grantor count guard passes (USER1 remains), but ADMIN no longer
+        // satisfies Grant — must abort.
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl::player(USER1),
+            &dao,
+            sc.ctx(),
+        );
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_grant(),
+            acl::player(ADMIN),
+            &dao,
+            sc.ctx(),
+        ); // abort
+
         keyspace::test_destroy(allowlist);
         ts::return_shared(dao);
         sc.end();

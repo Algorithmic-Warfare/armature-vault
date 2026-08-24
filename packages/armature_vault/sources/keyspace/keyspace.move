@@ -17,9 +17,12 @@
 ///               re-encrypted.
 ///   - `Write` — can call `publish_entry`, `update_entry`, `edit_entry`.
 ///
-/// Access control uses the shared `Principal` model from `armature_vault::acl`:
-/// each list member is either a bare `Player { addr }` (single wallet) or an
-/// `Ou { dao_id }` (any board member of that DAO), checked via `acl::satisfies`.
+/// Access control uses the shared kind-tagged `Principal` model from
+/// `armature_vault::acl`: each list member is a player (single wallet), an ou
+/// (any board member of that DAO), or a machine (single automation-held
+/// wallet), checked via `acl::satisfies`. Machines may hold `Read` and `Write`
+/// but never `Grant` — a hot server key must not be an ACL administrator
+/// (same rationale as the vault's Ou-only `Edit` rule).
 ///
 /// DAO-linked keyspaces (`create_keyspace_for_dao`) emit `registrant_dao_id` in
 /// `KeyspaceCreated` so an indexer can answer "all keyspaces for DAO X" without
@@ -55,6 +58,8 @@ module armature_vault::keyspace {
     const ELastWriter: u64 = 6;
     const ELastReader: u64 = 7;
     const EEmptyGrantPrincipals: u64 = 8;
+    const EMachineCannotHoldGrant: u64 = 9;
+    const EGrantorWouldLockSelf: u64 = 10;
 
     // ── Objects ──────────────────────────────────────────────────────────────
 
@@ -142,7 +147,9 @@ module armature_vault::keyspace {
     //   Emitted by: create_keyspace, create_keyspace_for_dao
     //   Fields:
     //     id                — Keyspace object ID (primary key)
-    //     creator           — Principal who created it (Player or Ou)
+    //     creator           — Principal who created it (kind 0 = player,
+    //                         kind 1 = ou, kind 2 = machine; `id` is the
+    //                         wallet address or DAO id, `data` is empty)
     //     name              — human-readable label
     //     registrant_dao_id — Option<ID>:
     //                           None → personal keyspace (create_keyspace)
@@ -160,15 +167,16 @@ module armature_vault::keyspace {
     //   Fields:
     //     keyspace_id — parent Keyspace
     //     role        — Grant | Read | Write
-    //     principal   — Player { addr } or Ou { dao_id }
+    //     principal   — kind-tagged: { kind: u8, id: address, data: bytes }
+    //                   (0 = player wallet, 1 = ou DAO id, 2 = machine wallet)
     //     by          — address of the caller who performed the grant
     //   Primary index queries:
     //     • Current role-R members of keyspace K:
     //         AccessGranted(keyspace_id=K, role=R) − AccessRevoked(keyspace_id=K, role=R)
-    //     • All keyspaces where address A holds Read:
-    //         WHERE role=Read AND principal=Player{addr=A}
+    //     • All keyspaces where address A holds Read (human or machine):
+    //         WHERE role=Read AND principal.kind IN (0, 2) AND principal.id=A
     //     • All keyspaces where DAO D holds any role:
-    //         WHERE principal=Ou{dao_id=D}
+    //         WHERE principal.kind=1 AND principal.id=D
     //   Note: only emitted on real state changes — add_principal is a no-op
     //   (returns false) for duplicates, so no spurious events are produced.
     //
@@ -262,8 +270,9 @@ module armature_vault::keyspace {
     //       EntryDescriptionEdited per entry_id
     //
     //   GET /v1/address/:addr/keyspaces?role=Read
-    //     → AccessGranted WHERE role=Read AND principal=Player{addr}
-    //       minus AccessRevoked for the same (addr, keyspace_id, role) tuples
+    //     → AccessGranted WHERE role=Read AND principal.kind IN (0, 2)
+    //       AND principal.id=addr, minus AccessRevoked for the same
+    //       (addr, keyspace_id, role) tuples
 
     // ── Entry functions ──────────────────────────────────────────────────────
 
@@ -338,6 +347,13 @@ module armature_vault::keyspace {
     ) {
         assert!(dao.is_governance_member(ctx.sender()), ENotAllowed);
         assert!(!grant_principals.is_empty(), EEmptyGrantPrincipals);
+        // Machines are barred from Grant at seeding time too, so the init path
+        // cannot smuggle in what `grant` refuses.
+        let mut gi = 0;
+        while (gi < grant_principals.length()) {
+            assert!(!acl::is_machine(&grant_principals[gi]), EMachineCannotHoldGrant);
+            gi = gi + 1;
+        };
 
         let uid = object::new(ctx);
         let keyspace_id = uid.to_inner();
@@ -390,7 +406,8 @@ module armature_vault::keyspace {
     }
 
     /// Grant `principal` the `role`.  Caller must satisfy `Grant`.
-    /// Bumps `version` when the `Read` set changes.
+    /// Bumps `version` when the `Read` set changes.  Machine principals may
+    /// hold `Read`/`Write` but never `Grant` (`EMachineCannotHoldGrant`).
     public fun grant(
         keyspace: &mut Keyspace,
         role: Role,
@@ -399,6 +416,7 @@ module armature_vault::keyspace {
         ctx: &TxContext,
     ) {
         assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        assert!(!(role == Role::Grant && acl::is_machine(&principal)), EMachineCannotHoldGrant);
         let changed = add_principal(keyspace, role, principal);
         assert!(changed, EAlreadyGranted);
         if (role == Role::Read) { keyspace.version = keyspace.version + 1 };
@@ -424,6 +442,10 @@ module armature_vault::keyspace {
         let mut i = 0;
         while (i < n) {
             let role = roles[i];
+            assert!(
+                !(role == Role::Grant && acl::is_machine(&principal)),
+                EMachineCannotHoldGrant,
+            );
             let changed = add_principal(keyspace, role, principal);
             assert!(changed, EAlreadyGranted);
             if (role == Role::Read) { keyspace.version = keyspace.version + 1 };
@@ -439,7 +461,11 @@ module armature_vault::keyspace {
 
     /// Revoke `principal` from `role`.  Caller must satisfy `Grant`.
     /// Bumps `version` when the `Read` set changes.  Cannot remove the last
-    /// `Grant` principal (would brick the keyspace).
+    /// `Grant` principal (would brick the keyspace), and the caller must still
+    /// satisfy `Grant` after the removal (`EGrantorWouldLockSelf`) — the
+    /// post-state twin of the entry check, mirroring the vault's
+    /// `EEditorWouldLockSelf` guard against grant-unsatisfiable-then-
+    /// revoke-self brick paths.
     public fun revoke(
         keyspace: &mut Keyspace,
         role: Role,
@@ -463,6 +489,10 @@ module armature_vault::keyspace {
             assert!(read_list.length() > 0, ELastReader);
             keyspace.version = keyspace.version + 1;
         };
+        assert!(
+            satisfies_role(keyspace, Role::Grant, dao, ctx.sender()),
+            EGrantorWouldLockSelf,
+        );
         event::emit(AccessRevoked {
             keyspace_id: keyspace.id.to_inner(),
             role,
@@ -473,7 +503,8 @@ module armature_vault::keyspace {
 
     /// Revoke `principal` from every role in `roles` in one call.  Caller must satisfy `Grant`.
     /// Applies last-principal guards and bumps `version` per `Read` removal.  Aborts if any
-    /// role is not currently held.
+    /// role is not currently held, or if the caller would no longer satisfy `Grant`
+    /// after the batch (`EGrantorWouldLockSelf`).
     public fun multi_revoke(
         keyspace: &mut Keyspace,
         roles: vector<Role>,
@@ -509,6 +540,10 @@ module armature_vault::keyspace {
             });
             i = i + 1;
         };
+        assert!(
+            satisfies_role(keyspace, Role::Grant, dao, ctx.sender()),
+            EGrantorWouldLockSelf,
+        );
     }
 
     /// Called by the Seal key-server inside a PTB to gate decryption-key release.

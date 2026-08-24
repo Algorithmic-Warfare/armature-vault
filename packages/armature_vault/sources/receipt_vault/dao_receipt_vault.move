@@ -8,20 +8,26 @@
 ///
 /// Access control:
 ///   - Each operation is gated by a *role*: `Deposit`, `Withdraw`, or `Edit`.
-///   - Each role maps to a list of *principals*. A principal is either:
-///       * `Player { addr }` — satisfied when `ctx.sender() == addr`, or
-///       * `Ou { dao_id }`   — satisfied when the caller passes the matching `&DAO`
-///         (`dao.id() == dao_id`) and is one of its board members.
+///   - Each role maps to a list of *principals* (kind-tagged, see
+///     `armature_vault::acl`):
+///       * player (kind 0)  — satisfied when `ctx.sender() == id`,
+///       * ou (kind 1)      — satisfied when the caller passes the matching `&DAO`
+///         (`dao.id() == id`) and is one of its board members,
+///       * machine (kind 2) — satisfied when `ctx.sender() == id`; an
+///         automation-held wallet with the same trust model as a player key.
+///         Machines may hold `Deposit`/`Withdraw` but never `Edit`.
 ///     A caller passes a role check if they satisfy *any* principal listed for it.
 ///   - `Edit` is ACL administration: holders may batch grant/revoke principals on
 ///     `Deposit`/`Withdraw` roles via `grant`/`revoke`. The people who can
 ///     *administer* the vault need not be the people who can *use* it — e.g. AWAR
 ///     officers hold `Edit` while AWAR/WOLF members hold `Deposit`/`Withdraw`.
 ///   - `Edit` itself can only be granted via `grant_edit_ou`, which takes a
-///     live `&DAO` witness. `grant` aborts `EEditMustBeOu` on `Role::Edit`. This
+///     live `&DAO` witness. `grant` aborts `EEditMustBeOu` on `Role::Edit`, and
+///     the initializers reject non-ou principals in `edit_principals`. This
 ///     forces every `Edit` principal to reference a real on-chain DAO and closes
-///     brick-by-unsatisfiable-principal attacks (bogus dao ids, `Player{@0x0}`)
-///     plus bare-`Player` Edit backdoors that would defeat OU migration.
+///     brick-by-unsatisfiable-principal attacks (bogus dao ids, player @0x0)
+///     plus bare-key Edit backdoors (player or machine) that would defeat OU
+///     migration.
 ///   - Invariants on `revoke`: (1) `Edit` can never be emptied (`ELastEditor`),
 ///     and (2) the caller must still satisfy `Edit` via `editor_dao` after the
 ///     batch (`EEditorWouldLockSelf`). Together they prevent both empty-Edit
@@ -284,6 +290,14 @@ module armature_vault::dao_receipt_vault {
     ) {
         assert!(registrant_dao.is_governance_member(ctx.sender()), ENotAuthorized);
         assert!(!edit_principals.is_empty(), EEmptyEditPrincipals);
+        // Edit is Ou-only from the very first grant: the init path must not
+        // smuggle in the bare-key (player/machine) Edit principals that
+        // `grant` refuses via EEditMustBeOu.
+        let mut ei = 0;
+        while (ei < edit_principals.length()) {
+            assert!(acl::is_ou(&edit_principals[ei]), EEditMustBeOu);
+            ei = ei + 1;
+        };
 
         let storage_unit_id = object::id(storage_unit);
         // M1: caller's OwnerCap must authorize this SSU.
@@ -364,6 +378,12 @@ module armature_vault::dao_receipt_vault {
     ) {
         assert!(registrant_dao.is_governance_member(ctx.sender()), ENotAuthorized);
         assert!(!edit_principals.is_empty(), EEmptyEditPrincipals);
+        // Edit is Ou-only from the very first grant (see initialize_dao_vault).
+        let mut ei = 0;
+        while (ei < edit_principals.length()) {
+            assert!(acl::is_ou(&edit_principals[ei]), EEditMustBeOu);
+            ei = ei + 1;
+        };
 
         let storage_unit_id = object::id(storage_unit);
         // F1: the VaultConfig's bound SSU must match the passed StorageUnit.
