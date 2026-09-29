@@ -66,14 +66,14 @@ permanently brick the ACL.
 
 ## Dependencies & environments
 
-- `armature` (framework) pinned to `ff22e5f` (Cycle 7, armature `main`) — OU identity
+- `armature` (framework) pinned to `ae60685` (Cycle 7, armature `main`) — OU identity
   (`armature::ou::OU`) / `is_governance_member`.
-- `world` pinned to `32300a2` — same rev warehouse-receipts uses, so `StorageUnit`
+- `world` pinned to `d33ff23` — same rev warehouse-receipts uses, so `StorageUnit`
   / `Character` types match.
-- `multicoin` pinned to `e384bbc` (`override = true`) — same rev as warehouse-receipts,
+- `multicoin` pinned to `2772c26` (`override = true`) — same rev as warehouse-receipts,
   so `multicoin::Balance` receipts are the same on-chain type across the deposit
   boundary. armature itself no longer depends on multicoin.
-- `warehouse_receipts` pinned to `e872aac`.
+- `warehouse_receipts` pinned to `212be7c` (warehouse-receipts `main`).
 
 **Target env:** `testnet_stillness`.
 
@@ -81,8 +81,3 @@ permanently brick the ACL.
 sui move build --build-env testnet_stillness
 sui move test  --build-env testnet_stillness
 ```
-
-**Known issue:** `sui move test` also compiles warehouse_receipts' own tests, and at
-`e872aac` those don't compile (`receipt::batch_redeem_receipt` gained a
-`to_ssu_owner` parameter the tests don't pass). Vault tests pass once that upstream
-test file is fixed.

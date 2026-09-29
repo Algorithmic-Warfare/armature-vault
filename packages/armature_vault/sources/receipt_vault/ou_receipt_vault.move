@@ -38,7 +38,7 @@
 ///
 /// The `multicoin` and `world` types used here MUST resolve to the same on-chain
 /// packages as the warehouse_receipts package the receipts are minted from
-/// (multicoin `e384bbc`, world `32300a2`) — otherwise the `Balance` / `StorageUnit`
+/// (multicoin `2772c26`, world `d33ff23`) — otherwise the `Balance` / `StorageUnit`
 /// types diverge and receipts cannot be deposited.
 module armature_vault::ou_receipt_vault {
     use armature::ou::OU;
