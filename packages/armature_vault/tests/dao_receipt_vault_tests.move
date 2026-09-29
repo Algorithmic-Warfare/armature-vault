@@ -1713,6 +1713,115 @@ module armature_vault::dao_receipt_vault_tests {
         ts::end(scenario);
     }
 
+    // The first half of the substitution: the bot adds an ou it controls to Edit.
+    #[test]
+    #[expected_failure(abort_code = vault::EAnchorChangeNeedsRecoverableEditor)]
+    fun bare_key_editor_cannot_grant_edit_ou() {
+        let mut scenario = ts::begin(AWAR_OFFICER);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let attacker = make_dao(&mut scenario, OUTSIDER, vector[OUTSIDER, BOT]);
+        let collection_id = make_collection(&mut scenario, AWAR_OFFICER);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            anchor_plus_bot_acl(officers, option::none()),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, BOT);
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let attacker_dao = ts::take_shared_by_id<DAO>(&scenario, attacker);
+        vault::grant_edit_ou(&mut v, &officers_dao, &attacker_dao, scenario.ctx()); // abort
+
+        ts::return_shared(attacker_dao);
+        ts::return_shared(officers_dao);
+        ts::return_shared(v);
+        ts::end(scenario);
+    }
+
+    // The second half: with two anchors present, removing one would still leave a
+    // recoverable editor, so ENoRecoverableEditor does not fire — only the anchor
+    // rule stops the bot.
+    #[test]
+    #[expected_failure(abort_code = vault::EAnchorChangeNeedsRecoverableEditor)]
+    fun bare_key_editor_cannot_revoke_anchor() {
+        let mut scenario = ts::begin(AWAR_OFFICER);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let second = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let collection_id = make_collection(&mut scenario, AWAR_OFFICER);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            anchor_plus_bot_acl(officers, option::some(second)),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, BOT);
+        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        vault::revoke(
+            &mut v,
+            &officers_dao,
+            vector[vault::role_edit()],
+            vector[acl::ou(officers)],
+            scenario.ctx(),
+        ); // abort
+
+        ts::return_shared(officers_dao);
+        ts::return_shared(v);
+        ts::end(scenario);
+    }
+
+    // The anchor set is still mutable — by the board. An officer acting as the
+    // officers ou adds a new ou and removes the other one.
+    #[test]
+    fun anchor_editor_substitutes_anchor() {
+        let mut scenario = ts::begin(AWAR_OFFICER);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let second = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let successor = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let collection_id = make_collection(&mut scenario, AWAR_OFFICER);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            anchor_plus_bot_acl(officers, option::some(second)),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            let successor_dao = ts::take_shared_by_id<DAO>(&scenario, successor);
+            vault::grant_edit_ou(&mut v, &officers_dao, &successor_dao, scenario.ctx());
+            vault::revoke(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_edit()],
+                vector[acl::ou(second)],
+                scenario.ctx(),
+            );
+            let editors = vault::principals(&v, vault::role_edit());
+            assert!(editors.contains(&acl::ou(successor)), 0);
+            assert!(!editors.contains(&acl::ou(second)), 1);
+            assert!(editors.contains(&acl::ou(officers)), 2);
+            ts::return_shared(successor_dao);
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
+        ts::end(scenario);
+    }
+
     // A bare-key editor is the automation shape 7556c73 enables: it must be able
     // to hand a machine wallet Deposit/Withdraw and have that wallet actually move
     // funds, without any OU in the loop. The anchor rules constrain only who may

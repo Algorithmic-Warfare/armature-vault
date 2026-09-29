@@ -41,12 +41,16 @@
 ///     batch (`EEditorWouldLockSelf`). Together they prevent empty-Edit bricks,
 ///     decay into dead keys, and grant-bogus-then-revoke-self capture paths.
 ///
-///     Note what the recoverable-editor rule does and does not promise. It
-///     guarantees *an* ou always remains in `Edit`; it does not pin *which* ou.
-///     A bare-key editor may add an ou via `grant_edit_ou` and revoke an
-///     existing one, so a leaked bare key can substitute the recovery anchor as
-///     well as drain the vault via a self-granted `Withdraw`. Delegating `Edit`
-///     to a bare key is therefore a full trust delegation, not a scoped one.
+///     The recoverable-editor rule guarantees *an* ou always remains in
+///     `Edit`; the anchor rule pins *which* ou. Only a caller who satisfies
+///     `Edit` through a recoverable principal (today, an ou board member acting
+///     as that ou) may add an ou to `Edit` (`grant_edit_ou`) or revoke one from
+///     it (`EAnchorChangeNeedsRecoverableEditor`). A bare-key editor therefore
+///     administers everything else — `Deposit`/`Withdraw` and other bare-key
+///     editors — but cannot substitute the recovery anchor, so the governed
+///     board can always revoke a leaked key. A leaked bare key can still drain
+///     the vault via a self-granted `Withdraw` before it is revoked; anchor
+///     pinning bounds the damage to the assets, not to control of the vault.
 ///
 /// Why the OU indirection (and not a flat address list): it makes board-membership
 /// changes and DAO *migration* work without re-listing addresses. A migrated DAO
@@ -127,6 +131,9 @@ module armature_vault::dao_receipt_vault {
     #[error(code = 15)]
     const ENoOpRevoke: vector<u8> =
         b"Revocation changed nothing — no named principal was present on the role given for it";
+    #[error(code = 16)]
+    const EAnchorChangeNeedsRecoverableEditor: vector<u8> =
+        b"Only an editor acting through a recoverable principal (an Ou) may add or remove an Ou on Edit";
 
     // === Structs ===
 
@@ -262,6 +269,23 @@ module armature_vault::dao_receipt_vault {
         let mut i = 0;
         while (i < n) {
             if (acl::is_recoverable(&editors[i])) { return true };
+            i = i + 1;
+        };
+        false
+    }
+
+    /// True if `sender` satisfies `Edit` through a recoverable principal — i.e.
+    /// acts with the authority of a governed board, not a bare key. Gates every
+    /// change to the recovery-anchor set (ou principals on `Edit`).
+    fun satisfies_edit_via_recoverable(vault: &DaoReceiptVault, dao: &DAO, sender: address): bool {
+        let edit_role = Role::Edit;
+        if (!vault.acl.contains(&edit_role)) { return false };
+        let editors = vault.acl.get(&edit_role);
+        let n = editors.length();
+        let mut i = 0;
+        while (i < n) {
+            let p = &editors[i];
+            if (acl::is_recoverable(p) && acl::satisfies(p, dao, sender)) { return true };
             i = i + 1;
         };
         false
@@ -640,6 +664,10 @@ module armature_vault::dao_receipt_vault {
     /// is the only path that can add an ou Edit principal — it forces every such
     /// grant to reference a real DAO with at least one governance member, closing
     /// the brick-by-unsatisfiable-principal attack.
+    ///
+    /// AV-12: the caller must satisfy `Edit` through a recoverable principal
+    /// (`EAnchorChangeNeedsRecoverableEditor`). A bare-key editor adding an ou it
+    /// controls is the first half of an anchor substitution.
     public fun grant_edit_ou(
         vault: &mut DaoReceiptVault,
         editor_dao: &DAO,
@@ -648,6 +676,10 @@ module armature_vault::dao_receipt_vault {
     ) {
         let sender = ctx.sender();
         assert_role(vault, Role::Edit, editor_dao, sender);
+        assert!(
+            satisfies_edit_via_recoverable(vault, editor_dao, sender),
+            EAnchorChangeNeedsRecoverableEditor,
+        );
 
         let vault_id = object::id(vault);
         let principal = acl::ou(target_dao.id());
@@ -675,6 +707,11 @@ module armature_vault::dao_receipt_vault {
     /// `machine(A)` are distinct `Principal` values for the same address (equality
     /// includes `kind`) even though `satisfies` treats them identically, so
     /// revoking the wrong kind removes nothing.
+    ///
+    /// AV-12: any pair naming an ou on `Edit` requires the caller to satisfy
+    /// `Edit` through a recoverable principal, judged on the pre-revoke ACL
+    /// (`EAnchorChangeNeedsRecoverableEditor`). A bare-key editor cannot remove
+    /// the recovery anchor.
     public fun revoke(
         vault: &mut DaoReceiptVault,
         editor_dao: &DAO,
@@ -689,6 +726,9 @@ module armature_vault::dao_receipt_vault {
 
         let vault_id = object::id(vault);
         let n = roles.length();
+        // AV-12: evaluated before any removal, so an ou editor revoking its own
+        // anchor (e.g. the old board in a migration) is judged on who it was.
+        let anchor_authority = satisfies_edit_via_recoverable(vault, editor_dao, sender);
 
         // L1: track which (role, principal) pairs actually changed state. Defer all
         // event emission until after the brick-guards (F2) and only emit for real
@@ -699,6 +739,10 @@ module armature_vault::dao_receipt_vault {
         while (i < n) {
             let role = roles[i];
             let principal = principals[i];
+            assert!(
+                anchor_authority || !(role == Role::Edit && acl::is_recoverable(&principal)),
+                EAnchorChangeNeedsRecoverableEditor,
+            );
             let changed = remove_principal(vault, role, principal);
             if (changed) { any_changed = true };
             changed_mask.push_back(changed);
