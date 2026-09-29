@@ -19,11 +19,10 @@
 ///     `Deposit`/`Withdraw` roles via `grant`/`revoke`. The people who can
 ///     *administer* the vault need not be the people who can *use* it — e.g. AWAR
 ///     officers hold `Edit` while AWAR/WOLF members hold `Deposit`/`Withdraw`.
-///   - `Edit` itself can only be granted via `grant_edit_ou`, which takes a
-///     live `&OU` witness. `grant` aborts `EEditMustBeOu` on `Role::Edit`. This
-///     forces every `Edit` principal to reference a real on-chain OU and closes
-///     brick-by-unsatisfiable-principal attacks (bogus org ids, `Player{@0x0}`)
-///     plus bare-`Player` Edit backdoors that would defeat OU migration.
+///   - Roles are not tied to principal kinds: `Edit`, like every role, may be
+///     held by any `Player`, `Machine`, or `Ou` principal and is granted through
+///     `grant`. `grant_edit_ou` is a convenience that takes a live `&OU` witness,
+///     so the granted Ou id is known to reference a real OU.
 ///   - Invariants on `revoke`: (1) `Edit` can never be emptied (`ELastEditor`),
 ///     and (2) the caller must still satisfy `Edit` via `editor_org` after the
 ///     batch (`EEditorWouldLockSelf`). Together they prevent both empty-Edit
@@ -84,18 +83,16 @@ module armature_vault::ou_receipt_vault {
     #[error(code = 6)]
     const EZeroAmount: vector<u8> = b"Amount must be greater than zero";
     #[error(code = 7)]
-    const EEditMustBeOu: vector<u8> = b"Edit role only accepts Ou principals — use grant_edit_ou";
-    #[error(code = 8)]
     const EEditorWouldLockSelf: vector<u8> =
         b"Revocation would leave the caller unable to administer the vault";
-    #[error(code = 9)]
+    #[error(code = 8)]
     const EVaultNonEmpty: vector<u8> =
         b"Vault holds at least one non-empty asset balance — drain before deinit";
-    #[error(code = 10)]
+    #[error(code = 9)]
     const EVaultRegistryMismatch: vector<u8> = b"Registry slot does not point at this vault";
-    #[error(code = 11)]
+    #[error(code = 10)]
     const EStorageUnitMismatch: vector<u8> = b"VaultConfig does not bind the passed StorageUnit";
-    #[error(code = 13)]
+    #[error(code = 11)]
     const EEmptyEditPrincipals: vector<u8> =
         b"edit_principals must be non-empty — vault would have no administrator";
 
@@ -427,9 +424,6 @@ module armature_vault::ou_receipt_vault {
         while (i < n) {
             let role = roles[i];
             let principal = principals[i];
-            // H1/M3: Edit principals must come through grant_edit_ou, which validates
-            // the &OU witness and refuses bare-Player and unverifiable-Ou principals.
-            assert!(role != Role::Edit, EEditMustBeOu);
             // L1: only emit on real state change.
             let changed = add_principal(vault, role, principal);
             if (changed) {
@@ -439,10 +433,9 @@ module armature_vault::ou_receipt_vault {
         };
     }
 
-    /// H1: grant the Edit role to an OU, validated by a live `&OU` witness. This
-    /// is the only path that can add an Edit principal — it forces every Edit grant
-    /// to reference a real OU with at least one governance member, closing the
-    /// brick-by-unsatisfiable-principal attack and the bare-Player Edit backdoor.
+    /// Grant the Edit role to an OU, validated by a live `&OU` witness. Unlike
+    /// `grant`, which accepts any principal, this guarantees the Ou id references
+    /// a real OU.
     public fun grant_edit_ou(
         vault: &mut OuReceiptVault,
         editor_org: &OU,
