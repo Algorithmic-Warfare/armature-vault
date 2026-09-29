@@ -73,13 +73,8 @@ jobs:
         run: sui --version
 
       # --build-env note: the package's Move.toml declares `testnet_stillness`
-      # (publish target, blocked on the armature_framework declaring it) and
-      # `testnet_wip` (build/test env declared by the framework). The latter
-      # doesn't resolve in practice because the multicoin dep doesn't declare
-      # `testnet_wip` — its available envs are [testnet, mainnet,
-      # testnet_stillness, testnet_utopia]. `testnet` is the lowest-common-
-      # denominator env that resolves all transitive deps. Revisit when the
-      # framework declares testnet_stillness so we can switch CI to that.
+      # (publish target). CI builds under `testnet`, the lowest-common-
+      # denominator env that resolves all transitive deps.
       #
       # `sui move build` is run explicitly before `sui move test` because the
       # `test` subcommand does NOT regenerate Move.lock when it's missing
@@ -98,11 +93,12 @@ jobs:
       #
       # What this enforces:
       #   1. Our root package's [pinned.testnet.armature_vault].deps resolves
-      #      multicoin to our pinned rev (c7a97f2) and world to our pinned rev
-      #      (8e2e97b). If `override = true` is dropped on multicoin or the
+      #      multicoin to our pinned rev (2772c26) and world to our pinned rev
+      #      (d33ff23). If `override = true` is dropped on multicoin or the
       #      top-level world pin is removed, those deps reroute and the check
       #      fails.
-      #   2. warehouse_receipts is at the pinned rev (8a2f80e).
+      #   2. armature is at the pinned rev (ae60685, Cycle 7) and
+      #      warehouse_receipts is at the pinned rev (212be7c).
       #
       # What this DOES NOT enforce (intentionally surfaced, not failed):
       #   - Transitive packages may resolve multicoin/world to *different* revs.
@@ -130,9 +126,10 @@ jobs:
           fi
           # Expected revs — keep in sync with packages/armature_vault/Move.toml.
           # When you bump a pin in Move.toml, bump it here too.
-          EXPECTED_MULTICOIN="c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6"
-          EXPECTED_WORLD="8e2e97b50fd6bbf605284bcdaae54a33a5475e89"
-          EXPECTED_WAREHOUSE_RECEIPTS="8a2f80e857d516187c99b28efa935ff7ce42af03"
+          EXPECTED_ARMATURE="ae60685f888ac5dd4d24413fb989002ef5315c74"
+          EXPECTED_MULTICOIN="2772c26d24c02671726d39f167b8f772777875d9"
+          EXPECTED_WORLD="d33ff232bd3878e8f9ad0721e18564b21facc925"
+          EXPECTED_WAREHOUSE_RECEIPTS="212be7c5ee1ee8bca55305e86e1ae549df78c279"
 
           fail=0
           # Anchor the assertion to a `source = ... rev = "..."` line so a stray
@@ -147,6 +144,7 @@ jobs:
             fi
           }
 
+          check armature "$EXPECTED_ARMATURE"
           check multicoin "$EXPECTED_MULTICOIN"
           check world "$EXPECTED_WORLD"
           check warehouse_receipts "$EXPECTED_WAREHOUSE_RECEIPTS"
@@ -181,7 +179,7 @@ jobs:
             fi
           done
           echo ""
-          echo "Note: warehouse_receipts and armature linking to multicoin_2 / multicoin (rev 330d339)"
-          echo "      instead of multicoin_1 (rev c7a97f2, our override) is EXPECTED at this rev pin."
+          echo "Note: armature has no multicoin dependency since Cycle 7; only warehouse_receipts"
+          echo "      links multicoin, and our override unifies it on rev 2772c26."
           echo "      Whether this affects runtime type identity at the deposit boundary is being"
           echo "      tracked separately."

@@ -2,34 +2,29 @@
 name = "armature_vault"
 edition = "2024"
 version = "0.0.1"
-published-at = "0x3af6edb64f575cb65a89f1c8f445a2e2aad05324a1586aad9e2651191bf4f99b"
 
-# armature_vault — a DAO/OU-gated vault for warehouse receipts (and, later,
+# armature_vault — an OU-gated vault for warehouse receipts (and, later,
 # other shared resources). Players mint multicoin::Balance receipts via the
 # warehouse_receipts package and deposit them here; access is gated by a
-# dynamic, multi-principal ACL keyed on armature DAO identity rather than a raw
+# dynamic, multi-principal ACL keyed on armature OU identity rather than a raw
 # in-game tribe_id. Standalone, optional package: it lives outside the
 # transitional armature_world_bridge because the vault outlives the bridge.
 #
-# Target environment: testnet_stillness — all deps resolve multicoin to e384bbc
-# (0x99a4c039...) and world to rev 32300a2 (0x8b8a46ed...).
+# Target environment: testnet_stillness — all deps resolve multicoin to 2772c26
+# (0xdbb778cb...), world to rev d33ff23 (0x7be18d62...) and warehouse_receipts
+# to main 212be7c (0x134dfa96...).
 [dependencies]
-armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "a8c51d365d1db5967ea4cb90761f04eb93c700ca", override = true }
-world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "32300a2ab6dc95c25ff42e30b89990492ad4dcaa", override = true }
-# override = true: unify all deps on the same multicoin build (e384bbc,
-# 0x99a4c039...) so `multicoin::Balance` receipts are the same on-chain type
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "ae60685f888ac5dd4d24413fb989002ef5315c74", override = true }
+world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "d33ff232bd3878e8f9ad0721e18564b21facc925", override = true }
+# override = true: unify warehouse_receipts on the same multicoin build (2772c26,
+# 0xdbb778cb...) so `multicoin::Balance` receipts are the same on-chain type
 # across the deposit boundary.
-multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "e384bbc8670b850cfb82a5e3b9fa46798b0ff6dc", override = true }
+multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "2772c26d24c02671726d39f167b8f772777875d9", override = true }
 # override = true: warehouse_receipts is pinned to a specific rev that aligns
 # world and multicoin with the rest of this build. Drop the override only if
 # upstream revs all resolve to the same on-chain addresses.
-warehouse_receipts = { git = "https://github.com/loash-industries/warehouse-receipts.git", subdir = "packages/contracts", rev = "e872aac7a72dbf64e47f123d180ea85ec5d84552", override = true }
+warehouse_receipts = { git = "https://github.com/loash-industries/warehouse-receipts.git", subdir = "packages/contracts", rev = "212be7c5ee1ee8bca55305e86e1ae549df78c279", override = true }
 
 [environments]
-testnet_wip = "4c78adac"
 testnet_stillness = "4c78adac"
 
-[dep-replacements.testnet_wip]
-multicoin = { use-environment = "testnet_stillness", published-at = "0x4a28acb02c16d4fbcead6b7b2a450fb42c2e04d77dd7e4533a65d6467f1907ac", original-id = "0x4a28acb02c16d4fbcead6b7b2a450fb42c2e04d77dd7e4533a65d6467f1907ac" }
-warehouse_receipts = { use-environment = "testnet_stillness", published-at = "0xc7c9d06e5825ba99d6ad49cdf2c62c4574daa82cba8675b354b94bca56cd32cc", original-id = "0xc7c9d06e5825ba99d6ad49cdf2c62c4574daa82cba8675b354b94bca56cd32cc" }
-world  = { use-environment = "testnet_stillness", published-at = "0xd2fd1224f881e7a705dbc211888af11655c315f2ee0f03fe680fc3176e6e4780", original-id = "0x28b497559d65ab320d9da4613bf2498d5946b2c0ae3597ccfda3072ce127448c" }

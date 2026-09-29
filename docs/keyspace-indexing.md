@@ -10,32 +10,32 @@ log in checkpoint order — no object reads are required.
 
 ### `KeyspaceCreated`
 
-Emitted by `create_keyspace` and `create_keyspace_for_dao`.
+Emitted by `create_keyspace` and `create_keyspace_for_ou`.
 
 | Field | Type | Description |
 |---|---|---|
 | `id` | `ID` | Keyspace object ID (primary key) |
-| `creator` | `Principal` | `Player { addr }` or `Ou { dao_id }` |
+| `creator` | `Principal` | `Player { addr }` or `Ou { ou_id }` (never `Machine` — `create_keyspace` always records the sender as `Player`) |
 | `name` | `String` | Human-readable label |
-| `registrant_dao_id` | `Option<ID>` | `None` → personal keyspace; `Some(dao_id)` → DAO-linked |
+| `registrant_ou_id` | `Option<ID>` | `None` → personal keyspace; `Some(ou_id)` → OU-linked |
 
-`registrant_dao_id` is derived from the on-chain `&DAO` witness in
-`create_keyspace_for_dao` — it is never a raw caller-supplied value and
+`registrant_ou_id` is derived from the on-chain `&OU` witness in
+`create_keyspace_for_ou` — it is never a raw caller-supplied value and
 **cannot be spoofed**. The caller is also required to be a governance member
-of the DAO at creation time.
+of the OU at creation time.
 
 ---
 
 ### `AccessGranted`
 
-Emitted by `create_keyspace` (×3 for Grant/Read/Write), `create_keyspace_for_dao`
+Emitted by `create_keyspace` (×3 for Grant/Read/Write), `create_keyspace_for_ou`
 (once per seeded principal per role), `grant`, and `multi_grant`.
 
 | Field | Type | Description |
 |---|---|---|
 | `keyspace_id` | `ID` | Parent Keyspace |
 | `role` | `Role` | `Grant`, `Read`, or `Write` |
-| `principal` | `Principal` | `Player { addr }` or `Ou { dao_id }` |
+| `principal` | `Principal` | `Player { addr }`, `Machine { addr }` or `Ou { ou_id }` |
 | `by` | `address` | Caller who performed the grant |
 
 Only emitted on real state changes — `add_principal` is a no-op (and produces
@@ -128,7 +128,7 @@ Replay events in checkpoint order to build the following tables.
 ### Keyspace row
 
 ```
-KeyspaceCreated → INSERT (id, name, registrant_dao_id, version = 0)
+KeyspaceCreated → INSERT (id, name, registrant_ou_id, version = 0)
 ```
 
 ### ACL (per keyspace, per role)
@@ -166,11 +166,11 @@ EntryDescriptionEdited → UPDATE description = new_description
 
 | Endpoint | Source events |
 |---|---|
-| `GET /v1/dao/:dao_id/keyspaces` | `KeyspaceCreated WHERE registrant_dao_id = dao_id` |
+| `GET /v1/ou/:ou_id/keyspaces` | `KeyspaceCreated WHERE registrant_ou_id = ou_id` |
 | `GET /v1/keyspace/:keyspace_id/acl` | `AccessGranted − AccessRevoked`, grouped by role |
 | `GET /v1/keyspace/:keyspace_id/entries` | `EntryPublished` + latest `EntryUpdated` / `EntryEdited` / `EntryDescriptionEdited` per `entry_id` |
 | `GET /v1/address/:addr/keyspaces?role=Read` | `AccessGranted(role=Read, principal=Player{addr})` minus matching `AccessRevoked` |
-| `GET /v1/dao/:dao_id/keyspaces?role=Grant` | `AccessGranted(role=Grant, principal=Ou{dao_id})` minus matching `AccessRevoked` |
+| `GET /v1/ou/:ou_id/keyspaces?role=Grant` | `AccessGranted(role=Grant, principal=Ou{ou_id})` minus matching `AccessRevoked` |
 
 ---
 
