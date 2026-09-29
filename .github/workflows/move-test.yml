@@ -98,12 +98,12 @@ jobs:
       #
       # What this enforces:
       #   1. Our root package's [pinned.testnet.armature_vault].deps resolves
-      #      multicoin to our pinned rev (e384bbc) and world to our pinned rev
-      #      (32300a2). If `override = true` is dropped on multicoin or the
+      #      multicoin to our pinned rev (2772c26) and world to our pinned rev
+      #      (d33ff23). If `override = true` is dropped on multicoin or the
       #      top-level world pin is removed, those deps reroute and the check
       #      fails.
-      #   2. armature is at the pinned rev (ff22e5f, Cycle 7) and
-      #      warehouse_receipts is at the pinned rev (e872aac).
+      #   2. armature is at the pinned rev (ae60685, Cycle 7) and
+      #      warehouse_receipts is at the pinned rev (212be7c).
       #
       # What this DOES NOT enforce (intentionally surfaced, not failed):
       #   - Transitive packages may resolve multicoin/world to *different* revs.
@@ -131,10 +131,10 @@ jobs:
           fi
           # Expected revs — keep in sync with packages/armature_vault/Move.toml.
           # When you bump a pin in Move.toml, bump it here too.
-          EXPECTED_ARMATURE="ff22e5f316f5c3f3a5bffb9957a5067c6f1cdf0c"
-          EXPECTED_MULTICOIN="e384bbc8670b850cfb82a5e3b9fa46798b0ff6dc"
-          EXPECTED_WORLD="32300a2ab6dc95c25ff42e30b89990492ad4dcaa"
-          EXPECTED_WAREHOUSE_RECEIPTS="e872aac7a72dbf64e47f123d180ea85ec5d84552"
+          EXPECTED_ARMATURE="ae60685f888ac5dd4d24413fb989002ef5315c74"
+          EXPECTED_MULTICOIN="2772c26d24c02671726d39f167b8f772777875d9"
+          EXPECTED_WORLD="d33ff232bd3878e8f9ad0721e18564b21facc925"
+          EXPECTED_WAREHOUSE_RECEIPTS="212be7c5ee1ee8bca55305e86e1ae549df78c279"
 
           fail=0
           # Anchor the assertion to a `source = ... rev = "..."` line so a stray
@@ -185,6 +185,6 @@ jobs:
           done
           echo ""
           echo "Note: armature has no multicoin dependency since Cycle 7; only warehouse_receipts"
-          echo "      links multicoin, and our override unifies it on rev e384bbc."
+          echo "      links multicoin, and our override unifies it on rev 2772c26."
           echo "      Whether this affects runtime type identity at the deposit boundary is being"
           echo "      tracked separately."

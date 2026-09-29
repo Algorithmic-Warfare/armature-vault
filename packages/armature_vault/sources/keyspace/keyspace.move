@@ -18,8 +18,9 @@
 ///   - `Write` — can call `publish_entry`, `update_entry`, `edit_entry`.
 ///
 /// Access control uses the shared `Principal` model from `armature_vault::acl`:
-/// each list member is either a bare `Player { addr }` (single wallet) or an
-/// `Ou { ou_id }` (any board member of that OU), checked via `acl::satisfies`.
+/// each list member is a bare `Player { addr }` (single wallet), a
+/// `Machine { addr }` (single service/bot key), or an `Ou { ou_id }` (any board
+/// member of that OU), checked via `acl::satisfies`.
 ///
 /// OU-linked keyspaces (`create_keyspace_for_ou`) emit `registrant_ou_id` in
 /// `KeyspaceCreated` so an indexer can answer "all keyspaces for OU X" without
@@ -142,7 +143,7 @@ module armature_vault::keyspace {
     //   Emitted by: create_keyspace, create_keyspace_for_ou
     //   Fields:
     //     id                — Keyspace object ID (primary key)
-    //     creator           — Principal who created it (Player or Ou)
+    //     creator           — Principal who created it (Player or Ou; never Machine)
     //     name              — human-readable label
     //     registrant_ou_id — Option<ID>:
     //                           None → personal keyspace (create_keyspace)
@@ -160,7 +161,7 @@ module armature_vault::keyspace {
     //   Fields:
     //     keyspace_id — parent Keyspace
     //     role        — Grant | Read | Write
-    //     principal   — Player { addr } or Ou { ou_id }
+    //     principal   — Player { addr }, Machine { addr } or Ou { ou_id }
     //     by          — address of the caller who performed the grant
     //   Primary index queries:
     //     • Current role-R members of keyspace K:
@@ -309,7 +310,7 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector::empty(),
+            entries: vector[],
         });
     }
 
@@ -385,7 +386,7 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector::empty(),
+            entries: vector[],
         });
     }
 
@@ -686,7 +687,7 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector::empty(),
+            entries: vector[],
         }
     }
 
@@ -713,7 +714,7 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector::empty(),
+            entries: vector[],
         }
     }
 
@@ -744,6 +745,12 @@ module armature_vault::keyspace {
             created_by: creator,
             epoch: keyspace.version,
         }
+    }
+
+    /// `seal_approve` is a private `entry fun`, so tests reach it through this wrapper.
+    #[test_only]
+    public fun test_seal_approve(id: vector<u8>, keyspace: &Keyspace, org: &OU, ctx: &TxContext) {
+        seal_approve(id, keyspace, org, ctx)
     }
 
     #[test_only]

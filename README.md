@@ -23,9 +23,11 @@ then deposit those receipts here. The vault:
 ## Access model
 
 Three roles — `Deposit`, `Withdraw`, `Edit` — each mapping to a list of **principals**.
-A principal is either:
+A principal is one of:
 
-- `player::${address}` — satisfied when `ctx.sender()` equals the address, or
+- `player::${address}` — satisfied when `ctx.sender()` equals the address,
+- `machine::${address}` — the same check as `player`, for a service or bot key
+  that is not an on-chain Player, or
 - `ou::${ou_id}` — satisfied when the caller passes the matching `&OU` and is one
   of its board members.
 
@@ -64,14 +66,14 @@ permanently brick the ACL.
 
 ## Dependencies & environments
 
-- `armature` (framework) pinned to `ff22e5f` (Cycle 7, armature `main`) — OU identity
+- `armature` (framework) pinned to `ae60685` (Cycle 7, armature `main`) — OU identity
   (`armature::ou::OU`) / `is_governance_member`.
-- `world` pinned to `32300a2` — same rev warehouse-receipts uses, so `StorageUnit`
+- `world` pinned to `d33ff23` — same rev warehouse-receipts uses, so `StorageUnit`
   / `Character` types match.
-- `multicoin` pinned to `e384bbc` (`override = true`) — same rev as warehouse-receipts,
+- `multicoin` pinned to `2772c26` (`override = true`) — same rev as warehouse-receipts,
   so `multicoin::Balance` receipts are the same on-chain type across the deposit
   boundary. armature itself no longer depends on multicoin.
-- `warehouse_receipts` pinned to `e872aac`.
+- `warehouse_receipts` pinned to `212be7c` (warehouse-receipts `main`).
 
 **Target env:** `testnet_stillness`.
 
@@ -80,7 +82,13 @@ sui move build --build-env testnet_stillness
 sui move test  --build-env testnet_stillness
 ```
 
-**Known issue:** `sui move test` also compiles warehouse_receipts' own tests, and at
-`e872aac` those don't compile (`receipt::batch_redeem_receipt` gained a
-`to_ssu_owner` parameter the tests don't pass). Vault tests pass once that upstream
-test file is fixed.
+### Test coverage
+
+```
+python3 scripts/move_coverage.py [--uncovered] [--min 80]
+```
+
+Prints line, function, branch and bytecode coverage for each source file and writes
+LCOV, CSV and JSON reports to `coverage/`. It needs a Sui CLI built with the `tracing`
+feature: the release binaries that `suiup` installs have it, a `cargo install` build
+does not. Set `SUI=/path/to/sui` to choose which binary it uses.
