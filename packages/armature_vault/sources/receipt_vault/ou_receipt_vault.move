@@ -8,9 +8,11 @@
 ///
 /// Access control:
 ///   - Each operation is gated by a *role*: `Deposit`, `Withdraw`, or `Edit`.
-///   - Each role maps to a list of *principals*. A principal is either:
-///       * `Player { addr }` — satisfied when `ctx.sender() == addr`, or
-///       * `Ou { ou_id }`   — satisfied when the caller passes the matching `&OU`
+///   - Each role maps to a list of *principals*. A principal is one of:
+///       * `Player { addr }`  — satisfied when `ctx.sender() == addr`,
+///       * `Machine { addr }` — same check as `Player`, for a service or bot key
+///         that is not an on-chain Player, or
+///       * `Ou { ou_id }`     — satisfied when the caller passes the matching `&OU`
 ///         (`org.id() == ou_id`) and is one of its board members.
 ///     A caller passes a role check if they satisfy *any* principal listed for it.
 ///   - `Edit` is ACL administration: holders may batch grant/revoke principals on

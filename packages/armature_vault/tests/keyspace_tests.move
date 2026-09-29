@@ -78,6 +78,57 @@ module armature_vault::keyspace_tests {
         sc.end();
     }
 
+    // A Machine principal is satisfied by its address, like Player, but is a
+    // distinct principal: revoking Player(addr) leaves Machine(addr) in place.
+    #[test]
+    fun test_machine_principal() {
+        let mut sc = ts::begin(ADMIN);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
+        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_write(),
+            acl::machine(USER1),
+            &org,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_write(), &org, USER1), 0);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_write(), &org, USER2), 1);
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_write(),
+            acl::player(USER1),
+            &org,
+            sc.ctx(),
+        );
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_write(),
+            acl::player(USER1),
+            &org,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_write(), &org, USER1), 2);
+
+        keyspace::revoke(
+            &mut allowlist,
+            keyspace::role_write(),
+            acl::machine(USER1),
+            &org,
+            sc.ctx(),
+        );
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_write(), &org, USER1), 3);
+
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(org);
+        sc.end();
+    }
+
     // Granting the same principal to the same role twice must abort (EAlreadyGranted).
     #[test]
     #[expected_failure]

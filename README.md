@@ -23,9 +23,11 @@ then deposit those receipts here. The vault:
 ## Access model
 
 Three roles — `Deposit`, `Withdraw`, `Edit` — each mapping to a list of **principals**.
-A principal is either:
+A principal is one of:
 
-- `player::${address}` — satisfied when `ctx.sender()` equals the address, or
+- `player::${address}` — satisfied when `ctx.sender()` equals the address,
+- `machine::${address}` — the same check as `player`, for a service or bot key
+  that is not an on-chain Player, or
 - `ou::${ou_id}` — satisfied when the caller passes the matching `&OU` and is one
   of its board members.
 

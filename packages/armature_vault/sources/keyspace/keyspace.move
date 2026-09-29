@@ -18,8 +18,9 @@
 ///   - `Write` — can call `publish_entry`, `update_entry`, `edit_entry`.
 ///
 /// Access control uses the shared `Principal` model from `armature_vault::acl`:
-/// each list member is either a bare `Player { addr }` (single wallet) or an
-/// `Ou { ou_id }` (any board member of that OU), checked via `acl::satisfies`.
+/// each list member is a bare `Player { addr }` (single wallet), a
+/// `Machine { addr }` (single service/bot key), or an `Ou { ou_id }` (any board
+/// member of that OU), checked via `acl::satisfies`.
 ///
 /// OU-linked keyspaces (`create_keyspace_for_ou`) emit `registrant_ou_id` in
 /// `KeyspaceCreated` so an indexer can answer "all keyspaces for OU X" without
@@ -160,7 +161,7 @@ module armature_vault::keyspace {
     //   Fields:
     //     keyspace_id — parent Keyspace
     //     role        — Grant | Read | Write
-    //     principal   — Player { addr } or Ou { ou_id }
+    //     principal   — Player { addr }, Machine { addr } or Ou { ou_id }
     //     by          — address of the caller who performed the grant
     //   Primary index queries:
     //     • Current role-R members of keyspace K:
