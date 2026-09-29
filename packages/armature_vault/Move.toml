@@ -4,19 +4,19 @@ edition = "2024"
 version = "0.0.1"
 published-at = "0x3af6edb64f575cb65a89f1c8f445a2e2aad05324a1586aad9e2651191bf4f99b"
 
-# armature_vault — a DAO/OU-gated vault for warehouse receipts (and, later,
+# armature_vault — an OU-gated vault for warehouse receipts (and, later,
 # other shared resources). Players mint multicoin::Balance receipts via the
 # warehouse_receipts package and deposit them here; access is gated by a
-# dynamic, multi-principal ACL keyed on armature DAO identity rather than a raw
+# dynamic, multi-principal ACL keyed on armature OU identity rather than a raw
 # in-game tribe_id. Standalone, optional package: it lives outside the
 # transitional armature_world_bridge because the vault outlives the bridge.
 #
 # Target environment: testnet_stillness — all deps resolve multicoin to e384bbc
 # (0x99a4c039...) and world to rev 32300a2 (0x8b8a46ed...).
 [dependencies]
-armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "a8c51d365d1db5967ea4cb90761f04eb93c700ca", override = true }
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "ff22e5f316f5c3f3a5bffb9957a5067c6f1cdf0c", override = true }
 world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "32300a2ab6dc95c25ff42e30b89990492ad4dcaa", override = true }
-# override = true: unify all deps on the same multicoin build (e384bbc,
+# override = true: unify warehouse_receipts on the same multicoin build (e384bbc,
 # 0x99a4c039...) so `multicoin::Balance` receipts are the same on-chain type
 # across the deposit boundary.
 multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "e384bbc8670b850cfb82a5e3b9fa46798b0ff6dc", override = true }

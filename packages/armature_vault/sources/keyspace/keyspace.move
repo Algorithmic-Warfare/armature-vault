@@ -1,7 +1,7 @@
 /// ACL-based encryption access control — ported from loash-industries/keyspace.
 ///
 /// Flow:
-///   1. Creator calls `create_keyspace` (personal) or `create_keyspace_for_dao`
+///   1. Creator calls `create_keyspace` (personal) or `create_keyspace_for_ou`
 ///      (org-linked) → shared Keyspace.  Creator is seeded into all three roles
 ///      for personal keyspaces; org keyspaces accept explicit role principal lists.
 ///   2. A `Grant` holder calls `grant` / `revoke` to manage role membership.
@@ -19,14 +19,14 @@
 ///
 /// Access control uses the shared `Principal` model from `armature_vault::acl`:
 /// each list member is either a bare `Player { addr }` (single wallet) or an
-/// `Ou { dao_id }` (any board member of that DAO), checked via `acl::satisfies`.
+/// `Ou { ou_id }` (any board member of that OU), checked via `acl::satisfies`.
 ///
-/// DAO-linked keyspaces (`create_keyspace_for_dao`) emit `registrant_dao_id` in
-/// `KeyspaceCreated` so an indexer can answer "all keyspaces for DAO X" without
-/// scanning every Grant-role membership list.  The `&DAO` witness + governance-
+/// OU-linked keyspaces (`create_keyspace_for_ou`) emit `registrant_ou_id` in
+/// `KeyspaceCreated` so an indexer can answer "all keyspaces for OU X" without
+/// scanning every Grant-role membership list.  The `&OU` witness + governance-
 /// member check makes that association unspoofable.
 module armature_vault::keyspace {
-    use armature::dao::DAO;
+    use armature::ou::OU;
     use armature_vault::acl::{Self as acl, Principal};
     use std::{option::{Self, Option}, string::String};
     use sui::{event, vec_map::{Self, VecMap}};
@@ -86,11 +86,11 @@ module armature_vault::keyspace {
         id: ID,
         creator: Principal,
         name: String,
-        /// None for personal keyspaces; Some(dao_id) for org-linked keyspaces
-        /// created via `create_keyspace_for_dao`.  The DAO ID is derived from
-        /// the on-chain `&DAO` witness — not supplied by the caller — so it
+        /// None for personal keyspaces; Some(ou_id) for org-linked keyspaces
+        /// created via `create_keyspace_for_ou`.  The OU ID is derived from
+        /// the on-chain `&OU` witness — not supplied by the caller — so it
         /// cannot be spoofed.
-        registrant_dao_id: Option<ID>,
+        registrant_ou_id: Option<ID>,
     }
     public struct AccessGranted has copy, drop {
         keyspace_id: ID,
@@ -139,36 +139,36 @@ module armature_vault::keyspace {
     // ── Events ───────────────────────────────────────────────────────────────
     //
     // KeyspaceCreated
-    //   Emitted by: create_keyspace, create_keyspace_for_dao
+    //   Emitted by: create_keyspace, create_keyspace_for_ou
     //   Fields:
     //     id                — Keyspace object ID (primary key)
     //     creator           — Principal who created it (Player or Ou)
     //     name              — human-readable label
-    //     registrant_dao_id — Option<ID>:
+    //     registrant_ou_id — Option<ID>:
     //                           None → personal keyspace (create_keyspace)
-    //                           Some → DAO-linked (create_keyspace_for_dao);
-    //                                  derived from on-chain &DAO witness,
+    //                           Some → OU-linked (create_keyspace_for_ou);
+    //                                  derived from on-chain &OU witness,
     //                                  cannot be spoofed by the caller
     //   Primary index queries:
-    //     • All keyspaces for DAO X:  WHERE registrant_dao_id = Some(X)
+    //     • All keyspaces for OU X:  WHERE registrant_ou_id = Some(X)
     //     • Keyspace by ID:           WHERE id = Y
     //
     // AccessGranted
     //   Emitted by: create_keyspace (×3 for Grant/Read/Write),
-    //               create_keyspace_for_dao (once per seeded principal × role),
+    //               create_keyspace_for_ou (once per seeded principal × role),
     //               grant, multi_grant
     //   Fields:
     //     keyspace_id — parent Keyspace
     //     role        — Grant | Read | Write
-    //     principal   — Player { addr } or Ou { dao_id }
+    //     principal   — Player { addr } or Ou { ou_id }
     //     by          — address of the caller who performed the grant
     //   Primary index queries:
     //     • Current role-R members of keyspace K:
     //         AccessGranted(keyspace_id=K, role=R) − AccessRevoked(keyspace_id=K, role=R)
     //     • All keyspaces where address A holds Read:
     //         WHERE role=Read AND principal=Player{addr=A}
-    //     • All keyspaces where DAO D holds any role:
-    //         WHERE principal=Ou{dao_id=D}
+    //     • All keyspaces where OU D holds any role:
+    //         WHERE principal=Ou{ou_id=D}
     //   Note: only emitted on real state changes — add_principal is a no-op
     //   (returns false) for duplicates, so no spurious events are produced.
     //
@@ -229,7 +229,7 @@ module armature_vault::keyspace {
     // ── State reconstruction ─────────────────────────────────────────────────
     //
     // Keyspace row
-    //   KeyspaceCreated → INSERT (id, name, registrant_dao_id, version=0)
+    //   KeyspaceCreated → INSERT (id, name, registrant_ou_id, version=0)
     //
     // ACL (per keyspace, per role)
     //   AccessGranted  → UPSERT principal into role membership set
@@ -250,8 +250,8 @@ module armature_vault::keyspace {
     //
     // ── Suggested indexer endpoints ──────────────────────────────────────────
     //
-    //   GET /v1/dao/:dao_id/keyspaces
-    //     → KeyspaceCreated WHERE registrant_dao_id = dao_id
+    //   GET /v1/org/:ou_id/keyspaces
+    //     → KeyspaceCreated WHERE registrant_ou_id = ou_id
     //
     //   GET /v1/keyspace/:keyspace_id/acl
     //     → current principals per role
@@ -282,7 +282,7 @@ module armature_vault::keyspace {
             id: keyspace_id,
             creator,
             name: name.to_string(),
-            registrant_dao_id: option::none(),
+            registrant_ou_id: option::none(),
         });
         let sender = ctx.sender();
         event::emit(AccessGranted {
@@ -313,36 +313,36 @@ module armature_vault::keyspace {
         });
     }
 
-    /// Create a new Keyspace on behalf of a DAO (shared).
+    /// Create a new Keyspace on behalf of an OU (shared).
     ///
-    /// The caller must be a governance member of `dao`; the DAO's on-chain ID
-    /// is recorded in `KeyspaceCreated.registrant_dao_id` so an indexer can
-    /// answer "all keyspaces for DAO X" without replaying full Grant-role lists.
-    /// Because `registrant_dao_id` is derived from the `&DAO` witness (not from
+    /// The caller must be a governance member of `org`; the OU's on-chain ID
+    /// is recorded in `KeyspaceCreated.registrant_ou_id` so an indexer can
+    /// answer "all keyspaces for OU X" without replaying full Grant-role lists.
+    /// Because `registrant_ou_id` is derived from the `&OU` witness (not from
     /// caller input), it cannot be spoofed.
     ///
     /// `grant_principals` must be non-empty — it becomes the Grant role, which
     /// is the only admin path into the keyspace.  `read_principals` and
     /// `write_principals` may be empty and populated later via `grant`.
     ///
-    /// This mirrors the `initialize_dao_vault` pattern in `dao_receipt_vault`:
+    /// This mirrors the `initialize_ou_vault` pattern in `ou_receipt_vault`:
     /// callers can express "officers hold Grant, members hold Read/Write" in a
     /// single call by passing different principal lists per role.
-    public fun create_keyspace_for_dao(
+    public fun create_keyspace_for_ou(
         name: vector<u8>,
-        dao: &DAO,
+        org: &OU,
         grant_principals: vector<Principal>,
         read_principals: vector<Principal>,
         write_principals: vector<Principal>,
         ctx: &mut TxContext,
     ) {
-        assert!(dao.is_governance_member(ctx.sender()), ENotAllowed);
+        assert!(org.is_governance_member(ctx.sender()), ENotAllowed);
         assert!(!grant_principals.is_empty(), EEmptyGrantPrincipals);
 
         let uid = object::new(ctx);
         let keyspace_id = uid.to_inner();
-        let registrant_dao_id = dao.id();
-        let creator = acl::ou(registrant_dao_id);
+        let registrant_ou_id = org.id();
+        let creator = acl::ou(registrant_ou_id);
         let sender = ctx.sender();
 
         let mut acl_map = vec_map::empty<Role, vector<Principal>>();
@@ -358,7 +358,7 @@ module armature_vault::keyspace {
             id: keyspace_id,
             creator,
             name: name.to_string(),
-            registrant_dao_id: option::some(registrant_dao_id),
+            registrant_ou_id: option::some(registrant_ou_id),
         });
 
         // Emit AccessGranted for every seeded principal so event-sourced ACL
@@ -395,10 +395,10 @@ module armature_vault::keyspace {
         keyspace: &mut Keyspace,
         role: Role,
         principal: Principal,
-        dao: &DAO,
+        org: &OU,
         ctx: &TxContext,
     ) {
-        assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Grant, org, ctx.sender()), ENotAllowed);
         let changed = add_principal(keyspace, role, principal);
         assert!(changed, EAlreadyGranted);
         if (role == Role::Read) { keyspace.version = keyspace.version + 1 };
@@ -416,10 +416,10 @@ module armature_vault::keyspace {
         keyspace: &mut Keyspace,
         roles: vector<Role>,
         principal: Principal,
-        dao: &DAO,
+        org: &OU,
         ctx: &TxContext,
     ) {
-        assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Grant, org, ctx.sender()), ENotAllowed);
         let n = roles.length();
         let mut i = 0;
         while (i < n) {
@@ -444,10 +444,10 @@ module armature_vault::keyspace {
         keyspace: &mut Keyspace,
         role: Role,
         principal: Principal,
-        dao: &DAO,
+        org: &OU,
         ctx: &TxContext,
     ) {
-        assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Grant, org, ctx.sender()), ENotAllowed);
         let changed = remove_principal(keyspace, role, principal);
         assert!(changed, ENotGranted);
         if (role == Role::Grant) {
@@ -478,10 +478,10 @@ module armature_vault::keyspace {
         keyspace: &mut Keyspace,
         roles: vector<Role>,
         principal: Principal,
-        dao: &DAO,
+        org: &OU,
         ctx: &TxContext,
     ) {
-        assert!(satisfies_role(keyspace, Role::Grant, dao, ctx.sender()), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Grant, org, ctx.sender()), ENotAllowed);
         let n = roles.length();
         let mut i = 0;
         while (i < n) {
@@ -513,14 +513,14 @@ module armature_vault::keyspace {
 
     /// Called by the Seal key-server inside a PTB to gate decryption-key release.
     /// Requires the `Read` role.
-    entry fun seal_approve(id: vector<u8>, keyspace: &Keyspace, dao: &DAO, ctx: &TxContext) {
+    entry fun seal_approve(id: vector<u8>, keyspace: &Keyspace, org: &OU, ctx: &TxContext) {
         let keyspace_bytes = object::uid_to_bytes(&keyspace.id);
         let mut i = 0;
         while (i < 32) {
             assert!(keyspace_bytes[i] == id[i], ENotAllowed);
             i = i + 1;
         };
-        assert!(satisfies_role(keyspace, Role::Read, dao, ctx.sender()), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Read, org, ctx.sender()), ENotAllowed);
     }
 
     /// Publish a new encrypted entry.  Requires the `Write` role.
@@ -528,11 +528,11 @@ module armature_vault::keyspace {
         keyspace: &mut Keyspace,
         uri: vector<u8>,
         description: vector<u8>,
-        dao: &DAO,
+        org: &OU,
         ctx: &mut TxContext,
     ) {
         let creator = ctx.sender();
-        assert!(satisfies_role(keyspace, Role::Write, dao, creator), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Write, org, creator), ENotAllowed);
         let uid = object::new(ctx);
         let entry_id = uid.to_inner();
         let uri_str = uri.to_string();
@@ -559,10 +559,10 @@ module armature_vault::keyspace {
         keyspace: &Keyspace,
         entry: &mut EncryptedEntry,
         new_uri: vector<u8>,
-        dao: &DAO,
+        org: &OU,
         ctx: &TxContext,
     ) {
-        assert!(satisfies_role(keyspace, Role::Write, dao, ctx.sender()), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Write, org, ctx.sender()), ENotAllowed);
         assert!(entry.keyspace_id == keyspace.id.to_inner(), EWrongKeyspace);
         assert!(entry.epoch != keyspace.version, EAlreadyCurrentEpoch);
         entry.uri = new_uri.to_string();
@@ -581,10 +581,10 @@ module armature_vault::keyspace {
         keyspace: &Keyspace,
         entry: &mut EncryptedEntry,
         new_uri: vector<u8>,
-        dao: &DAO,
+        org: &OU,
         ctx: &TxContext,
     ) {
-        assert!(satisfies_role(keyspace, Role::Write, dao, ctx.sender()), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Write, org, ctx.sender()), ENotAllowed);
         assert!(entry.keyspace_id == keyspace.id.to_inner(), EWrongKeyspace);
         entry.uri = new_uri.to_string();
         event::emit(EntryEdited {
@@ -600,10 +600,10 @@ module armature_vault::keyspace {
         keyspace: &Keyspace,
         entry: &mut EncryptedEntry,
         new_description: vector<u8>,
-        dao: &DAO,
+        org: &OU,
         ctx: &TxContext,
     ) {
-        assert!(satisfies_role(keyspace, Role::Write, dao, ctx.sender()), ENotAllowed);
+        assert!(satisfies_role(keyspace, Role::Write, org, ctx.sender()), ENotAllowed);
         assert!(entry.keyspace_id == keyspace.id.to_inner(), EWrongKeyspace);
         entry.description = new_description.to_string();
         event::emit(EntryDescriptionEdited {
@@ -616,13 +616,13 @@ module armature_vault::keyspace {
 
     // ── Internal ─────────────────────────────────────────────────────────────
 
-    fun satisfies_role(keyspace: &Keyspace, role: Role, dao: &DAO, sender: address): bool {
+    fun satisfies_role(keyspace: &Keyspace, role: Role, org: &OU, sender: address): bool {
         if (!keyspace.acl.contains(&role)) { return false };
         let principals = keyspace.acl.get(&role);
         let n = principals.length();
         let mut i = 0;
         while (i < n) {
-            if (acl::satisfies(&principals[i], dao, sender)) { return true };
+            if (acl::satisfies(&principals[i], org, sender)) { return true };
             i = i + 1;
         };
         false
@@ -660,8 +660,8 @@ module armature_vault::keyspace {
     }
 
     /// True if `sender` satisfies `role` on this keyspace.
-    public fun has_role(keyspace: &Keyspace, role: Role, dao: &DAO, sender: address): bool {
-        satisfies_role(keyspace, role, dao, sender)
+    public fun has_role(keyspace: &Keyspace, role: Role, org: &OU, sender: address): bool {
+        satisfies_role(keyspace, role, org, sender)
     }
 
     public fun entry_uri(entry: &EncryptedEntry): &String { &entry.uri }
@@ -690,10 +690,10 @@ module armature_vault::keyspace {
         }
     }
 
-    /// Create a DAO-linked Keyspace for testing, bypassing the `&DAO` witness.
-    /// `dao_id` is the sentinel DAO ID to embed in the ACL maps.
+    /// Create an OU-linked Keyspace for testing, bypassing the `&OU` witness.
+    /// `ou_id` is the sentinel OU ID to embed in the ACL maps.
     #[test_only]
-    public fun test_create_for_dao(
+    public fun test_create_for_ou(
         name: vector<u8>,
         grant_principals: vector<Principal>,
         read_principals: vector<Principal>,

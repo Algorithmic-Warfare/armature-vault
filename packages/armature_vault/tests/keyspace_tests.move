@@ -1,6 +1,6 @@
 #[test_only]
 module armature_vault::keyspace_tests {
-    use armature::{dao::{Self, DAO}, governance};
+    use armature::{ou::{Self, OU}, governance, proposal, remove_member::RemoveMember};
     use armature_vault::{acl as acl, keyspace};
     use std::string;
     use sui::test_scenario as ts;
@@ -11,13 +11,12 @@ module armature_vault::keyspace_tests {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    fun make_dao(sc: &mut ts::Scenario, creator: address, members: vector<address>): ID {
+    fun make_ou(sc: &mut ts::Scenario, creator: address, members: vector<address>): ID {
         ts::next_tx(sc, creator);
         let init = governance::init_board(members);
-        dao::create(
+        ou::create(
             &init,
-            string::utf8(b"DAO"),
-            string::utf8(b"dao"),
+            string::utf8(b"OU"),
             string::utf8(b"https://example.com/i.png"),
             sc.ctx(),
         )
@@ -29,19 +28,19 @@ module armature_vault::keyspace_tests {
     #[test]
     fun test_create_seeds_all_roles() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let allowlist = keyspace::test_create(b"My Vault", sc.ctx());
 
-        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 0);
-        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, ADMIN), 1);
-        assert!(keyspace::has_role(&allowlist, keyspace::role_write(), &dao, ADMIN), 2);
-        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 3);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &org, ADMIN), 0);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &org, ADMIN), 1);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_write(), &org, ADMIN), 2);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER1), 3);
 
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -49,33 +48,33 @@ module armature_vault::keyspace_tests {
     #[test]
     fun test_grant_and_revoke_read() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
         keyspace::grant(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
-        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
-        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER2), 1);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER1), 0);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER2), 1);
 
         keyspace::revoke(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
-        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 2);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER1), 2);
 
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -84,29 +83,29 @@ module armature_vault::keyspace_tests {
     #[expected_failure]
     fun test_duplicate_grant_aborts() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
         keyspace::grant(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
         keyspace::grant(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         ); // abort
 
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -115,22 +114,22 @@ module armature_vault::keyspace_tests {
     #[expected_failure]
     fun test_revoke_absent_aborts() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
         keyspace::revoke(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         ); // abort
 
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -139,27 +138,27 @@ module armature_vault::keyspace_tests {
     #[expected_failure]
     fun test_unauthorized_grant_aborts() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
 
         // USER2 has no Grant role — should abort
         let mut sc = ts::begin(USER2);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         keyspace::grant(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER2),
-            &dao,
+            &org,
             sc.ctx(),
         ); // abort
 
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -168,10 +167,10 @@ module armature_vault::keyspace_tests {
     #[expected_failure]
     fun test_revoke_last_grantor_aborts() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
         // ADMIN is the only Grant principal — revoking them must abort
@@ -179,12 +178,12 @@ module armature_vault::keyspace_tests {
             &mut allowlist,
             keyspace::role_grant(),
             acl::player(ADMIN),
-            &dao,
+            &org,
             sc.ctx(),
         ); // abort
 
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -192,42 +191,42 @@ module armature_vault::keyspace_tests {
     #[test]
     fun test_multi_member_lifecycle() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Team Vault", sc.ctx());
 
         keyspace::grant(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
         keyspace::grant(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER2),
-            &dao,
+            &org,
             sc.ctx(),
         );
-        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 0);
-        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER2), 1);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER1), 0);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER2), 1);
 
         keyspace::revoke(
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
-        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER1), 2);
-        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &dao, USER2), 3);
-        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &dao, ADMIN), 4);
+        assert!(!keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER1), 2);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER2), 3);
+        assert!(keyspace::has_role(&allowlist, keyspace::role_grant(), &org, ADMIN), 4);
 
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -235,10 +234,10 @@ module armature_vault::keyspace_tests {
     #[test]
     fun test_version_bumps_only_on_read_changes() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
         // Grant/Write changes do not bump version
@@ -246,14 +245,14 @@ module armature_vault::keyspace_tests {
             &mut allowlist,
             keyspace::role_write(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
         keyspace::grant(
             &mut allowlist,
             keyspace::role_grant(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
         assert!(keyspace::version(&allowlist) == 0, 0);
@@ -263,7 +262,7 @@ module armature_vault::keyspace_tests {
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
         assert!(keyspace::version(&allowlist) == 1, 1);
@@ -273,13 +272,13 @@ module armature_vault::keyspace_tests {
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
         assert!(keyspace::version(&allowlist) == 2, 2);
 
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -308,10 +307,10 @@ module armature_vault::keyspace_tests {
     #[test]
     fun test_writer_can_edit_entry() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
         let mut entry = keyspace::test_publish_entry(
             &mut allowlist,
@@ -323,20 +322,20 @@ module armature_vault::keyspace_tests {
             &mut allowlist,
             keyspace::role_write(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
 
         let mut sc = ts::begin(USER1);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        keyspace::edit_entry(&allowlist, &mut entry, b"QmUpdatedByWriter", &dao, sc.ctx());
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
+        keyspace::edit_entry(&allowlist, &mut entry, b"QmUpdatedByWriter", &org, sc.ctx());
         assert!(*keyspace::entry_uri(&entry) == b"QmUpdatedByWriter".to_string(), 0);
 
         keyspace::test_destroy_entry(entry);
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -345,10 +344,10 @@ module armature_vault::keyspace_tests {
     #[expected_failure]
     fun test_non_writer_cannot_edit_entry() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
         let mut entry = keyspace::test_publish_entry(
             &mut allowlist,
@@ -356,17 +355,17 @@ module armature_vault::keyspace_tests {
             b"desc",
             sc.ctx(),
         );
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
 
         // USER2 has no Write role — should abort
         let mut sc = ts::begin(USER2);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
-        keyspace::edit_entry(&allowlist, &mut entry, b"QmHacked", &dao, sc.ctx()); // abort
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
+        keyspace::edit_entry(&allowlist, &mut entry, b"QmHacked", &org, sc.ctx()); // abort
 
         keyspace::test_destroy_entry(entry);
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -374,10 +373,10 @@ module armature_vault::keyspace_tests {
     #[test]
     fun test_update_entry_after_read_grant() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
         let mut entry = keyspace::test_publish_entry(
             &mut allowlist,
@@ -392,19 +391,19 @@ module armature_vault::keyspace_tests {
             &mut allowlist,
             keyspace::role_read(),
             acl::player(USER1),
-            &dao,
+            &org,
             sc.ctx(),
         );
         assert!(keyspace::version(&allowlist) == 1, 1);
 
         // ADMIN has Write — update_entry now succeeds (epoch 0 ≠ version 1)
-        keyspace::update_entry(&allowlist, &mut entry, b"QmRotated", &dao, sc.ctx());
+        keyspace::update_entry(&allowlist, &mut entry, b"QmRotated", &org, sc.ctx());
         assert!(*keyspace::entry_uri(&entry) == b"QmRotated".to_string(), 2);
         assert!(keyspace::entry_epoch(&entry) == 1, 3);
 
         keyspace::test_destroy_entry(entry);
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
         sc.end();
     }
 
@@ -413,10 +412,10 @@ module armature_vault::keyspace_tests {
     #[expected_failure]
     fun test_update_entry_same_epoch_aborts() {
         let mut sc = ts::begin(ADMIN);
-        let dao_id = make_dao(&mut sc, ADMIN, vector[ADMIN]);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let dao = ts::take_shared_by_id<DAO>(&sc, dao_id);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
         let mut entry = keyspace::test_publish_entry(
             &mut allowlist,
@@ -426,11 +425,44 @@ module armature_vault::keyspace_tests {
         );
 
         // epoch == version == 0 → abort
-        keyspace::update_entry(&allowlist, &mut entry, b"QmNew", &dao, sc.ctx());
+        keyspace::update_entry(&allowlist, &mut entry, b"QmNew", &org, sc.ctx());
 
         keyspace::test_destroy_entry(entry);
         keyspace::test_destroy(allowlist);
-        ts::return_shared(dao);
+        ts::return_shared(org);
+        sc.end();
+    }
+
+    // A member removed from an OU's board loses the roles held via that OU's
+    // principal; remaining members keep them.
+    #[test]
+    fun test_removed_board_member_loses_ou_role() {
+        let mut sc = ts::begin(ADMIN);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN, USER1]);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let mut org = ts::take_shared_by_id<OU>(&sc, ou_id);
+        let keyspace = keyspace::test_create_for_ou(
+            b"Org",
+            vector[acl::player(ADMIN)],
+            vector[acl::ou(ou_id)],
+            vector[],
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&keyspace, keyspace::role_read(), &org, USER1), 0);
+
+        let req = proposal::new_execution_request_for_testing<RemoveMember>(
+            ou_id,
+            object::id_from_address(@0x9999),
+        );
+        org.remove_board_member_governance(USER1, &req);
+        proposal::consume_execution_request_for_testing(req);
+
+        assert!(!keyspace::has_role(&keyspace, keyspace::role_read(), &org, USER1), 1);
+        assert!(keyspace::has_role(&keyspace, keyspace::role_read(), &org, ADMIN), 2);
+
+        keyspace::test_destroy(keyspace);
+        ts::return_shared(org);
         sc.end();
     }
 }

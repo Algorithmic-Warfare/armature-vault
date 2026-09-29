@@ -1,20 +1,20 @@
-/// Tests for `dao_receipt_vault` — the dynamic multi-principal DAO/OU-gated
+/// Tests for `ou_receipt_vault` — the dynamic multi-principal OU-gated
 /// receipt vault.
 ///
 /// Scenarios mirror the motivating example: a shared storage where AWAR members
 /// and WOLF members (two OUs) plus Protodroid (a bare player) can deposit and
 /// withdraw, while AWAR officers (a higher OU) hold the Edit role and can remove
-/// a principal who goes rogue. Plus the DAO-migration path and the last-editor
+/// a principal who goes rogue. Plus the OU-migration path and the last-editor
 /// brick guard.
 ///
 /// Vaults are built via `new_for_testing` to skip the heavy world StorageUnit
 /// anchor — the ACL paths under test never reference the StorageUnit.
 #[test_only]
-module armature_vault::dao_receipt_vault_tests {
-    use armature::{dao::{Self, DAO}, governance};
+module armature_vault::ou_receipt_vault_tests {
+    use armature::{ou::{Self, OU}, governance, proposal, remove_member::RemoveMember};
     use armature_vault::{
         acl::{Self as acl, Principal},
-        dao_receipt_vault::{Self as vault, DaoReceiptVault, Role}
+        ou_receipt_vault::{Self as vault, OuReceiptVault, Role}
     };
     use multicoin::multicoin::{Self, Collection, CollectionCap, Balance};
     use std::string;
@@ -22,6 +22,7 @@ module armature_vault::dao_receipt_vault_tests {
 
     // AWAR members
     const AWAR_M1: address = @0xA1;
+    const AWAR_M2: address = @0xA2;
     // WOLF members
     const WOLF_M1: address = @0xB1;
     // Protodroid — bare player principal
@@ -35,15 +36,28 @@ module armature_vault::dao_receipt_vault_tests {
 
     // === Helpers ===
 
-    fun make_dao(scenario: &mut ts::Scenario, creator: address, members: vector<address>): ID {
+    fun make_ou(scenario: &mut ts::Scenario, creator: address, members: vector<address>): ID {
         ts::next_tx(scenario, creator);
         let init = governance::init_board(members);
-        dao::create(
+        ou::create(
             &init,
             string::utf8(b"OU"),
             string::utf8(b"https://example.com/i.png"),
             scenario.ctx(),
         )
+    }
+
+    /// Remove `member` from the OU's board as an executed RemoveMember would.
+    fun remove_board_member(scenario: &mut ts::Scenario, ou_id: ID, member: address) {
+        ts::next_tx(scenario, member);
+        let mut org = ts::take_shared_by_id<OU>(scenario, ou_id);
+        let req = proposal::new_execution_request_for_testing<RemoveMember>(
+            ou_id,
+            object::id_from_address(@0x9999),
+        );
+        org.remove_board_member_governance(member, &req);
+        proposal::consume_execution_request_for_testing(req);
+        ts::return_shared(org);
     }
 
     fun make_collection(scenario: &mut ts::Scenario, owner: address): ID {
@@ -94,9 +108,9 @@ module armature_vault::dao_receipt_vault_tests {
     fun multi_principal_deposit_withdraw() {
         let mut scenario = ts::begin(AWAR_M1);
 
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -112,10 +126,10 @@ module armature_vault::dao_receipt_vault_tests {
         let r1 = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 100);
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-            vault::deposit_receipt(&mut v, &awar_dao, r1, scenario.ctx());
-            ts::return_shared(awar_dao);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &awar_ou, r1, scenario.ctx());
+            ts::return_shared(awar_ou);
             ts::return_shared(v);
         };
 
@@ -124,24 +138,24 @@ module armature_vault::dao_receipt_vault_tests {
         let r2 = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 50);
         ts::next_tx(&mut scenario, WOLF_M1);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let wolf_dao = ts::take_shared_by_id<DAO>(&scenario, wolf);
-            vault::deposit_receipt(&mut v, &wolf_dao, r2, scenario.ctx());
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let wolf_ou = ts::take_shared_by_id<OU>(&scenario, wolf);
+            vault::deposit_receipt(&mut v, &wolf_ou, r2, scenario.ctx());
             assert!(vault::vault_balance(&v, ASSET) == 150, 0);
-            ts::return_shared(wolf_dao);
+            ts::return_shared(wolf_ou);
             ts::return_shared(v);
         };
 
-        // Protodroid (bare player) withdraws 60 — passes any DAO ref (uses AWAR's).
+        // Protodroid (bare player) withdraws 60 — passes any OU ref (uses AWAR's).
         ts::next_tx(&mut scenario, PROTO);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let any_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-            let out = vault::withdraw_receipt(&mut v, &any_dao, ASSET, 60, scenario.ctx());
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let any_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            let out = vault::withdraw_receipt(&mut v, &any_ou, ASSET, 60, scenario.ctx());
             assert!(out.value() == 60, 1);
             assert!(vault::vault_balance(&v, ASSET) == 90, 2);
             transfer::public_transfer(out, PROTO);
-            ts::return_shared(any_dao);
+            ts::return_shared(any_ou);
             ts::return_shared(v);
         };
 
@@ -153,9 +167,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::ENotAuthorized)]
     fun deposit_rejected_for_outsider() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -168,11 +182,11 @@ module armature_vault::dao_receipt_vault_tests {
         vault::share_for_testing(v);
 
         let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 10);
-        // OUTSIDER tries to deposit, passing AWAR's DAO (they aren't a member).
+        // OUTSIDER tries to deposit, passing AWAR's OU (they aren't a member).
         ts::next_tx(&mut scenario, OUTSIDER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-        vault::deposit_receipt(&mut v, &awar_dao, r, scenario.ctx());
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        vault::deposit_receipt(&mut v, &awar_ou, r, scenario.ctx());
 
         abort
     }
@@ -182,9 +196,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::ENotAuthorized)]
     fun officers_revoke_rogue_player() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -200,34 +214,34 @@ module armature_vault::dao_receipt_vault_tests {
         let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 100);
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-            vault::deposit_receipt(&mut v, &awar_dao, r, scenario.ctx());
-            ts::return_shared(awar_dao);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &awar_ou, r, scenario.ctx());
+            ts::return_shared(awar_ou);
             ts::return_shared(v);
         };
 
         // Officer revokes Protodroid from both deposit and withdraw (batch).
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
             vault::revoke(
                 &mut v,
-                &officers_dao,
+                &officers_ou,
                 vector[vault::role_deposit(), vault::role_withdraw()],
                 vector[acl::player(PROTO), acl::player(PROTO)],
                 scenario.ctx(),
             );
-            ts::return_shared(officers_dao);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
         };
 
         // Protodroid now tries to withdraw — must abort ENotAuthorized.
         ts::next_tx(&mut scenario, PROTO);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-        let out = vault::withdraw_receipt(&mut v, &awar_dao, ASSET, 10, scenario.ctx());
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        let out = vault::withdraw_receipt(&mut v, &awar_ou, ASSET, 10, scenario.ctx());
         transfer::public_transfer(out, PROTO);
 
         abort
@@ -238,9 +252,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::ENotAuthorized)]
     fun non_editor_cannot_grant() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -254,11 +268,11 @@ module armature_vault::dao_receipt_vault_tests {
 
         // AWAR member (deposit/withdraw, NOT edit) tries to grant — must abort.
         ts::next_tx(&mut scenario, AWAR_M1);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
         vault::grant(
             &mut v,
-            &awar_dao,
+            &awar_ou,
             vector[vault::role_deposit()],
             vector[acl::player(OUTSIDER)],
             scenario.ctx(),
@@ -267,15 +281,15 @@ module armature_vault::dao_receipt_vault_tests {
         abort
     }
 
-    /// Migration path: a new DAO is granted Edit (coexisting with the old editor),
-    /// then the old editor is revoked. The new DAO can administer; the property we
+    /// Migration path: a new OU is granted Edit (coexisting with the old editor),
+    /// then the old editor is revoked. The new OU can administer; the property we
     /// assert is that the new OU's Edit grant takes effect and the old one is gone.
     #[test]
     fun migration_grant_new_editor_then_revoke_old() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -287,37 +301,37 @@ module armature_vault::dao_receipt_vault_tests {
         );
         vault::share_for_testing(v);
 
-        // The "migrated" officers DAO (new id, same officer on board for the test).
-        let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        // The "migrated" officers OU (new id, same officer on board for the test).
+        let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
 
         // Old officers grant Edit to the new officers OU (both editors coexist).
-        // Edit grants must go through grant_edit_ou, which validates the &DAO witness.
+        // Edit grants must go through grant_edit_ou, which validates the &OU witness.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
-            vault::grant_edit_ou(&mut v, &officers_dao, &new_officers_dao, scenario.ctx());
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
+            vault::grant_edit_ou(&mut v, &officers_ou, &new_officers_ou, scenario.ctx());
             assert!(vault::principals(&v, vault::role_edit()).length() == 2, 0);
-            ts::return_shared(new_officers_dao);
-            ts::return_shared(officers_dao);
+            ts::return_shared(new_officers_ou);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
         };
 
-        // New officers DAO now revokes the old Edit principal (valid editor itself).
+        // New officers OU now revokes the old Edit principal (valid editor itself).
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
             vault::revoke(
                 &mut v,
-                &new_officers_dao,
+                &new_officers_ou,
                 vector[vault::role_edit()],
                 vector[acl::ou(officers)],
                 scenario.ctx(),
             );
             assert!(vault::principals(&v, vault::role_edit()).length() == 1, 1);
-            ts::return_shared(new_officers_dao);
+            ts::return_shared(new_officers_ou);
             ts::return_shared(v);
         };
 
@@ -329,9 +343,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::ELastEditor)]
     fun cannot_revoke_last_editor() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -345,11 +359,11 @@ module armature_vault::dao_receipt_vault_tests {
 
         // Officers try to revoke themselves — the only Edit principal — must abort.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         vault::revoke(
             &mut v,
-            &officers_dao,
+            &officers_ou,
             vector[vault::role_edit()],
             vector[acl::ou(officers)],
             scenario.ctx(),
@@ -375,9 +389,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::EEditMustBeOu)]
     fun grant_rejects_player_for_edit_role() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -390,11 +404,11 @@ module armature_vault::dao_receipt_vault_tests {
         vault::share_for_testing(v);
 
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         vault::grant(
             &mut v,
-            &officers_dao,
+            &officers_ou,
             vector[vault::role_edit()],
             vector[acl::player(@0x0)],
             scenario.ctx(),
@@ -403,15 +417,15 @@ module armature_vault::dao_receipt_vault_tests {
         abort
     }
 
-    /// Original H1 (Ou variant): bypass attempted via Ou{bogus_dao_id}. Post-fix the
+    /// Original H1 (Ou variant): bypass attempted via Ou{bogus_ou_id}. Post-fix the
     /// grant() call rejects the Edit role itself — bogus Ou ids are no longer reachable.
     #[test]
     #[expected_failure(abort_code = vault::EEditMustBeOu)]
     fun grant_rejects_bogus_ou_for_edit_role() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -425,11 +439,11 @@ module armature_vault::dao_receipt_vault_tests {
 
         let bogus = object::id_from_address(@0xDEADBEEF);
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         vault::grant(
             &mut v,
-            &officers_dao,
+            &officers_ou,
             vector[vault::role_edit()],
             vector[acl::ou(bogus)],
             scenario.ctx(),
@@ -444,9 +458,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::EEditMustBeOu)]
     fun grant_rejects_player_self_grant_for_edit() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -459,11 +473,11 @@ module armature_vault::dao_receipt_vault_tests {
         vault::share_for_testing(v);
 
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         vault::grant(
             &mut v,
-            &officers_dao,
+            &officers_ou,
             vector[vault::role_edit()],
             vector[acl::player(AWAR_OFFICER)],
             scenario.ctx(),
@@ -472,15 +486,15 @@ module armature_vault::dao_receipt_vault_tests {
         abort
     }
 
-    /// H1 positive: grant_edit_ou succeeds with a real &DAO witness and emits an event.
+    /// H1 positive: grant_edit_ou succeeds with a real &OU witness and emits an event.
     #[test]
     fun grant_edit_ou_happy_path() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
-        let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
 
         ts::next_tx(&mut scenario, AWAR_M1);
         let v = vault::new_for_testing(
@@ -493,15 +507,15 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
-            vault::grant_edit_ou(&mut v, &officers_dao, &new_officers_dao, scenario.ctx());
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
+            vault::grant_edit_ou(&mut v, &officers_ou, &new_officers_ou, scenario.ctx());
             let edits = vault::principals(&v, vault::role_edit());
             assert!(edits.length() == 2, 0);
             assert!(edits.contains(&acl::ou(new_officers)), 1);
-            ts::return_shared(new_officers_dao);
-            ts::return_shared(officers_dao);
+            ts::return_shared(new_officers_ou);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
         };
         ts::end(scenario);
@@ -516,12 +530,12 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::EEditorWouldLockSelf)]
     fun revoke_aborts_if_caller_would_lock_themselves() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         // A second editor who is NOT a member of `officers`.
-        let other = make_dao(&mut scenario, OUTSIDER, vector[OUTSIDER]);
+        let other = make_ou(&mut scenario, OUTSIDER, vector[OUTSIDER]);
 
         ts::next_tx(&mut scenario, AWAR_M1);
         let v = vault::new_for_testing(
@@ -535,12 +549,12 @@ module armature_vault::dao_receipt_vault_tests {
         // First, validly add `other` as a second Edit principal (Edit list non-empty).
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            let other_dao = ts::take_shared_by_id<DAO>(&scenario, other);
-            vault::grant_edit_ou(&mut v, &officers_dao, &other_dao, scenario.ctx());
-            ts::return_shared(other_dao);
-            ts::return_shared(officers_dao);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            let other_ou = ts::take_shared_by_id<OU>(&scenario, other);
+            vault::grant_edit_ou(&mut v, &officers_ou, &other_ou, scenario.ctx());
+            ts::return_shared(other_ou);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
         };
 
@@ -548,11 +562,11 @@ module armature_vault::dao_receipt_vault_tests {
         // (length > 0) passes since `other` remains. But AWAR_OFFICER is NOT a member
         // of `other` — so the post-revoke caller-satisfies check fires.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         vault::revoke(
             &mut v,
-            &officers_dao,
+            &officers_ou,
             vector[vault::role_edit()],
             vector[acl::ou(officers)],
             scenario.ctx(),
@@ -568,9 +582,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[test]
     fun no_op_grant_and_revoke_emit_no_events() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -584,7 +598,7 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         let deposit_len_before = {
-            let v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let v = ts::take_shared<OuReceiptVault>(&scenario);
             let n = vault::principals(&v, vault::role_deposit()).length();
             ts::return_shared(v);
             n
@@ -593,22 +607,22 @@ module armature_vault::dao_receipt_vault_tests {
         // (1) Duplicate grant: PROTO already has deposit.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
             vault::grant(
                 &mut v,
-                &officers_dao,
+                &officers_ou,
                 vector[vault::role_deposit()],
                 vector[acl::player(PROTO)],
                 scenario.ctx(),
             );
-            ts::return_shared(officers_dao);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
         };
         let regrant_effects = ts::next_tx(&mut scenario, AWAR_OFFICER);
         assert!(ts::num_user_events(&regrant_effects) == 0, 100);
         {
-            let v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let v = ts::take_shared<OuReceiptVault>(&scenario);
             assert!(
                 vault::principals(&v, vault::role_deposit()).length() == deposit_len_before,
                 101,
@@ -619,16 +633,16 @@ module armature_vault::dao_receipt_vault_tests {
         // (2) Revoke of non-member: OUTSIDER never had deposit.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
             vault::revoke(
                 &mut v,
-                &officers_dao,
+                &officers_ou,
                 vector[vault::role_deposit()],
                 vector[acl::player(OUTSIDER)],
                 scenario.ctx(),
             );
-            ts::return_shared(officers_dao);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
         };
         let rerevoke_effects = ts::next_tx(&mut scenario, AWAR_OFFICER);
@@ -643,9 +657,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::EZeroAmount)]
     fun zero_value_deposit_rejected() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -661,9 +675,9 @@ module armature_vault::dao_receipt_vault_tests {
         let zero_receipt = multicoin::zero(collection_id, ASSET, scenario.ctx());
 
         ts::next_tx(&mut scenario, AWAR_M1);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-        vault::deposit_receipt(&mut v, &awar_dao, zero_receipt, scenario.ctx());
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        vault::deposit_receipt(&mut v, &awar_ou, zero_receipt, scenario.ctx());
 
         abort
     }
@@ -674,9 +688,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::EZeroAmount)]
     fun zero_amount_withdraw_rejected() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -691,17 +705,17 @@ module armature_vault::dao_receipt_vault_tests {
         let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 10);
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-            vault::deposit_receipt(&mut v, &awar_dao, r, scenario.ctx());
-            ts::return_shared(awar_dao);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &awar_ou, r, scenario.ctx());
+            ts::return_shared(awar_ou);
             ts::return_shared(v);
         };
 
         ts::next_tx(&mut scenario, PROTO);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let any_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-        let out = vault::withdraw_receipt(&mut v, &any_dao, ASSET, 0, scenario.ctx());
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let any_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        let out = vault::withdraw_receipt(&mut v, &any_ou, ASSET, 0, scenario.ctx());
         transfer::public_transfer(out, PROTO);
 
         abort
@@ -713,9 +727,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::EInvalidArguments)]
     fun grant_length_mismatch_returns_invalid_arguments() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -728,11 +742,11 @@ module armature_vault::dao_receipt_vault_tests {
         vault::share_for_testing(v);
 
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         vault::grant(
             &mut v,
-            &officers_dao,
+            &officers_ou,
             vector[vault::role_deposit(), vault::role_withdraw()],
             vector[acl::player(OUTSIDER)],
             scenario.ctx(),
@@ -741,15 +755,15 @@ module armature_vault::dao_receipt_vault_tests {
         abort
     }
 
-    // --- F4: registry key is updatable after DAO migration
+    // --- F4: registry key is updatable after OU migration
 
     #[test]
     fun update_registry_key_remaps_vault_after_migration() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
-        let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -757,7 +771,7 @@ module armature_vault::dao_receipt_vault_tests {
         ts::next_tx(&mut scenario, AWAR_M1);
         vault::init_for_testing(scenario.ctx());
 
-        // Construct a vault by hand and register its key under the OLD editor DAO.
+        // Construct a vault by hand and register its key under the OLD editor OU.
         ts::next_tx(&mut scenario, AWAR_M1);
         let v = vault::new_for_testing(
             ssu_id,
@@ -770,11 +784,11 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
             // M2: tell the vault which registry slot it lives under.
-            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_ou_id_for_testing(&mut v, officers);
             // Lookup under the old key works.
             assert!(vault::lookup(&reg, ssu_id, officers).is_some(), 0);
             assert!(vault::lookup(&reg, ssu_id, new_officers).is_none(), 1);
@@ -782,25 +796,25 @@ module armature_vault::dao_receipt_vault_tests {
             ts::return_shared(reg);
         };
 
-        // Editor re-keys the registry entry to point at the migrated DAO.
+        // Editor re-keys the registry entry to point at the migrated OU.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
             vault::update_registry_key(
                 &mut reg,
                 &mut v,
-                &officers_dao,
-                &new_officers_dao,
+                &officers_ou,
+                &new_officers_ou,
                 scenario.ctx(),
             );
             // New key resolves; old key no longer.
             assert!(vault::lookup(&reg, ssu_id, new_officers).is_some(), 2);
             assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 3);
-            ts::return_shared(new_officers_dao);
-            ts::return_shared(officers_dao);
+            ts::return_shared(new_officers_ou);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -810,16 +824,16 @@ module armature_vault::dao_receipt_vault_tests {
 
     /// F4 cross-vault safety (per PR #2 review): update_registry_key aborts if the
     /// registry entry at old_key points at a *different* vault than the one passed.
-    /// Prevents a caller with Edit on vault B (and editor_dao listed on vault B's
+    /// Prevents a caller with Edit on vault B (and editor_ou listed on vault B's
     /// ACL) from silently remapping vault A's registry entry.
     #[test]
     #[expected_failure(abort_code = vault::EInvalidArguments)]
     fun update_registry_key_rejects_cross_vault_remap() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
-        let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -849,7 +863,7 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             // Only register vault A under (ssu_id, officers). Vault B is unrelated to
             // this slot but the attacker tries to remap it.
             vault::register_for_testing(&mut reg, ssu_id, officers, v_a_id);
@@ -859,34 +873,34 @@ module armature_vault::dao_receipt_vault_tests {
         // Attacker holds Edit on vault B and passes vault B (not vault A) to
         // update_registry_key — pre-fix this would silently remap vault A's slot.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
         // Both vaults are shared; disambiguate by taking vault B by id.
         // We don't actually need the v_b id earlier — take_shared returns the second
         // one if we already took the first; instead just take by id here.
-        let mut v_b = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-        let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
+        let mut v_b = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
         vault::update_registry_key(
             &mut reg,
             &mut v_b,
-            &officers_dao,
-            &new_officers_dao,
+            &officers_ou,
+            &new_officers_ou,
             scenario.ctx(),
         );
 
         abort
     }
 
-    // --- I1: initialize_dao_vault emits AclGrantedEvent for the seeded Edit principal
+    // --- I1: initialize_ou_vault emits AclGrantedEvent for the seeded Edit principal
 
-    // I1 is verified by inspection of the source — initialize_dao_vault now emits
+    // I1 is verified by inspection of the source — initialize_ou_vault now emits
     // AclGrantedEvent for every principal in deposit_principals, withdraw_principals,
     // and edit_principals alongside VaultInitializedEvent. The initialize path
     // requires a real world::StorageUnit which the existing test harness intentionally
     // bypasses (see new_for_testing's doc-comment), so this fix is not exercisable
     // as a Move #[test] here. The follow-up issue tracking M1/M2/F1 should add an
     // SSU-bootstrap helper. An EEmptyEditPrincipals guard at the top of
-    // initialize_dao_vault ensures at least one Edit principal is always provided.
+    // initialize_ou_vault ensures at least one Edit principal is always provided.
 
     // =============================================================================
     // === M2: vault teardown + DOF-emptiness tracking (#5)
@@ -897,9 +911,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[test]
     fun deinitialize_empty_vault_frees_registry_slot_and_bricks_acl() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -918,10 +932,10 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -929,10 +943,10 @@ module armature_vault::dao_receipt_vault_tests {
         // Editor deinitializes the empty vault.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            vault::deinitialize_dao_vault(&mut reg, &mut v, &officers_dao, scenario.ctx());
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            vault::deinitialize_ou_vault(&mut reg, &mut v, &officers_ou, scenario.ctx());
 
             // Registry slot freed: lookup returns none.
             assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 0);
@@ -941,7 +955,7 @@ module armature_vault::dao_receipt_vault_tests {
             assert!(vault::principals(&v, vault::role_deposit()).is_empty(), 2);
             assert!(vault::principals(&v, vault::role_withdraw()).is_empty(), 3);
 
-            ts::return_shared(officers_dao);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -955,9 +969,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::ENotAuthorized)]
     fun deinitialized_vault_rejects_grant() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -976,32 +990,32 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
 
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            vault::deinitialize_dao_vault(&mut reg, &mut v, &officers_dao, scenario.ctx());
-            ts::return_shared(officers_dao);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            vault::deinitialize_ou_vault(&mut reg, &mut v, &officers_ou, scenario.ctx());
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
 
         // Even the original editor can no longer administer the orphan vault.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         vault::grant(
             &mut v,
-            &officers_dao,
+            &officers_ou,
             vector[vault::role_deposit()],
             vector[acl::player(OUTSIDER)],
             scenario.ctx(),
@@ -1011,13 +1025,13 @@ module armature_vault::dao_receipt_vault_tests {
     }
 
     /// M2: registry slot is reusable after deinit — a fresh registration under the
-    /// same (ssu_id, editor_dao_id) key succeeds.
+    /// same (ssu_id, editor_ou_id) key succeeds.
     #[test]
     fun registry_slot_reusable_after_deinit() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -1037,10 +1051,10 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_a_id);
-            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1048,11 +1062,11 @@ module armature_vault::dao_receipt_vault_tests {
         // Deinit vault A.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            vault::deinitialize_dao_vault(&mut reg, &mut v, &officers_dao, scenario.ctx());
-            ts::return_shared(officers_dao);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            vault::deinitialize_ou_vault(&mut reg, &mut v, &officers_ou, scenario.ctx());
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1070,7 +1084,7 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_b_id);
             let looked_up = vault::lookup(&reg, ssu_id, officers);
             assert!(looked_up.is_some(), 0);
@@ -1086,9 +1100,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::EVaultNonEmpty)]
     fun deinit_rejected_on_non_empty_vault() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -1107,10 +1121,10 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1119,20 +1133,20 @@ module armature_vault::dao_receipt_vault_tests {
         let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 100);
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-            vault::deposit_receipt(&mut v, &awar_dao, r, scenario.ctx());
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &awar_ou, r, scenario.ctx());
             assert!(vault::vault_balance(&v, ASSET) == 100, 0);
-            ts::return_shared(awar_dao);
+            ts::return_shared(awar_ou);
             ts::return_shared(v);
         };
 
         // Try to deinit — must abort EVaultNonEmpty.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
-        let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-        vault::deinitialize_dao_vault(&mut reg, &mut v, &officers_dao, scenario.ctx());
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        vault::deinitialize_ou_vault(&mut reg, &mut v, &officers_ou, scenario.ctx());
 
         abort
     }
@@ -1142,9 +1156,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[expected_failure(abort_code = vault::ENotAuthorized)]
     fun deinit_rejected_for_non_editor() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -1163,20 +1177,20 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
 
-        // AWAR_M1 holds Deposit/Withdraw, NOT Edit. Try to deinit with AWAR DAO.
+        // AWAR_M1 holds Deposit/Withdraw, NOT Edit. Try to deinit with AWAR OU.
         ts::next_tx(&mut scenario, AWAR_M1);
-        let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-        let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-        let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-        vault::deinitialize_dao_vault(&mut reg, &mut v, &awar_dao, scenario.ctx());
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        vault::deinitialize_ou_vault(&mut reg, &mut v, &awar_ou, scenario.ctx());
 
         abort
     }
@@ -1186,9 +1200,9 @@ module armature_vault::dao_receipt_vault_tests {
     #[test]
     fun deinit_succeeds_after_full_drawdown() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -1207,10 +1221,10 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1219,35 +1233,35 @@ module armature_vault::dao_receipt_vault_tests {
         let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 100);
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let awar_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-            vault::deposit_receipt(&mut v, &awar_dao, r, scenario.ctx());
-            ts::return_shared(awar_dao);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &awar_ou, r, scenario.ctx());
+            ts::return_shared(awar_ou);
             ts::return_shared(v);
         };
 
         // Withdraw all 100 — drives the cleanup branch + counter decrement.
         ts::next_tx(&mut scenario, PROTO);
         {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let any_dao = ts::take_shared_by_id<DAO>(&scenario, awar);
-            let out = vault::withdraw_receipt(&mut v, &any_dao, ASSET, 100, scenario.ctx());
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let any_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            let out = vault::withdraw_receipt(&mut v, &any_ou, ASSET, 100, scenario.ctx());
             assert!(out.value() == 100, 0);
             assert!(vault::vault_balance(&v, ASSET) == 0, 1);
             transfer::public_transfer(out, PROTO);
-            ts::return_shared(any_dao);
+            ts::return_shared(any_ou);
             ts::return_shared(v);
         };
 
         // Now empty: deinit succeeds.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            vault::deinitialize_dao_vault(&mut reg, &mut v, &officers_dao, scenario.ctx());
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            vault::deinitialize_ou_vault(&mut reg, &mut v, &officers_ou, scenario.ctx());
             assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 0);
-            ts::return_shared(officers_dao);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1256,14 +1270,14 @@ module armature_vault::dao_receipt_vault_tests {
     }
 
     /// M2: after `update_registry_key`, deinit uses the *new* registry slot (the
-    /// vault's `registry_key_dao_id` tracks the migration).
+    /// vault's `registry_key_ou_id` tracks the migration).
     #[test]
     fun deinit_uses_current_registry_key_after_migration() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
-        let new_officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
         let ssu_id = object::id_from_address(@0x5501);
 
@@ -1282,10 +1296,10 @@ module armature_vault::dao_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_M1);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
-            vault::set_registrant_dao_id_for_testing(&mut v, officers);
+            vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1293,22 +1307,22 @@ module armature_vault::dao_receipt_vault_tests {
         // First: grant new_officers Edit, then migrate the registry key to new_officers.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
-            vault::grant_edit_ou(&mut v, &officers_dao, &new_officers_dao, scenario.ctx());
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
+            vault::grant_edit_ou(&mut v, &officers_ou, &new_officers_ou, scenario.ctx());
             vault::update_registry_key(
                 &mut reg,
                 &mut v,
-                &officers_dao,
-                &new_officers_dao,
+                &officers_ou,
+                &new_officers_ou,
                 scenario.ctx(),
             );
             assert!(vault::lookup(&reg, ssu_id, new_officers).is_some(), 0);
             assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 1);
-            ts::return_shared(new_officers_dao);
-            ts::return_shared(officers_dao);
+            ts::return_shared(new_officers_ou);
+            ts::return_shared(officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -1317,20 +1331,62 @@ module armature_vault::dao_receipt_vault_tests {
         // new key and free it.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
-            let mut reg = ts::take_shared<vault::DaoReceiptVaultRegistry>(&scenario);
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let new_officers_dao = ts::take_shared_by_id<DAO>(&scenario, new_officers);
-            vault::deinitialize_dao_vault(&mut reg, &mut v, &new_officers_dao, scenario.ctx());
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
+            vault::deinitialize_ou_vault(&mut reg, &mut v, &new_officers_ou, scenario.ctx());
             assert!(vault::lookup(&reg, ssu_id, new_officers).is_none(), 2);
             // ACL is fully wiped — every role becomes empty/absent.
             assert!(vault::principals(&v, vault::role_edit()).is_empty(), 3);
             assert!(vault::principals(&v, vault::role_deposit()).is_empty(), 4);
             assert!(vault::principals(&v, vault::role_withdraw()).is_empty(), 5);
-            ts::return_shared(new_officers_dao);
+            ts::return_shared(new_officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
 
         ts::end(scenario);
+    }
+
+    /// A member removed from an OU's board no longer satisfies that OU's
+    /// principal: AWAR_M2 deposits while on the board, then is removed and
+    /// the next deposit aborts.
+    #[test]
+    #[expected_failure(abort_code = vault::ENotAuthorized)]
+    fun removed_board_member_loses_ou_access() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1, AWAR_M2]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        let r1 = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 10);
+        ts::next_tx(&mut scenario, AWAR_M2);
+        {
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &awar_ou, r1, scenario.ctx());
+            ts::return_shared(awar_ou);
+            ts::return_shared(v);
+        };
+
+        remove_board_member(&mut scenario, awar, AWAR_M2);
+
+        let r2 = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 10);
+        ts::next_tx(&mut scenario, AWAR_M2);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        vault::deposit_receipt(&mut v, &awar_ou, r2, scenario.ctx());
+
+        abort
     }
 }

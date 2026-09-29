@@ -98,11 +98,12 @@ jobs:
       #
       # What this enforces:
       #   1. Our root package's [pinned.testnet.armature_vault].deps resolves
-      #      multicoin to our pinned rev (c7a97f2) and world to our pinned rev
-      #      (8e2e97b). If `override = true` is dropped on multicoin or the
+      #      multicoin to our pinned rev (e384bbc) and world to our pinned rev
+      #      (32300a2). If `override = true` is dropped on multicoin or the
       #      top-level world pin is removed, those deps reroute and the check
       #      fails.
-      #   2. warehouse_receipts is at the pinned rev (8a2f80e).
+      #   2. armature is at the pinned rev (ff22e5f, Cycle 7) and
+      #      warehouse_receipts is at the pinned rev (e872aac).
       #
       # What this DOES NOT enforce (intentionally surfaced, not failed):
       #   - Transitive packages may resolve multicoin/world to *different* revs.
@@ -130,9 +131,10 @@ jobs:
           fi
           # Expected revs — keep in sync with packages/armature_vault/Move.toml.
           # When you bump a pin in Move.toml, bump it here too.
-          EXPECTED_MULTICOIN="c7a97f2f42ffbddbe2d44686cbc9eebd1810b8d6"
-          EXPECTED_WORLD="8e2e97b50fd6bbf605284bcdaae54a33a5475e89"
-          EXPECTED_WAREHOUSE_RECEIPTS="8a2f80e857d516187c99b28efa935ff7ce42af03"
+          EXPECTED_ARMATURE="ff22e5f316f5c3f3a5bffb9957a5067c6f1cdf0c"
+          EXPECTED_MULTICOIN="e384bbc8670b850cfb82a5e3b9fa46798b0ff6dc"
+          EXPECTED_WORLD="32300a2ab6dc95c25ff42e30b89990492ad4dcaa"
+          EXPECTED_WAREHOUSE_RECEIPTS="e872aac7a72dbf64e47f123d180ea85ec5d84552"
 
           fail=0
           # Anchor the assertion to a `source = ... rev = "..."` line so a stray
@@ -147,6 +149,7 @@ jobs:
             fi
           }
 
+          check armature "$EXPECTED_ARMATURE"
           check multicoin "$EXPECTED_MULTICOIN"
           check world "$EXPECTED_WORLD"
           check warehouse_receipts "$EXPECTED_WAREHOUSE_RECEIPTS"
@@ -181,7 +184,7 @@ jobs:
             fi
           done
           echo ""
-          echo "Note: warehouse_receipts and armature linking to multicoin_2 / multicoin (rev 330d339)"
-          echo "      instead of multicoin_1 (rev c7a97f2, our override) is EXPECTED at this rev pin."
+          echo "Note: armature has no multicoin dependency since Cycle 7; only warehouse_receipts"
+          echo "      links multicoin, and our override unifies it on rev e384bbc."
           echo "      Whether this affects runtime type identity at the deposit boundary is being"
           echo "      tracked separately."
