@@ -4,3 +4,4 @@ build/
 # here so reviewers don't see "untracked lockfile" warnings on PRs and start
 # worrying about manifest/lock drift; the manifest is the canonical pin source.
 Move.lock
+.DS_Store

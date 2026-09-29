@@ -74,11 +74,21 @@ Because the registry key now faithfully means "whose vault is this," vault disco
 
 ### Can a caller register a vault under a DAO they don't belong to?
 
-No. `registrant_dao: &DAO` is a live Sui object reference. Move's object system prevents forging or constructing a `DAO` value — the caller must pass the actual on-chain object. The body asserts `registrant_dao.is_governance_member(ctx.sender())`, so the caller must be a governance member of the DAO they claim as registrant. This guard is unchanged from the current design.
+No. `registrant_dao: &DAO` is a live Sui object reference. Move's object system prevents forging or constructing a `DAO` value — the caller must pass the actual on-chain object. The body asserts `registrant_dao.is_governance_member(ctx.sender())`, so the caller must be a governance member of the DAO they claim as registrant.
+
+This holds on **every** path that writes a registry key, including `update_registry_key` — which re-keys an existing vault and must assert board membership in the *destination* DAO, not only Edit on the vault being moved. (That assertion was missing originally; a v2 audit finding added it. Without it, any Edit holder could re-key their own vault onto an unclaimed `(ssu, victim_dao)` slot.)
 
 ### Can a caller register a vault for an SSU they don't own?
 
-No. The existing M1 check — `OwnerCap<StorageUnit>` must authorize the passed `storage_unit` — is unchanged.
+**Yes, and this is intended.** `initialize_dao_vault_v2` deliberately omits the `OwnerCap<StorageUnit>` requirement so the SSU owner and the registering board member can be different accounts. Any board member of any DAO may register a vault against any SSU that has a real `VaultConfig`.
+
+The cap-gated `initialize_dao_vault` remains available as a **stricter variant** for callers who specifically want the registration to prove SSU authority. Its M1 check is not a boundary the registry as a whole enforces.
+
+The model the registry actually guarantees is:
+
+> A board member of DAO X may register a vault at `(SSU, X)` for any SSU with a real `VaultConfig`, provided `(SSU, X)` is not already taken.
+
+**Consumer consequence.** Registry presence is not SSU-owner endorsement. Resolve vaults by `lookup(ssu, my_dao)`, never by SSU alone — scanning `VaultInitializedEvent` by `storage_unit_id` will surface vaults registered by unrelated DAOs, which is expected rather than an attack. Note too that being keyed under DAO X does not imply X controls the vault; see the `edit_principals` question below.
 
 ### Can a caller register a vault with a mismatched collection?
 
@@ -90,7 +100,7 @@ Yes, intentionally. The vault creator can delegate Edit authority to any DAO —
 
 ### Can a caller register a duplicate vault for the same (SSU, registrant DAO) pair?
 
-No. The registry uniqueness assertion is unchanged.
+No. The registry uniqueness assertion is unchanged, and it is the composite pair that is unique — not the SSU. Several DAOs may hold independent vaults on one SSU, which is exactly what makes the tier-specific vaults above expressible.
 
 ## New Invariant
 

@@ -730,7 +730,7 @@ module armature_vault::dao_receipt_vault_tests {
     /// Original L1: phantom events on no-op grant/revoke. Post-fix: zero events
     /// when the operation is a no-op, and the state is unchanged.
     #[test]
-    fun no_op_grant_and_revoke_emit_no_events() {
+    fun no_op_grant_emits_no_events() {
         let mut scenario = ts::begin(AWAR_M1);
         let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
         let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
@@ -754,7 +754,10 @@ module armature_vault::dao_receipt_vault_tests {
             n
         };
 
-        // (1) Duplicate grant: PROTO already has deposit.
+        // Duplicate grant: PROTO already has deposit. Granting something already
+        // granted is idempotent — the end state is what the caller asked for — so
+        // it stays a silent no-op. Revoke is the asymmetric case (see ENoOpRevoke).
+        // (1) Duplicate grant.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
             let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
@@ -779,24 +782,6 @@ module armature_vault::dao_receipt_vault_tests {
             );
             ts::return_shared(v);
         };
-
-        // (2) Revoke of non-member: OUTSIDER never had deposit.
-        ts::next_tx(&mut scenario, AWAR_OFFICER);
-        {
-            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
-            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
-            vault::revoke(
-                &mut v,
-                &officers_dao,
-                vector[vault::role_deposit()],
-                vector[acl::player(OUTSIDER)],
-                scenario.ctx(),
-            );
-            ts::return_shared(officers_dao);
-            ts::return_shared(v);
-        };
-        let rerevoke_effects = ts::next_tx(&mut scenario, AWAR_OFFICER);
-        assert!(ts::num_user_events(&rerevoke_effects) == 0, 200);
 
         ts::end(scenario);
     }
@@ -1798,6 +1783,115 @@ module armature_vault::dao_receipt_vault_tests {
             ts::return_shared(officers_dao);
             ts::return_shared(v);
         };
+
+        ts::end(scenario);
+    }
+
+    // === AV-3: revoke must not silently succeed ===
+
+    // A revoke that removes nothing aborts instead of returning success with no
+    // event. This is the exact footgun: the ACL holds machine(BOT), the operator
+    // revokes player(BOT) — same address, different kind — and pre-fix walked away
+    // believing the bot was cut off.
+    #[test]
+    #[expected_failure(abort_code = vault::ENoOpRevoke)]
+    fun revoke_of_wrong_principal_kind_aborts() {
+        let mut scenario = ts::begin(AWAR_OFFICER);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_OFFICER);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        acl_map.insert(vault::role_edit(), vector[acl::ou(officers)]);
+        acl_map.insert(vault::role_withdraw(), vector[acl::machine(BOT)]);
+        let mut v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            acl_map,
+            scenario.ctx(),
+        );
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        vault::revoke(
+            &mut v,
+            &officers_dao,
+            vector[vault::role_withdraw()],
+            vector[acl::player(BOT)],
+            scenario.ctx(),
+        ); // abort ENoOpRevoke
+
+        ts::return_shared(officers_dao);
+        vault::share_for_testing(v);
+        ts::end(scenario);
+    }
+
+    // An empty batch changes nothing either, and is rejected on the same rule.
+    #[test]
+    #[expected_failure(abort_code = vault::ENoOpRevoke)]
+    fun empty_revoke_batch_aborts() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let mut v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+        vault::revoke(&mut v, &officers_dao, vector[], vector[], scenario.ctx()); // abort
+
+        ts::return_shared(officers_dao);
+        vault::share_for_testing(v);
+        ts::end(scenario);
+    }
+
+    // Partial batches still succeed: one pair removes something, the other names an
+    // absent principal. The chosen semantics tolerate the second so long as the
+    // batch as a whole moved state.
+    #[test]
+    fun partial_revoke_batch_succeeds_when_one_pair_changes() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_dao(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_dao(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_dao(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<DaoReceiptVault>(&scenario);
+            let officers_dao = ts::take_shared_by_id<DAO>(&scenario, officers);
+            // PROTO holds deposit; OUTSIDER never did.
+            vault::revoke(
+                &mut v,
+                &officers_dao,
+                vector[vault::role_deposit(), vault::role_deposit()],
+                vector[acl::player(PROTO), acl::player(OUTSIDER)],
+                scenario.ctx(),
+            );
+            assert!(!vault::principals(&v, vault::role_deposit()).contains(&acl::player(PROTO)), 0);
+            ts::return_shared(officers_dao);
+            ts::return_shared(v);
+        };
+        // Exactly one AclRevokedEvent — the no-op pair still emits nothing.
+        let effects = ts::next_tx(&mut scenario, AWAR_OFFICER);
+        assert!(ts::num_user_events(&effects) == 1, 1);
 
         ts::end(scenario);
     }
