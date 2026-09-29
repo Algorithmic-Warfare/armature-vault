@@ -28,7 +28,6 @@ Introduce an explicit `edit_principals` parameter (mirroring the existing `depos
 public fun initialize_ou_vault(
     registry: &mut OuReceiptVaultRegistry,
     storage_unit: &StorageUnit,
-    owner_cap: &OwnerCap<StorageUnit>,
     registrant_org: &OU,               // registry key only; no longer auto-seeded into Edit
     vault_config: &VaultConfig,
     deposit_principals: vector<Principal>,
@@ -56,7 +55,6 @@ tx.moveCall({
     arguments: [
         tx.object(registryId),
         tx.object(storageUnitId),
-        cap,
         tx.object(memberOuId),             // registrant_org: registry key
         tx.object(vaultConfigId),
         makeOuPrincipalVec(memberOuId),    // deposit
@@ -78,7 +76,7 @@ No. `registrant_org: &OU` is a live Sui object reference. Move's object system p
 
 ### Can a caller register a vault for an SSU they don't own?
 
-No. The existing M1 check — `OwnerCap<StorageUnit>` must authorize the passed `storage_unit` — is unchanged.
+Yes, if they are a board member of `registrant_org`. `initialize_ou_vault` no longer takes an `OwnerCap<StorageUnit>` (the former M1 check was dropped so the SSU owner and the OU board member can be different accounts). The F1 check below still binds the vault to the SSU's real `Collection`.
 
 ### Can a caller register a vault with a mismatched collection?
 

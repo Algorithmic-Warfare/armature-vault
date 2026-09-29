@@ -46,7 +46,7 @@ module armature_vault::ou_receipt_vault {
     use multicoin::multicoin::Balance;
     use sui::{dynamic_object_field as dof, event, table::{Self, Table}, vec_map::{Self, VecMap}};
     use warehouse_receipts::vault::VaultConfig;
-    use world::{access::{Self, OwnerCap}, storage_unit::StorageUnit};
+    use world::storage_unit::StorageUnit;
 
     // === Roles ===
 
@@ -95,9 +95,6 @@ module armature_vault::ou_receipt_vault {
     const EVaultRegistryMismatch: vector<u8> = b"Registry slot does not point at this vault";
     #[error(code = 11)]
     const EStorageUnitMismatch: vector<u8> = b"VaultConfig does not bind the passed StorageUnit";
-    #[error(code = 12)]
-    const EUnauthorizedForStorageUnit: vector<u8> =
-        b"Caller's OwnerCap does not authorize this StorageUnit";
     #[error(code = 13)]
     const EEmptyEditPrincipals: vector<u8> =
         b"edit_principals must be non-empty — vault would have no administrator";
@@ -257,104 +254,10 @@ module armature_vault::ou_receipt_vault {
     /// `collection_id: ID` that didn't match the SSU and permanently misconfigure
     /// the vault.
     ///
-    /// M1 (#4): `owner_cap` is the `OwnerCap<StorageUnit>` for `storage_unit`.
-    /// `world::access::is_authorized(owner_cap, ssu_id)` verifies on-chain that the
-    /// caller has the SSU's authority surface, closing the SSU-squatting hole
-    /// where any OU board member could register a vault against any
-    /// `&StorageUnit` they could obtain a reference to. The composition F1+M1
-    /// ensures both halves of the binding (Collection<->SSU and caller<->SSU)
-    /// are verified by witness, not trusted from input.
-    ///
-    /// Trust assumption (not verified on-chain): the caller — a governance member
-    /// of `registrant_org` who possesses `OwnerCap<StorageUnit>` — is acting on
-    /// behalf of the OU. M1 verifies (caller passes board-membership check) AND
-    /// (caller can produce the OwnerCap), but does NOT verify the OU *collectively*
-    /// controls the cap. A board member personally holding the cap can unilaterally
-    /// bind that SSU to their OU's vault. If you need cap-custody under OU
-    /// governance, custody the cap in the OU's treasury and borrow it via the
-    /// OU's standard proposal flow.
+    /// No `OwnerCap<StorageUnit>` is required: any board member of `registrant_org`
+    /// may call this, so the SSU owner and the OU board member can be different
+    /// accounts.
     public fun initialize_ou_vault(
-        registry: &mut OuReceiptVaultRegistry,
-        storage_unit: &StorageUnit,
-        owner_cap: &OwnerCap<StorageUnit>,
-        registrant_org: &OU,
-        vault_config: &VaultConfig,
-        deposit_principals: vector<Principal>,
-        withdraw_principals: vector<Principal>,
-        edit_principals: vector<Principal>,
-        ctx: &mut TxContext,
-    ) {
-        assert!(registrant_org.is_governance_member(ctx.sender()), ENotAuthorized);
-        assert!(!edit_principals.is_empty(), EEmptyEditPrincipals);
-
-        let storage_unit_id = object::id(storage_unit);
-        // M1: caller's OwnerCap must authorize this SSU.
-        assert!(access::is_authorized(owner_cap, storage_unit_id), EUnauthorizedForStorageUnit);
-        // F1: the VaultConfig's bound SSU must match the passed StorageUnit. This
-        // is the verifier that closes the "wrong collection for this SSU" hole.
-        assert!(vault_config.storage_unit_id() == storage_unit_id, EStorageUnitMismatch);
-        let collection_id = vault_config.collection_id();
-
-        let registrant_ou_id = registrant_org.id();
-        let key = VaultKey { storage_unit_id, registrant_ou_id };
-        assert!(!table::contains(&registry.vaults, key), EVaultAlreadyExists);
-
-        let mut vault_acl = vec_map::empty<Role, vector<Principal>>();
-        if (!deposit_principals.is_empty()) {
-            vault_acl.insert(Role::Deposit, deposit_principals);
-        };
-        if (!withdraw_principals.is_empty()) {
-            vault_acl.insert(Role::Withdraw, withdraw_principals);
-        };
-        vault_acl.insert(Role::Edit, edit_principals);
-
-        let vault = OuReceiptVault {
-            id: object::new(ctx),
-            storage_unit_id,
-            collection_id,
-            acl: vault_acl,
-            non_empty_assets: 0,
-            registrant_ou_id,
-        };
-        let vault_id = object::id(&vault);
-
-        event::emit(VaultInitializedEvent {
-            vault_id,
-            registrant_ou_id,
-            storage_unit_id,
-            collection_id,
-        });
-
-        // I1: emit AclGrantedEvent for each seeded principal so event-sourced
-        // ACL reconstructions don't need to hardcode the seeding rule. We borrow
-        // from the vault before sharing so we can iterate the stored vectors.
-        let sender = ctx.sender();
-        let mut role_idx = 0;
-        while (role_idx < vault.acl.length()) {
-            let (role, principals) = vault.acl.get_entry_by_idx(role_idx);
-            let n = principals.length();
-            let mut i = 0;
-            while (i < n) {
-                event::emit(AclGrantedEvent {
-                    vault_id,
-                    role: *role,
-                    principal: principals[i],
-                    by: sender,
-                });
-                i = i + 1;
-            };
-            role_idx = role_idx + 1;
-        };
-
-        table::add(&mut registry.vaults, key, vault_id);
-        transfer::share_object(vault);
-    }
-
-    /// Governance-member-only variant of `initialize_ou_vault` that does not
-    /// require an `OwnerCap<StorageUnit>`. Any board member of `registrant_org`
-    /// may call this — the SSU-owner gate is intentionally absent. Prefer this
-    /// when the SSU owner and the OU board member are different accounts.
-    public fun initialize_ou_vault_v2(
         registry: &mut OuReceiptVaultRegistry,
         storage_unit: &StorageUnit,
         registrant_org: &OU,
