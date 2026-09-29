@@ -2,7 +2,6 @@
 name = "armature_vault"
 edition = "2024"
 version = "0.0.1"
-published-at = "0x3af6edb64f575cb65a89f1c8f445a2e2aad05324a1586aad9e2651191bf4f99b"
 
 # armature_vault — an OU-gated vault for warehouse receipts (and, later,
 # other shared resources). Players mint multicoin::Balance receipts via the
