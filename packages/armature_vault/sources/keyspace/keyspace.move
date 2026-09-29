@@ -310,7 +310,7 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector::empty(),
+            entries: vector[],
         });
     }
 
@@ -386,7 +386,7 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector::empty(),
+            entries: vector[],
         });
     }
 
@@ -687,7 +687,7 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector::empty(),
+            entries: vector[],
         }
     }
 
@@ -714,7 +714,7 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector::empty(),
+            entries: vector[],
         }
     }
 
