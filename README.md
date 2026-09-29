@@ -81,3 +81,14 @@ permanently brick the ACL.
 sui move build --build-env testnet_stillness
 sui move test  --build-env testnet_stillness
 ```
+
+### Test coverage
+
+```
+python3 scripts/move_coverage.py [--uncovered] [--min 80]
+```
+
+Prints line, function, branch and bytecode coverage for each source file and writes
+LCOV, CSV and JSON reports to `coverage/`. It needs a Sui CLI built with the `tracing`
+feature: the release binaries that `suiup` installs have it, a `cargo install` build
+does not. Set `SUI=/path/to/sui` to choose which binary it uses.
