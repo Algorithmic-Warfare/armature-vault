@@ -129,6 +129,47 @@ module armature_vault::keyspace_tests {
         sc.end();
     }
 
+    // A Machine principal can hold Grant (administer the keyspace) and Write
+    // (edit entries) on its own, with no board membership.
+    #[test]
+    fun test_machine_grantor_and_writer() {
+        let mut sc = ts::begin(ADMIN);
+        let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
+
+        ts::next_tx(&mut sc, USER1);
+        let org = ts::take_shared_by_id<OU>(&sc, ou_id);
+        let mut allowlist = keyspace::test_create_for_ou(
+            b"Vault",
+            vector[acl::machine(USER1)],
+            vector[],
+            vector[acl::machine(USER1)],
+            sc.ctx(),
+        );
+        let mut entry = keyspace::test_publish_entry(
+            &mut allowlist,
+            b"QmOriginal",
+            b"desc",
+            sc.ctx(),
+        );
+
+        keyspace::grant(
+            &mut allowlist,
+            keyspace::role_read(),
+            acl::player(USER2),
+            &org,
+            sc.ctx(),
+        );
+        assert!(keyspace::has_role(&allowlist, keyspace::role_read(), &org, USER2), 0);
+
+        keyspace::edit_entry(&allowlist, &mut entry, b"QmByMachine", &org, sc.ctx());
+        assert!(*keyspace::entry_uri(&entry) == b"QmByMachine".to_string(), 1);
+
+        keyspace::test_destroy_entry(entry);
+        keyspace::test_destroy(allowlist);
+        ts::return_shared(org);
+        sc.end();
+    }
+
     // Granting the same principal to the same role twice must abort (EAlreadyGranted).
     #[test]
     #[expected_failure]

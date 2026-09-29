@@ -15,7 +15,7 @@ Emitted by `create_keyspace` and `create_keyspace_for_ou`.
 | Field | Type | Description |
 |---|---|---|
 | `id` | `ID` | Keyspace object ID (primary key) |
-| `creator` | `Principal` | `Player { addr }`, `Machine { addr }` or `Ou { ou_id }` |
+| `creator` | `Principal` | `Player { addr }` or `Ou { ou_id }` (never `Machine` — `create_keyspace` always records the sender as `Player`) |
 | `name` | `String` | Human-readable label |
 | `registrant_ou_id` | `Option<ID>` | `None` → personal keyspace; `Some(ou_id)` → OU-linked |
 

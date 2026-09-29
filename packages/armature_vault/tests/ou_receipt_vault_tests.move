@@ -29,6 +29,8 @@ module armature_vault::ou_receipt_vault_tests {
     const PROTO: address = @0xC1;
     // AWAR officer — holds Edit
     const AWAR_OFFICER: address = @0xD1;
+    // Service/bot key — Machine principal
+    const BOT: address = @0xF1;
     // Nobody
     const OUTSIDER: address = @0x0E;
 
@@ -448,6 +450,149 @@ module armature_vault::ou_receipt_vault_tests {
             vector[acl::ou(bogus)],
             scenario.ctx(),
         );
+
+        abort
+    }
+
+    /// Machine variant of H1: a service/bot key cannot be granted Edit.
+    #[test]
+    #[expected_failure(abort_code = vault::EEditMustBeOu)]
+    fun grant_rejects_machine_for_edit_role() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        vault::grant(
+            &mut v,
+            &officers_ou,
+            vector[vault::role_edit()],
+            vector[acl::machine(BOT)],
+            scenario.ctx(),
+        );
+
+        abort
+    }
+
+    /// Officers grant a Machine key Deposit + Withdraw; the bot deposits and
+    /// withdraws as its own address, passing any OU ref.
+    #[test]
+    fun machine_granted_deposit_withdraw() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            vault::grant(
+                &mut v,
+                &officers_ou,
+                vector[vault::role_deposit(), vault::role_withdraw()],
+                vector[acl::machine(BOT), acl::machine(BOT)],
+                scenario.ctx(),
+            );
+            ts::return_shared(officers_ou);
+            ts::return_shared(v);
+        };
+
+        let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 40);
+        ts::next_tx(&mut scenario, BOT);
+        {
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let any_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &any_ou, r, scenario.ctx());
+            let out = vault::withdraw_receipt(&mut v, &any_ou, ASSET, 15, scenario.ctx());
+            assert!(out.value() == 15, 0);
+            assert!(vault::vault_balance(&v, ASSET) == 25, 1);
+            transfer::public_transfer(out, BOT);
+            ts::return_shared(any_ou);
+            ts::return_shared(v);
+        };
+
+        ts::end(scenario);
+    }
+
+    /// Revoking a Machine's Withdraw locks the bot out.
+    #[test]
+    #[expected_failure(abort_code = vault::ENotAuthorized)]
+    fun revoked_machine_cannot_withdraw() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(&mut scenario, AWAR_M1);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        let r = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 40);
+        ts::next_tx(&mut scenario, AWAR_M1);
+        {
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+            vault::deposit_receipt(&mut v, &awar_ou, r, scenario.ctx());
+            ts::return_shared(awar_ou);
+            ts::return_shared(v);
+        };
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            vault::grant(
+                &mut v,
+                &officers_ou,
+                vector[vault::role_withdraw()],
+                vector[acl::machine(BOT)],
+                scenario.ctx(),
+            );
+            vault::revoke(
+                &mut v,
+                &officers_ou,
+                vector[vault::role_withdraw()],
+                vector[acl::machine(BOT)],
+                scenario.ctx(),
+            );
+            ts::return_shared(officers_ou);
+            ts::return_shared(v);
+        };
+
+        ts::next_tx(&mut scenario, BOT);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let any_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        let _out = vault::withdraw_receipt(&mut v, &any_ou, ASSET, 1, scenario.ctx());
 
         abort
     }

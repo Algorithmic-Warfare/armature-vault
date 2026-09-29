@@ -143,7 +143,7 @@ module armature_vault::keyspace {
     //   Emitted by: create_keyspace, create_keyspace_for_ou
     //   Fields:
     //     id                — Keyspace object ID (primary key)
-    //     creator           — Principal who created it (Player or Ou)
+    //     creator           — Principal who created it (Player or Ou; never Machine)
     //     name              — human-readable label
     //     registrant_ou_id — Option<ID>:
     //                           None → personal keyspace (create_keyspace)
