@@ -41,6 +41,17 @@
 ///     batch (`EEditorWouldLockSelf`). Together they prevent empty-Edit bricks,
 ///     decay into dead keys, and grant-bogus-then-revoke-self capture paths.
 ///
+///     The recoverable-editor rule guarantees *an* ou always remains in
+///     `Edit`; the anchor rule pins *which* ou. Only a caller who satisfies
+///     `Edit` through a recoverable principal (today, an ou board member acting
+///     as that ou) may add an ou to `Edit` (`grant_edit_ou`) or revoke one from
+///     it (`EAnchorChangeNeedsRecoverableEditor`). A bare-key editor therefore
+///     administers everything else — `Deposit`/`Withdraw` and other bare-key
+///     editors — but cannot substitute the recovery anchor, so the governed
+///     board can always revoke a leaked key. A leaked bare key can still drain
+///     the vault via a self-granted `Withdraw` before it is revoked; anchor
+///     pinning bounds the damage to the assets, not to control of the vault.
+///
 /// Why the OU indirection (and not a flat address list): it makes board-membership
 /// changes and DAO *migration* work without re-listing addresses. A migrated DAO
 /// gets a new object id; the guaranteed migration path is — create the new DAO,
@@ -117,6 +128,12 @@ module armature_vault::dao_receipt_vault {
     #[error(code = 14)]
     const ENoRecoverableEditor: vector<u8> =
         b"Edit must retain at least one recoverable principal (an Ou) as the vault's recovery anchor";
+    #[error(code = 15)]
+    const ENoOpRevoke: vector<u8> =
+        b"Revocation changed nothing — no named principal was present on the role given for it";
+    #[error(code = 16)]
+    const EAnchorChangeNeedsRecoverableEditor: vector<u8> =
+        b"Only an editor acting through a recoverable principal (an Ou) may add or remove an Ou on Edit";
 
     // === Structs ===
 
@@ -257,6 +274,23 @@ module armature_vault::dao_receipt_vault {
         false
     }
 
+    /// True if `sender` satisfies `Edit` through a recoverable principal — i.e.
+    /// acts with the authority of a governed board, not a bare key. Gates every
+    /// change to the recovery-anchor set (ou principals on `Edit`).
+    fun satisfies_edit_via_recoverable(vault: &DaoReceiptVault, dao: &DAO, sender: address): bool {
+        let edit_role = Role::Edit;
+        if (!vault.acl.contains(&edit_role)) { return false };
+        let editors = vault.acl.get(&edit_role);
+        let n = editors.length();
+        let mut i = 0;
+        while (i < n) {
+            let p = &editors[i];
+            if (acl::is_recoverable(p) && acl::satisfies(p, dao, sender)) { return true };
+            i = i + 1;
+        };
+        false
+    }
+
     /// Aborts unless `edit_principals` contains a recoverable principal. Used by
     /// the init paths, which build the ACL before a vault value exists.
     fun assert_seeded_recoverable_editor(edit_principals: &vector<Principal>) {
@@ -301,13 +335,24 @@ module armature_vault::dao_receipt_vault {
     /// `collection_id: ID` that didn't match the SSU and permanently misconfigure
     /// the vault.
     ///
-    /// M1 (#4): `owner_cap` is the `OwnerCap<StorageUnit>` for `storage_unit`.
-    /// `world::access::is_authorized(owner_cap, ssu_id)` verifies on-chain that the
-    /// caller has the SSU's authority surface, closing the SSU-squatting hole
-    /// where any DAO board member could register a vault against any
-    /// `&StorageUnit` they could obtain a reference to. The composition F1+M1
-    /// ensures both halves of the binding (Collection<->SSU and caller<->SSU)
-    /// are verified by witness, not trusted from input.
+    /// M1 (#4): `owner_cap` is the `OwnerCap<StorageUnit>` for `storage_unit`;
+    /// `world::access::is_authorized(owner_cap, ssu_id)` verifies the caller holds
+    /// that SSU's authority surface. Together with F1 this makes both halves of the
+    /// binding (Collection<->SSU and caller<->SSU) witnessed rather than trusted
+    /// from input.
+    ///
+    /// Read the cap requirement as a *stricter variant*, not as a security boundary
+    /// for the registry as a whole. Registering a vault against an SSU you do not
+    /// own is intended and supported — that is `initialize_dao_vault_v2`, and any
+    /// board member may use it. The model the registry actually guarantees is:
+    ///
+    ///   a board member of DAO X may register a vault at (SSU, X) for any SSU
+    ///   with a real `VaultConfig`, provided (SSU, X) is not already taken.
+    ///
+    /// Nothing in that model requires the SSU owner's consent, and consumers must
+    /// not infer it. Use this cap-gated entry point when you specifically want the
+    /// registration to prove SSU authority — e.g. the SSU owner registering their
+    /// own operational vault — and `_v2` otherwise.
     ///
     /// Trust assumption (not verified on-chain): the caller — a governance member
     /// of `registrant_dao` who possesses `OwnerCap<StorageUnit>` — is acting on
@@ -401,6 +446,27 @@ module armature_vault::dao_receipt_vault {
     /// require an `OwnerCap<StorageUnit>`. Any board member of `registrant_dao`
     /// may call this — the SSU-owner gate is intentionally absent. Prefer this
     /// when the SSU owner and the DAO board member are different accounts.
+    ///
+    /// This is the primary entry point, and the permissiveness is deliberate:
+    /// `StorageUnit` and `VaultConfig` are shared objects and `armature::dao::create`
+    /// is permissionless, so any board member of any DAO may register a vault
+    /// against any SSU that has a real `VaultConfig`, as long as that (SSU, DAO)
+    /// pair is not already taken (`EVaultAlreadyExists`). Vaults are per-DAO, so
+    /// several DAOs can hold independent vaults on one SSU — that is what makes
+    /// tier-specific vaults (member tier, officer tier) expressible.
+    ///
+    /// What the registry key does and does not tell a consumer. The DAO half is
+    /// authenticated: every write path — both initializers and `update_registry_key`
+    /// — asserts board membership in the DAO being keyed, and `&DAO` cannot be
+    /// forged. The SSU half is not a claim about the SSU; it is only which SSU's
+    /// collection the vault accepts.
+    ///
+    /// So: resolve a vault by `lookup(ssu, my_dao)`, never by SSU alone. Scanning
+    /// `VaultInitializedEvent` by `storage_unit_id` will surface vaults registered
+    /// by strangers, which is expected behaviour and not an attack — but a UI that
+    /// presents such a vault as "the vault for this SSU" would be misleading its
+    /// user. Note also that being keyed under DAO X does not mean X controls the
+    /// vault: `edit_principals` is independent of `registrant_dao` by design.
     public fun initialize_dao_vault_v2(
         registry: &mut DaoReceiptVaultRegistry,
         storage_unit: &StorageUnit,
@@ -595,9 +661,13 @@ module armature_vault::dao_receipt_vault {
     }
 
     /// H1: grant the Edit role to an OU, validated by a live `&DAO` witness. This
-    /// is the only path that can add an Edit principal — it forces every Edit grant
-    /// to reference a real DAO with at least one governance member, closing the
-    /// brick-by-unsatisfiable-principal attack and the bare-Player Edit backdoor.
+    /// is the only path that can add an ou Edit principal — it forces every such
+    /// grant to reference a real DAO with at least one governance member, closing
+    /// the brick-by-unsatisfiable-principal attack.
+    ///
+    /// AV-12: the caller must satisfy `Edit` through a recoverable principal
+    /// (`EAnchorChangeNeedsRecoverableEditor`). A bare-key editor adding an ou it
+    /// controls is the first half of an anchor substitution.
     public fun grant_edit_ou(
         vault: &mut DaoReceiptVault,
         editor_dao: &DAO,
@@ -606,6 +676,10 @@ module armature_vault::dao_receipt_vault {
     ) {
         let sender = ctx.sender();
         assert_role(vault, Role::Edit, editor_dao, sender);
+        assert!(
+            satisfies_edit_via_recoverable(vault, editor_dao, sender),
+            EAnchorChangeNeedsRecoverableEditor,
+        );
 
         let vault_id = object::id(vault);
         let principal = acl::ou(target_dao.id());
@@ -624,6 +698,20 @@ module armature_vault::dao_receipt_vault {
     /// using `editor_dao`. Each (role, principal) pair is removed if present.
     /// Aborts (`ELastEditor`) if a revocation would leave `Edit` with no principals,
     /// or (`ENoRecoverableEditor`) if it would leave `Edit` holding only bare keys.
+    ///
+    /// A batch that removes *nothing* aborts `ENoOpRevoke`. Individual pairs naming
+    /// an absent principal are still tolerated — partial batches succeed — but a
+    /// call in which no pair changed state is reported rather than silently
+    /// accepted, so an operator cannot come away believing access was cut when it
+    /// was not. The usual way to land here is the kind mismatch: `player(A)` and
+    /// `machine(A)` are distinct `Principal` values for the same address (equality
+    /// includes `kind`) even though `satisfies` treats them identically, so
+    /// revoking the wrong kind removes nothing.
+    ///
+    /// AV-12: any pair naming an ou on `Edit` requires the caller to satisfy
+    /// `Edit` through a recoverable principal, judged on the pre-revoke ACL
+    /// (`EAnchorChangeNeedsRecoverableEditor`). A bare-key editor cannot remove
+    /// the recovery anchor.
     public fun revoke(
         vault: &mut DaoReceiptVault,
         editor_dao: &DAO,
@@ -638,19 +726,35 @@ module armature_vault::dao_receipt_vault {
 
         let vault_id = object::id(vault);
         let n = roles.length();
+        // AV-12: evaluated before any removal, so an ou editor revoking its own
+        // anchor (e.g. the old board in a migration) is judged on who it was.
+        let anchor_authority = satisfies_edit_via_recoverable(vault, editor_dao, sender);
 
         // L1: track which (role, principal) pairs actually changed state. Defer all
         // event emission until after the brick-guards (F2) and only emit for real
         // changes (L1).
         let mut changed_mask: vector<bool> = vector[];
+        let mut any_changed = false;
         let mut i = 0;
         while (i < n) {
             let role = roles[i];
             let principal = principals[i];
+            assert!(
+                anchor_authority || !(role == Role::Edit && acl::is_recoverable(&principal)),
+                EAnchorChangeNeedsRecoverableEditor,
+            );
             let changed = remove_principal(vault, role, principal);
+            if (changed) { any_changed = true };
             changed_mask.push_back(changed);
             i = i + 1;
         };
+
+        // AV-3: a revoke that removed nothing used to return success with no event
+        // and no abort, so a mistyped or wrong-kind principal looked exactly like a
+        // successful revocation. Partial batches are still permitted; only a batch
+        // that moved no state at all is rejected. An empty batch lands here too,
+        // which is correct — it also changes nothing.
+        assert!(any_changed, ENoOpRevoke);
 
         // Brick-guard 1: Edit list must remain non-empty.
         let edit_role = Role::Edit;
@@ -705,6 +809,14 @@ module armature_vault::dao_receipt_vault {
     ) {
         let sender = ctx.sender();
         assert_role(vault, Role::Edit, editor_dao, sender);
+        // The caller must stand on *both* sides of the move. `initialize_dao_vault`
+        // asserts board membership in the registrant DAO, which is what makes the
+        // key `(ssu, dao)` mean "a member of `dao` put this vault here". Without the
+        // same assertion on the destination, any Edit holder could re-key their own
+        // vault onto an unclaimed `(ssu, victim_dao)` slot — `lookup` would then
+        // resolve the victim's canonical slot to an attacker-controlled vault, and
+        // the victim could never register their own (EVaultAlreadyExists).
+        assert!(new_registrant_dao.is_governance_member(sender), ENotAuthorized);
 
         let old_key = VaultKey {
             storage_unit_id: vault.storage_unit_id,
