@@ -26,10 +26,5 @@ multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir =
 warehouse_receipts = { git = "https://github.com/loash-industries/warehouse-receipts.git", subdir = "packages/contracts", rev = "212be7c5ee1ee8bca55305e86e1ae549df78c279", override = true }
 
 [environments]
-testnet_wip = "4c78adac"
 testnet_stillness = "4c78adac"
 
-[dep-replacements.testnet_wip]
-multicoin = { use-environment = "testnet_stillness", published-at = "0xdbb778cba30e7deccf61169fbfbcd10a867654e1e2822facd789a99bd2c4e2ba", original-id = "0xdbb778cba30e7deccf61169fbfbcd10a867654e1e2822facd789a99bd2c4e2ba" }
-warehouse_receipts = { use-environment = "testnet_stillness", published-at = "0x134dfa96ad8bc50d4a2055cd78c91e264feb2fe79facf2d030f8bb466a80bb68", original-id = "0x134dfa96ad8bc50d4a2055cd78c91e264feb2fe79facf2d030f8bb466a80bb68" }
-world  = { use-environment = "testnet_stillness", published-at = "0x7be18d6294e533bedd9a5d70a96ce8d9d4b87a7c74188ba65d3fe966bbed9d92", original-id = "0x7be18d6294e533bedd9a5d70a96ce8d9d4b87a7c74188ba65d3fe966bbed9d92" }

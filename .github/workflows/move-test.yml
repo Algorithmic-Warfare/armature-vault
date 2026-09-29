@@ -73,13 +73,8 @@ jobs:
         run: sui --version
 
       # --build-env note: the package's Move.toml declares `testnet_stillness`
-      # (publish target, blocked on the armature_framework declaring it) and
-      # `testnet_wip` (build/test env declared by the framework). The latter
-      # doesn't resolve in practice because the multicoin dep doesn't declare
-      # `testnet_wip` — its available envs are [testnet, mainnet,
-      # testnet_stillness, testnet_utopia]. `testnet` is the lowest-common-
-      # denominator env that resolves all transitive deps. Revisit when the
-      # framework declares testnet_stillness so we can switch CI to that.
+      # (publish target). CI builds under `testnet`, the lowest-common-
+      # denominator env that resolves all transitive deps.
       #
       # `sui move build` is run explicitly before `sui move test` because the
       # `test` subcommand does NOT regenerate Move.lock when it's missing

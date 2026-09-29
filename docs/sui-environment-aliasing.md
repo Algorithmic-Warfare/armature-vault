@@ -2,7 +2,7 @@
 
 ## Problem
 
-When your package builds under `testnet_wip` but a dependency only declares `testnet` in its `[environments]` table, the resolver cannot automatically find a matching environment entry. You need a way to tell the resolver which of the dependency's environments to use.
+When your package builds under `testnet_stillness` but a dependency only declares `testnet` in its `[environments]` table, the resolver cannot automatically find a matching environment entry. You need a way to tell the resolver which of the dependency's environments to use.
 
 ## What the Sui CLI offers
 
@@ -28,17 +28,17 @@ some_dep = {
   rev    = "<commit>"
 }
 
-[dep-replacements.testnet_wip]
-some_dep = { use-environment = "testnet_stillness" }
+[dep-replacements.testnet_stillness]
+some_dep = { use-environment = "testnet" }
 ```
 
-With this declaration, running `sui move build -e testnet_wip` will resolve `some_dep` using the `testnet` entry from its `[environments]` table. [[Manifest reference](https://docs.sui.io/references/package-managers/manifest-reference)]
+With this declaration, running `sui move build -e testnet_stillness` will resolve `some_dep` using the `testnet` entry from its `[environments]` table. [[Manifest reference](https://docs.sui.io/references/package-managers/manifest-reference)]
 
 > **Important:** The `git` fields are **not merged** between `[dependencies]` and `[dep-replacements]`. If you need to change the git source in the replacement, you must re-specify the full `git`, `subdir`, and `rev` fields — they are not copied over from the `[dependencies]` entry.
 
 ### Example: this repo
 
-`armature_vault` builds under `testnet_wip`. If a dependency (e.g. `warehouse_receipts`) only declares `testnet`, the fix would be:
+`armature_vault` builds under `testnet_stillness`. If a dependency (e.g. `warehouse_receipts`) only declares `testnet`, the fix would be:
 
 ```toml
 [dependencies]
@@ -48,12 +48,12 @@ warehouse_receipts = {
   rev    = "8a2f80e857d516187c99b28efa935ff7ce42af03"
 }
 
-[dep-replacements.testnet_wip]
-warehouse_receipts = { use-environment = "testnet_stillness" }
+[dep-replacements.testnet_stillness]
+warehouse_receipts = { use-environment = "testnet" }
 ```
 
 ## Limitations
 
 - The `use-environment` override is **per dependency**, not global. Each dep that lacks your build environment needs its own entry in `[dep-replacements.<env>]`.
 - The named environment must actually exist in **that dep's** `Move.toml`. You cannot invent a name — you can only redirect to one the dep already declares.
-- There is no CLI flag or config option to declare a global fallback (e.g. "if `testnet_wip` is missing, try `testnet`").
+- There is no CLI flag or config option to declare a global fallback (e.g. "if `testnet_stillness` is missing, try `testnet`").
