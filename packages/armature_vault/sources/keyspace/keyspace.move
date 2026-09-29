@@ -747,6 +747,12 @@ module armature_vault::keyspace {
         }
     }
 
+    /// `seal_approve` is a private `entry fun`, so tests reach it through this wrapper.
+    #[test_only]
+    public fun test_seal_approve(id: vector<u8>, keyspace: &Keyspace, org: &OU, ctx: &TxContext) {
+        seal_approve(id, keyspace, org, ctx)
+    }
+
     #[test_only]
     public fun test_destroy_entry(entry: EncryptedEntry) {
         let EncryptedEntry {
