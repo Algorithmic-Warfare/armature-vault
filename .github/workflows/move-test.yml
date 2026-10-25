@@ -23,6 +23,28 @@ env:
   WAREHOUSE_RECEIPTS_REV: "212be7c5ee1ee8bca55305e86e1ae549df78c279"
 
 jobs:
+  # The move-test matrix is listed by hand so each package's pins and allowed
+  # deps stay explicit. This job fails when a package under packages/ has no
+  # matrix entry, or an entry names a package that no longer exists.
+  matrix-check:
+    name: every Move package is in the matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare packages/**/Move.toml with the matrix
+        run: |
+          set -euo pipefail
+          listed=$(grep -E '^ +- path: ' .github/workflows/move-test.yml | awk '{print $3}' | sort -u)
+          found=$(find packages -name Move.toml -not -path '*/build/*' \
+            | sed -e 's|^packages/||' -e 's|/Move.toml$||' | sort -u)
+          missing=$(comm -13 <(echo "$listed") <(echo "$found"))
+          stale=$(comm -23 <(echo "$listed") <(echo "$found"))
+          for p in $missing; do echo "::error::packages/$p has no move-test matrix entry"; done
+          for p in $stale; do echo "::error::matrix entry $p has no packages/$p/Move.toml"; done
+          [ -z "$missing$stale" ]
+          echo "matrix covers: $(echo $found)"
+
   move-test:
     name: sui move test (${{ matrix.path }})
     runs-on: ubuntu-latest
