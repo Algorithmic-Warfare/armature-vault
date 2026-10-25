@@ -369,10 +369,13 @@ def main():
 
         summary, files = {}, {}
         for pkg in args.packages:
-            test_only = {pathlib.Path(rel).stem: m[2] for rel, m in maps.items()}
+            # Module names are unique only within a package (armature_vault and
+            # roles both have `acl`), so key by module within this package alone.
+            own = sorted(r for r in maps if r.startswith(f"packages/{pkg}/"))
+            test_only = {pathlib.Path(rel).stem: maps[rel][2] for rel in own}
             bytecode = parse_bytecode_csv(csvs[pkg], test_only)
             rows = {}
-            for rel in sorted(r for r in maps if r.startswith(f"packages/{pkg}/")):
+            for rel in own:
                 src, executable, fn_test_only, skipped = maps[rel]
                 rec = restrict(lcov[pkg].get(src, new_record()), executable, fn_test_only, skipped)
                 fns = rec["fn"]
