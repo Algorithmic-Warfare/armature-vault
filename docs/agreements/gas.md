@@ -1,6 +1,6 @@
 # Delivery agreements: gas and sponsorship
 
-A sponsor pays about **0.0087 SUI net per agreement** that runs to delivery, and about 0.0041 SUI for one cancelled before anyone accepted. The claim gate adds almost nothing net. Storage is nearly all of it: computation is at the 1,000-unit minimum for every user transaction.
+A sponsor pays about **0.0087 SUI net per agreement** that runs to delivery, about 0.0041 SUI for one cancelled before anyone accepted, and about 0.0056 SUI for one that lapses and the config admin closes. The claim gate adds almost nothing net. Storage is nearly all of it: computation is at the 1,000-unit minimum for every user transaction.
 
 Measured with [`scripts/gas_harness.py`](../../scripts/gas_harness.py) on 2026-10-24: Sui 1.73.1 localnet, reference gas price 1,000 MIST, payments in SUI, protocol fees on (0.01 SUI posting fee, 250 bps delivery fee). Rerun it after any contract change.
 
@@ -10,7 +10,7 @@ Measured with [`scripts/gas_harness.py`](../../scripts/gas_harness.py) on 2026-1
 - **Rebate** = the storage refund for objects a transaction deletes or shrinks. It goes to the gas payer of *that* transaction.
 - **Net** = outlay − rebate.
 
-The agreement object holds most of the storage. `post` pays for it, and the transaction that closes the agreement (`deliver`, `default`, `forfeit` or `cancel`) gets most of it back. If TriEx sponsors both ends, the per-agreement net below is its cost. If a user closes an agreement with their own gas, the user gets that rebate instead and TriEx's cost is the post and accept outlay.
+The agreement object holds most of the storage. `post` pays for it, and the transaction that closes the agreement (`deliver`, `default`, `forfeit`, `cancel` or `close_lapsed`) gets most of it back. If TriEx sponsors both ends, the per-agreement net below is its cost. If a user closes an agreement with their own gas, the user gets that rebate instead and TriEx's cost is the post and accept outlay.
 
 What a sponsor keeps paying for:
 - the coins sent to the hauler, beneficiary and treasury;
@@ -24,6 +24,7 @@ What a sponsor keeps paying for:
 | post, accept, deliver | 0.024265 SUI | 0.008675 SUI |
 | post, accept, default (or forfeit) | 0.021597 SUI | 0.007670 SUI |
 | post, cancel | 0.014092 SUI | 0.004077 SUI |
+| post, lapse, close_lapsed (admin) | 0.015391 SUI | 0.005640 SUI |
 | claim gate (1 player or 1 OU): post_for, accept, deliver | 0.026043 SUI | 0.008693 SUI |
 | claim gate via draft + require_to_claim + publish (2 principals) | 0.026545 SUI | 0.008698 SUI |
 | claim gate with 32 principals: post_for, accept, deliver | 0.041608 SUI | 0.008849 SUI |
@@ -42,9 +43,10 @@ A big gate raises the outlay, because the agreement object holds the principal l
 | `deliver` | anyone | 0.006632 | −0.000494 (open) to −0.009079 (32-principal gate) |
 | `default` / `forfeit` | anyone / hauler | 0.003964 | −0.001498 |
 | `cancel` | lister | 0.004656 | −0.002718 to −0.003598 |
+| `close_lapsed` | admin | 0.005955 | −0.001155 |
 | config admin (`approve_currency`, fee setters) | admin | 0.004846–0.006046 | 0.000420–0.001675 |
 
-All amounts in SUI. The closing transactions are negative because their rebate is larger than their outlay. Their exact rebate depends on the agreement's size, which grows with its accept requirements.
+All amounts in SUI. The closing transactions are negative because their rebate is larger than their outlay. Their exact rebate depends on the agreement's size, which grows with its accept requirements. `close_lapsed` gets back less than `cancel` because the lister's `ListerCap` survives it.
 
 Publishing the stack once costs about 0.79 SUI, mostly armature (0.58 SUI) if it is not already on chain.
 

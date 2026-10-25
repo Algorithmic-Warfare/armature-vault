@@ -16,6 +16,7 @@ A delivery agreement is a forward swap of items between two multicoin balances, 
 4. **`default`**: after the deadline, anyone can send the reward and collateral to the beneficiary. The agreement is deleted.
    - **`forfeit`**: the hauler can trigger the same payout before the deadline, for example after deciding not to do the haul. Only the hauler can call it. `default` stays open to anyone, so the funds never depend on a hauler who has walked away.
 5. **`cancel`**: while the agreement is still open, the `ListerCap` holder gets the cargo `Balance` and the reward `Coin<T>` back. The agreement is deleted.
+6. **`close_lapsed`**: once `accept_by_ms` has passed with nobody accepting, the config `AdminCap` holder can delete the agreement. The cargo and reward go to the lister, the address that signed `draft`, never to the admin. This covers listings whose `ListerCap` is lost or held by a wrapper that can't cancel. It aborts with `ENotLapsed` before `accept_by_ms` and `ENotOpen` after an accept.
 
 Payouts are coins of `T`. A zero amount isn't sent, so nobody receives an empty coin.
 
@@ -27,9 +28,9 @@ Approved currencies and protocol fees, set in one shared `Config` created at pub
 
 - **Approved currencies**: the coin types an agreement may be paid in. `draft<T, F>` aborts with `ECurrencyNotApproved` unless `T` is approved. Revoking a currency stops new agreements in it; agreements already drafted in it run to the end unchanged. Check with `is_approved<T>()` or `currencies()`.
 - **Posting fee**: a flat amount in one configured coin type `F` (`post_fee: Option<PostFee { currency, amount }>`) that the lister pays when drafting. `draft` and `post` take `config: &Config, post_fee: Coin<F>` after `beneficiary`. The coin must match the fee exactly (`EWrongPostFeeCurrency`, `EWrongPostFeeAmount`), or be empty, of any type, when there is none (`EUnexpectedFee`). It goes to the treasury at once and is not refunded on cancel.
-- **Delivery fee**: `floor(reward * delivery_fee_bps / 10,000)`, taken from the reward at `deliver` and sent to the treasury, in `T`. The hauler gets the rest. `default`, `forfeit` and `cancel` take no fee.
+- **Delivery fee**: `floor(reward * delivery_fee_bps / 10,000)`, taken from the reward at `deliver` and sent to the treasury, in `T`. The hauler gets the rest. `default`, `forfeit`, `cancel` and `close_lapsed` take no fee.
 - **Fixed per agreement.** Each agreement copies the delivery rate and treasury when drafted, so config changes never alter existing agreements, open or accepted. Read them with `delivery_fee_bps()` and `treasury()` on the agreement, or from `AgreementPosted`.
-- **`AdminCap`** changes the config with `approve_currency<T>` (`ECurrencyAlreadyApproved` if it already is), `revoke_currency<T>` (`ECurrencyNotApproved` if it isn't), `set_post_fee<F>` (`EInvalidPostFee` for 0), `clear_post_fee`, `set_delivery_fee_bps` (`EInvalidBps` above 10,000) and `set_treasury`. Each emits `ConfigUpdated` with the whole config, including the currency list. The publisher receives the cap; it has `store`, so a DAO can hold it.
+- **`AdminCap`** changes the config with `approve_currency<T>` (`ECurrencyAlreadyApproved` if it already is), `revoke_currency<T>` (`ECurrencyNotApproved` if it isn't), `set_post_fee<F>` (`EInvalidPostFee` for 0), `clear_post_fee`, `set_delivery_fee_bps` (`EInvalidBps` above 10,000) and `set_treasury`. Each emits `ConfigUpdated` with the whole config, including the currency list. The publisher receives the cap; it has `store`, so a DAO can hold it. The cap also closes lapsed agreements with `delivery::close_lapsed`.
 
 ## Extensions
 
@@ -64,7 +65,7 @@ let cargo = agreement.finish_accept(req, collateral, &clock);
 ### Observer: an unforgeable track record
 
 - `bind_observer<T, O>(draft, Permit<O>, instance, fee)` can only be called by `O`'s module. That module collects its fee in the same call and declares it as `fee`. This package never holds extension fees.
-- Every terminal transition (`deliver`, `default`, `forfeit`, `cancel`) sends an `OutcomeRecord` object to the `instance` object's address. The record holds the outcome, parties, hauler identity and the rule that attested it, the observer binding with its declared fee, the cargo and want specs, the `currency` with the `reward` and `collateral` amounts, and timestamps. The reward is the escrowed reward, before any delivery fee; the collateral is `none` if the agreement was cancelled before anyone accepted.
+- Every terminal transition (`deliver`, `default`, `forfeit`, `cancel`, `close_lapsed`) sends an `OutcomeRecord` object to the `instance` object's address. The record holds the outcome, parties, hauler identity and the rule that attested it, the observer binding with its declared fee, the cargo and want specs, the `currency` with the `reward` and `collateral` amounts, and timestamps. The reward is the escrowed reward, before any delivery fee; the collateral is `none` if the agreement was cancelled or lapsed before anyone accepted.
 - The observer collects records whenever it likes with `receive_outcome<O>(Permit<O>, &mut UID, Receiving<OutcomeRecord>)`. That aborts for records bound to a different observer type, so another extension type can't fill a real observer's inbox with records it would count.
 - Closing an agreement never runs observer code, so a buggy or hostile observer can't freeze funds. Nobody can suppress a record either: a hauler who forfeits still generates their failure record.
 - Each record is a separate object, so there is no contention on one shared object.
@@ -82,14 +83,15 @@ let cargo = agreement.finish_accept(req, collateral, &clock);
 | `AgreementDelivered` | `agreement_id`, `lister`, `hauler`, `hauler_identity`, `beneficiary`, `delivered`, `currency`, `reward`, `collateral`, `delivery_fee`, `treasury` | `deliver` |
 | `AgreementDefaulted` | `agreement_id`, `lister`, `hauler`, `hauler_identity`, `beneficiary`, `currency`, `reward`, `collateral`, `forfeited` | `default` (`forfeited = false`), `forfeit` (`forfeited = true`) |
 | `AgreementCancelled` | `agreement_id`, `cancelled_by`, `cargo`, `currency`, `reward` | `cancel` |
+| `AgreementLapsed` | `agreement_id`, `lister`, `closed_by`, `cargo`, `currency`, `reward` | `close_lapsed` |
 | `config::ConfigUpdated` | `config_id`, `currencies`, `post_fee`, `delivery_fee_bps`, `treasury` | `approve_currency`, `revoke_currency`, `set_post_fee`, `clear_post_fee`, `set_delivery_fee_bps`, `set_treasury` |
 
-- **Final events are self-contained.** `Delivered`, `Defaulted` and `Cancelled` delete the agreement object, so each one records who received what. A deleted agreement can't be read back by ID afterwards, so index from the package's publish checkpoint.
+- **Final events are self-contained.** `Delivered`, `Defaulted`, `Cancelled` and `Lapsed` delete the agreement object, so each one records who received what. A deleted agreement can't be read back by ID afterwards, so index from the package's publish checkpoint.
 - **`AgreementDelivered.reward` is what the hauler received**, after the fee. It plus `delivery_fee` is the escrowed reward.
 - **`AgreementPosted` carries every requirement with its config**, in the order an accepting transaction must satisfy them, so a client can build the transaction without reading the object.
 - **`lister` is the sender of `draft`.** It can differ from `beneficiary`, for example when a DAO lists for its treasury.
 - **Failure rates are indexable.** `AgreementDefaulted` with `hauler` or `hauler_identity` is a failure; `forfeited` tells a hauler who gave up from one who disappeared.
-- **Two states have no event.** An open agreement past `accept_by_ms` is *lapsed* until the cap holder cancels it. An accepted agreement past `deadline_ms` is *overdue* until someone calls `default`. Derive both from the latest checkpoint's timestamp.
+- **Two states have no event.** An open agreement past `accept_by_ms` is *lapsed* until the cap holder cancels it or the config admin closes it with `close_lapsed` (which emits `AgreementLapsed`). An accepted agreement past `deadline_ms` is *overdue* until someone calls `default`. Derive both from the latest checkpoint's timestamp.
 
 ## Hauling with warehouse receipts
 

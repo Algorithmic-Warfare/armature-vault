@@ -17,7 +17,9 @@
 ///
 /// Only the `AdminCap` holder can change the config. The cap has `store`, so a
 /// DAO can hold it. There is no public constructor, so every `&Config` an
-/// agreement is drafted against is the one created at publish.
+/// agreement is drafted against is the one created at publish. The cap also
+/// closes lapsed agreements (`delivery::close_lapsed`), whose escrow can only go
+/// back to their lister.
 module delivery_agreements::config;
 
 use agreements::payout;

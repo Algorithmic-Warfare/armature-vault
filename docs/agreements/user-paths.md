@@ -15,7 +15,7 @@ Code blocks show the commands of one programmable transaction block (PTB), writt
 | **Beneficiary** | Receives the delivery, or the reward and collateral on default. Often the lister, but it can be a treasury. |
 | **Anyone** | Can deliver on a hauler's behalf, trigger a default, or collect outcome records. |
 | **Extension author** | Writes accept rules or observers. |
-| **Config admin** | Holds the `config::AdminCap`, approves and revokes currencies, and sets the posting fee, delivery fee rate and treasury for new agreements. |
+| **Config admin** | Holds the `config::AdminCap`, approves and revokes currencies, and sets the posting fee, delivery fee rate and treasury for new agreements. Can also close lapsed agreements, returning their escrow to the lister. |
 
 ## Which path do I need?
 
@@ -33,6 +33,7 @@ Code blocks show the commands of one programmable transaction block (PTB), writt
 | Build a reputation system | [O1](#o1-collect-outcome-records), [O2](#o2-index-events) |
 | Write my own extension | [E1](#e1-write-an-accept-rule)–[E3](#e3-write-an-observer) |
 | Approve currencies or set protocol fees | [A1](#a1-approve-currencies-and-set-fees) |
+| Close a lapsed listing whose cap is lost | [A2](#a2-close-a-lapsed-agreement) |
 
 ```mermaid
 sequenceDiagram
@@ -147,6 +148,7 @@ let (cargo, reward) = agreement.cancel(cap, &clock, ctx);   // Balance, Coin<T>
 
 - **Result:** the cargo and the reward coin are returned to the cap holder, the agreement is deleted, and `AgreementCancelled` is emitted. A bound observer receives a `Cancelled` record. The posting fee is not refunded.
 - **Fails with:** `ENotOpen` once a hauler has accepted, and `EWrongCap` for another agreement's cap.
+- **If the cap is lost,** the config admin can close the agreement once it lapses, sending the cargo and reward to the address that signed `draft` ([A2](#a2-close-a-lapsed-agreement)).
 
 ---
 
@@ -364,3 +366,15 @@ config::set_treasury(&admin_cap, &mut config, treasury);
 - **Result:** each call emits `ConfigUpdated` with the whole config, including the list of approved currencies. Changes apply to agreements drafted afterwards. Existing agreements, open or accepted, keep their currency, delivery fee rate and treasury, even if their currency is revoked.
 - **Listers pay the new posting fee at once:** a draft built for the old fee aborts, because the fee must match exactly in coin type and amount. A draft in a currency revoked before it executes aborts too.
 - **Fails with:** `config::ECurrencyAlreadyApproved` when approving an approved currency, `config::ECurrencyNotApproved` when revoking one that isn't, `config::EInvalidBps` above 10,000 bps, and `config::EInvalidPostFee` for a posting fee of 0 (use `clear_post_fee`).
+
+### A2. Close a lapsed agreement
+
+**When:** nobody accepted an open agreement before its `accept_by_ms`, and its lister can't cancel it, for example because the `ListerCap` was lost or is held by a wrapper with no way to cancel.
+
+```move
+agreement.close_lapsed(&admin_cap, &clock, ctx);   // the config::AdminCap
+```
+
+- **Result:** the cargo and reward go to the agreement's `lister`, the address that signed `draft`, never to the caller. The agreement is deleted and `AgreementLapsed` is emitted. A bound observer receives a `Lapsed` record. No fee is taken and the posting fee is not refunded. An empty cargo or a zero reward isn't sent.
+- **Refunds follow the signer, not the cap.** If a DAO or other wrapper listed through its own signer and holds the cap, the refund lands at that signer's address. Such a lister should cancel with its cap instead.
+- **Fails with:** `ENotLapsed` before `accept_by_ms`, and `ENotOpen` once a hauler has accepted.

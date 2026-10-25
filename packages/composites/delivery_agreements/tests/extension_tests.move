@@ -3,6 +3,7 @@ module delivery_agreements::extension_tests;
 
 use agreements::request;
 use agreements::spec::{Self, Spec};
+use delivery_agreements::config;
 use delivery_agreements::delivery::{
     AcceptAction,
     Self,
@@ -468,6 +469,37 @@ fun observer_records_default_and_cancel() {
     assert_eq!(ledger.defaulted(), 1);
     assert_eq!(ledger.forfeited(), 0);
     assert_eq!(ledger.fees_credited(), 2 * FEE_QTY);
+    ts::return_shared(ledger);
+    finish(scenario, clock);
+}
+
+#[test]
+fun observer_records_a_lapsed_agreement_the_admin_closed() {
+    let (mut scenario, mut clock) = setup();
+    let ledger_id = create_ledger(&mut scenario);
+    let mut d = new_draft(&mut scenario, &clock);
+    bind_ledger(&mut d, ledger_id, &mut scenario);
+    let (agreement_id, _) = publish(d, &mut scenario);
+
+    clock.set_for_testing(ACCEPT_BY_MS);
+    scenario.next_tx(OTHER);
+    let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
+    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
+    transfer::public_transfer(admin_cap, OTHER);
+
+    scenario.next_tx(OTHER);
+    let mut ledger = scenario.take_shared_by_id<Ledger>(ledger_id);
+    let ticket = ts::most_recent_receiving_ticket<OutcomeRecord>(&ledger_id);
+    let record = ext::take_record(&mut ledger, ticket);
+    assert!(record.record_outcome().outcome_is_lapsed());
+    assert!(!record.record_outcome().outcome_is_cancelled());
+    assert_eq!(record.record_agreement_id(), agreement_id);
+    assert_eq!(record.record_hauler(), option::none());
+    assert_eq!(record.record_collateral(), option::none());
+    assert_eq!(record.record_deadline_ms(), 0);
+    assert_eq!(record.record_closed_at_ms(), ACCEPT_BY_MS);
+    record.delete_outcome();
     ts::return_shared(ledger);
     finish(scenario, clock);
 }

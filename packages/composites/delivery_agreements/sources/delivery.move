@@ -54,13 +54,15 @@
 /// they collect any fee in the same call and declare it here.
 ///
 /// Lifecycle: draft -> published (open) -> accepted -> deleted by `deliver`,
-/// `forfeit` or `default`. An open agreement is deleted by `cancel`.
+/// `forfeit` or `default`. An open agreement is deleted by `cancel`, or, once
+/// `accept_by_ms` passes with nobody accepting, by the config admin's
+/// `close_lapsed`, which sends the cargo and reward back to the lister.
 module delivery_agreements::delivery;
 
 use agreements::request::{Self, Request};
 use agreements::requirement::Requirement;
 use agreements::spec::{Self, Spec};
-use delivery_agreements::config::{Self, Config, PostFee};
+use delivery_agreements::config::{Self, AdminCap, Config, PostFee};
 use multicoin::multicoin::Balance;
 use std::internal::{Self, Permit};
 use std::type_name::{Self, TypeName};
@@ -96,6 +98,8 @@ const EWrongCollateral: vector<u8> = b"Collateral is not exactly the agreed amou
 // Codes 12 to 17, 19 and 20 belonged to arbitration, which has been removed.
 #[error(code = 18)]
 const EWrongObserver: vector<u8> = b"Record is bound to a different observer";
+#[error(code = 21)]
+const ENotLapsed: vector<u8> = b"Accept window has not closed";
 
 // === Constants ===
 
@@ -171,11 +175,12 @@ public struct ListerCap has key, store {
     agreement_id: ID,
 }
 
-/// How an agreement ended.
+/// How an agreement ended. `Lapsed` is the config admin's `close_lapsed`.
 public enum Outcome has store, copy, drop {
     Delivered,
     Defaulted { forfeited: bool },
     Cancelled,
+    Lapsed,
 }
 
 /// Unforgeable record of a terminal transition, sent to the bound observer's
@@ -199,10 +204,11 @@ public struct OutcomeRecord has key {
     currency: TypeName,
     /// The escrowed reward, before any delivery fee.
     reward: u64,
-    /// `none` when the agreement was cancelled before anyone accepted.
+    /// `none` when the agreement was cancelled or lapsed before anyone
+    /// accepted.
     collateral: Option<u64>,
     posted_at_ms: u64,
-    /// 0 when the agreement was cancelled before anyone accepted.
+    /// 0 when the agreement was cancelled or lapsed before anyone accepted.
     deadline_ms: u64,
     closed_at_ms: u64,
 }
@@ -283,6 +289,18 @@ public struct AgreementDefaulted has copy, drop {
 public struct AgreementCancelled has copy, drop {
     agreement_id: ID,
     cancelled_by: address,
+    cargo: Spec,
+    currency: TypeName,
+    reward: u64,
+}
+
+/// Nobody accepted before `accept_by_ms`, and the config admin closed the
+/// agreement: `cargo` and `reward` went back to `lister`. `closed_by` sent the
+/// transaction.
+public struct AgreementLapsed has copy, drop {
+    agreement_id: ID,
+    lister: address,
+    closed_by: address,
     cargo: Spec,
     currency: TypeName,
     reward: u64,
@@ -553,12 +571,7 @@ public fun cancel<T>(
     assert!(agreement_id == object::id(&self), EWrongCap);
     assert!(self.hauler.is_none(), ENotOpen);
     self.record(Outcome::Cancelled, clock, ctx);
-    let DeliveryAgreement { id, mut cargo, reward, collateral, hauler, .. } = self;
-    id.delete();
-    collateral.destroy_zero();
-    hauler.destroy_none();
-    let returned = cargo.extract();
-    cargo.destroy_none();
+    let (returned, reward) = close_open(self);
     event::emit(AgreementCancelled {
         agreement_id,
         cancelled_by: ctx.sender(),
@@ -567,6 +580,36 @@ public fun cancel<T>(
         reward: reward.value(),
     });
     (returned, coin::from_balance(reward, ctx))
+}
+
+/// Delete an open agreement nobody accepted before `accept_by_ms`, sending the
+/// cargo and reward to the lister. Only the config's `AdminCap` holder can call
+/// it, so a listing whose `ListerCap` was lost, or is held by a wrapper with no
+/// way to cancel, still ends. The escrow goes only to the lister, never to the
+/// caller.
+public fun close_lapsed<T>(
+    self: DeliveryAgreement<T>,
+    _: &AdminCap,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    assert!(self.hauler.is_none(), ENotOpen);
+    assert!(clock.timestamp_ms() >= self.accept_by_ms, ENotLapsed);
+    self.record(Outcome::Lapsed, clock, ctx);
+    let (agreement_id, lister) = (object::id(&self), self.lister);
+    let (cargo, reward) = close_open(self);
+    event::emit(AgreementLapsed {
+        agreement_id,
+        lister,
+        closed_by: ctx.sender(),
+        cargo: spec::of(&cargo),
+        currency: type_name::with_original_ids<T>(),
+        reward: reward.value(),
+    });
+    // Like `pay`, send nothing rather than an empty balance.
+    if (cargo.value() == 0) cargo.destroy_zero()
+    else transfer::public_transfer(cargo, lister);
+    pay(reward, lister, ctx);
 }
 
 // === Observing ===
@@ -678,6 +721,10 @@ public fun outcome_is_cancelled(self: &Outcome): bool {
     match (self) { Outcome::Cancelled => true, _ => false }
 }
 
+public fun outcome_is_lapsed(self: &Outcome): bool {
+    match (self) { Outcome::Lapsed => true, _ => false }
+}
+
 public fun record_agreement_id(self: &OutcomeRecord): ID { self.agreement_id }
 
 public fun record_observer(self: &OutcomeRecord): Binding { self.observer }
@@ -780,6 +827,17 @@ fun close<T>(
     (beneficiary, hauler.destroy_some(), reward, collateral)
 }
 
+/// Delete an open agreement, returning its `(cargo, reward)`.
+fun close_open<T>(self: DeliveryAgreement<T>): (Balance, balance::Balance<T>) {
+    let DeliveryAgreement { id, mut cargo, reward, collateral, hauler, .. } = self;
+    id.delete();
+    collateral.destroy_zero();
+    hauler.destroy_none();
+    let returned = cargo.extract();
+    cargo.destroy_none();
+    (returned, reward)
+}
+
 /// Send `funds` to `to` as a coin, or destroy them when empty so nobody is
 /// sent a zero-value coin.
 fun pay<T>(funds: balance::Balance<T>, to: address, ctx: &mut TxContext) {
@@ -840,6 +898,14 @@ public fun cancelled_event_for_testing(
     agreement_id: ID, cancelled_by: address, cargo: Spec, currency: TypeName, reward: u64,
 ): AgreementCancelled {
     AgreementCancelled { agreement_id, cancelled_by, cargo, currency, reward }
+}
+
+#[test_only]
+public fun lapsed_event_for_testing(
+    agreement_id: ID, lister: address, closed_by: address, cargo: Spec, currency: TypeName,
+    reward: u64,
+): AgreementLapsed {
+    AgreementLapsed { agreement_id, lister, closed_by, cargo, currency, reward }
 }
 
 #[test_only]

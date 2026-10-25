@@ -2,6 +2,7 @@
 module delivery_agreements::delivery_tests;
 
 use agreements::spec::{Self, Spec};
+use delivery_agreements::config;
 use delivery_agreements::delivery::{
     Self,
     DeliveryAgreement,
@@ -10,7 +11,8 @@ use delivery_agreements::delivery::{
     AgreementAccepted,
     AgreementDelivered,
     AgreementDefaulted,
-    AgreementCancelled
+    AgreementCancelled,
+    AgreementLapsed
 };
 use delivery_agreements::test_config::{Self, TOKEN};
 use multicoin::multicoin::{Self, Balance};
@@ -24,6 +26,7 @@ const LISTER: address = @0xA;
 const HAULER: address = @0xB;
 const BENEFICIARY: address = @0xC;
 const OTHER: address = @0xD;
+const ADMIN: address = @0xE;
 
 // Item type 7 at the source SSU's collection, delivered at the destination's.
 const ITEM: u64 = 7;
@@ -267,6 +270,60 @@ fun cancel_after_accept_window_lapses() {
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
     transfer::public_transfer(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
+    finish(scenario, clock);
+}
+
+#[test]
+fun close_lapsed_returns_cargo_and_reward_to_lister() {
+    let (mut scenario, mut clock) = setup();
+    let (agreement_id, _) = post(&mut scenario, &clock);
+
+    // LISTER keeps the cap; the admin closes without it and receives nothing.
+    clock.set_for_testing(ACCEPT_BY_MS);
+    scenario.next_tx(ADMIN);
+    let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
+    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
+    assert_eq!(
+        event::events_by_type<AgreementLapsed>(),
+        vector[
+            delivery::lapsed_event_for_testing(
+                agreement_id, LISTER, ADMIN, cargo_spec(), test_config::token(), REWARD_QTY,
+            ),
+        ],
+    );
+    transfer::public_transfer(admin_cap, ADMIN);
+
+    scenario.next_tx(OTHER);
+    assert_eq!(owned(&scenario, LISTER, src(), ITEM), CARGO_QTY);
+    assert_eq!(coins(&scenario, LISTER), REWARD_QTY);
+    assert_eq!(ts::ids_for_address<Balance>(ADMIN).length(), 0);
+    assert_eq!(ts::ids_for_address<Coin<TOKEN>>(ADMIN).length(), 0);
+    finish(scenario, clock);
+}
+
+#[test]
+fun close_lapsed_sends_nothing_for_empty_cargo_and_reward() {
+    let (mut scenario, mut clock) = setup();
+    scenario.next_tx(LISTER);
+    let cargo = mint(src(), ITEM, 0, &mut scenario);
+    let reward = test_config::mint(0, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, BENEFICIARY, &clock,
+        scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+
+    clock.set_for_testing(ACCEPT_BY_MS);
+    scenario.next_tx(ADMIN);
+    let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
+    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
+    transfer::public_transfer(admin_cap, ADMIN);
+
+    scenario.next_tx(OTHER);
+    assert_eq!(ts::ids_for_address<Balance>(LISTER).length(), 0);
+    assert_eq!(ts::ids_for_address<Coin<TOKEN>>(LISTER).length(), 0);
     finish(scenario, clock);
 }
 
@@ -638,5 +695,35 @@ fun cancel_rejects_other_agreements_cap() {
     let (cargo, reward) = first.cancel(second_cap, &clock, scenario.ctx());
     transfer::public_transfer(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
+    finish(scenario, clock);
+}
+
+// === Closing lapsed agreements ===
+
+#[test, expected_failure(abort_code = delivery::ENotLapsed)]
+fun close_lapsed_rejects_before_accept_by() {
+    let (mut scenario, mut clock) = setup();
+    post(&mut scenario, &clock);
+    clock.set_for_testing(ACCEPT_BY_MS - 1);
+    scenario.next_tx(ADMIN);
+    let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
+    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
+    transfer::public_transfer(admin_cap, ADMIN);
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = delivery::ENotOpen)]
+fun close_lapsed_rejects_accepted_agreement() {
+    let (mut scenario, mut clock) = setup();
+    post(&mut scenario, &clock);
+    accept(&mut scenario, &mut clock);
+    // Past the accept window, but a hauler holds the cargo.
+    clock.set_for_testing(ACCEPT_BY_MS);
+    scenario.next_tx(ADMIN);
+    let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
+    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
+    transfer::public_transfer(admin_cap, ADMIN);
     finish(scenario, clock);
 }

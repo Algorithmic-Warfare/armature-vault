@@ -75,6 +75,7 @@ CARGO_QTY = 10
 ACCEPT_WINDOW_MS = 10 * 60 * 1000
 HAUL_MS = 10 * 60 * 1000
 SHORT_HAUL_MS = 1_000         # for default: wait it out on the local chain
+SHORT_ACCEPT_MS = 5_000       # for close_lapsed: long enough for the post to land first
 
 ACTORS = ("admin", "lister", "hauler", "member", "other")
 
@@ -436,12 +437,12 @@ class Harness:
 
     # --- listing ---
 
-    def post_open(self, haul_ms=HAUL_MS, label="post (open)"):
+    def post_open(self, haul_ms=HAUL_MS, label="post (open)", accept_ms=ACCEPT_WINDOW_MS):
         cargo = self.mint(CARGO_QTY, CARGO_ASSET, "lister")
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
         self.spec(ptb, "want")
         ptb.call(self.target("delivery_agreements", "delivery", "post"),
-                 "@" + cargo, "coins.0", "want", COLLATERAL, now_ms() + ACCEPT_WINDOW_MS,
+                 "@" + cargo, "coins.0", "want", COLLATERAL, now_ms() + accept_ms,
                  haul_ms, self.at("lister"), "@" + self.config, "coins.1", CLOCK,
                  types=[SUI, SUI], assign="cap")
         ptb.transfer(["cap"], self.at("lister"))
@@ -495,6 +496,11 @@ class Harness:
                           "@" + agreement, "@" + cap, CLOCK, types=[SUI], assign="out")
                .transfer(["out.0", "out.1"], self.at("lister")))
         return self.measure("cancel", "lister", ptb, "lister")[1]
+
+    def close_lapsed(self, agreement):
+        ptb = Ptb().call(self.target("delivery_agreements", "delivery", "close_lapsed"),
+                         "@" + agreement, "@" + self.admin_cap, CLOCK, types=[SUI])
+        return self.measure("close_lapsed", "admin", ptb, "admin")[1]
 
     # --- hauling ---
 
@@ -566,6 +572,10 @@ class Harness:
 
         ag, cap, post = self.post_open()
         self.life("open: post, cancel", [post, self.cancel(ag, cap)])
+
+        ag, cap, post = self.post_open(accept_ms=SHORT_ACCEPT_MS)
+        self.wait_past(SHORT_ACCEPT_MS)
+        self.life("open: post, lapse, close_lapsed (admin)", [post, self.close_lapsed(ag)])
 
         say("claim gate (agreement_roles)")
         ag, cap, post = self.post_for([("player", self.at("hauler"))],
