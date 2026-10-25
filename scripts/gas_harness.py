@@ -113,8 +113,11 @@ def sui(*args, check=True):
 def sui_json(*args):
     out = sui(*args, "--json")
     text = out.stdout
-    start = min(i for i in (text.find("{"), text.find("[")) if i >= 0)
-    return json.loads(text[start:])
+    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    try:
+        return json.loads(text[min(starts):])
+    except ValueError:  # no JSON at all (empty `starts`) or JSON that doesn't parse
+        fail(f"sui {' '.join(args[:3])} printed no valid JSON:\n{text[-3000:]}\n{out.stderr[-3000:]}")
 
 
 def rpc(method, params=None):
@@ -664,15 +667,18 @@ def write_report(h, publishes, gas_price):
 
 def run(keep=False):
     reset_state()
-    up()
-    addrs = create_actors()
-    pkgs, config, admin_cap, publishes = publish_all()
-    h = Harness(addrs, pkgs, config, admin_cap)
-    h.setup()
-    h.run_all()
-    write_report(h, publishes, int(rpc("suix_getReferenceGasPrice")))
-    if not keep:
-        down()
+    # `fail` exits through SystemExit, so `finally` stops the chain on errors too.
+    try:
+        up()
+        addrs = create_actors()
+        pkgs, config, admin_cap, publishes = publish_all()
+        h = Harness(addrs, pkgs, config, admin_cap)
+        h.setup()
+        h.run_all()
+        write_report(h, publishes, int(rpc("suix_getReferenceGasPrice")))
+    finally:
+        if not keep:
+            down()
 
 
 def reset_state():
