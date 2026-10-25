@@ -27,7 +27,9 @@ Usage (from anywhere):
 
 Everything lives under .gas-harness/ (git-ignored): chain state, an isolated
 HOME with throwaway keys, the generated Move workspace, and results/ with
-gas-report.json and gas-report.md. Needs `sui` on PATH (1.72+).
+gas-report.json and gas-report.md. `run` starts from a fresh chain but keeps
+the isolated HOME's git dependency cache; `reset` deletes that too. Needs `sui`
+on PATH (1.72+).
 """
 
 import argparse
@@ -45,6 +47,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PACKAGES = ROOT / "packages"
 STATE = ROOT / ".gas-harness"
 HOME = STATE / "home"
+GIT_CACHE = HOME / ".move"
 NETWORK = STATE / "network"
 MOVE = STATE / "move"
 RESULTS = STATE / "results"
@@ -71,6 +74,9 @@ COLLATERAL = 500_000_000      # 0.5 SUI
 POST_FEE = 10_000_000         # 0.01 SUI
 DELIVERY_FEE_BPS = 250        # 2.5%
 CARGO_ASSET = 7
+# `draft` rejects a want in the cargo's own collection and asset, so the
+# delivery is another asset of the same local collection.
+WANT_ASSET = 8
 CARGO_QTY = 10
 ACCEPT_WINDOW_MS = 10 * 60 * 1000
 HAUL_MS = 10 * 60 * 1000
@@ -121,17 +127,26 @@ def sui_json(*args):
         fail(f"sui {' '.join(args[:3])} printed no valid JSON:\n{text[-3000:]}\n{out.stderr[-3000:]}")
 
 
-def rpc(method, params=None):
+def rpc_response(method, params=None):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []})
     req = urllib.request.Request(RPC_URL, body.encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=5) as resp:
-        return json.loads(resp.read())["result"]
+        return json.loads(resp.read())
+
+
+def rpc(method, params=None):
+    try:
+        data = rpc_response(method, params)
+    except (OSError, ValueError) as e:  # unreachable node, timeout, or a body that isn't JSON
+        fail(f"rpc {method} failed: {e}")
+    if "result" not in data:
+        fail(f"rpc {method} returned an error: {data.get('error', data)}")
+    return data["result"]
 
 
 def rpc_ready():
     try:
-        rpc("sui_getLatestCheckpointSequenceNumber")
-        return True
+        return "result" in rpc_response("sui_getLatestCheckpointSequenceNumber")
     except Exception:
         return False
 
@@ -178,11 +193,37 @@ def up():
 def down():
     if PID_FILE.exists():
         try:
-            os.killpg(int(PID_FILE.read_text()), signal.SIGTERM)
-        except (OSError, ValueError):
+            stop(int(PID_FILE.read_text()))
+        except ValueError:
             pass
         PID_FILE.unlink()
     say("local chain stopped")
+
+
+def stop(pgid, timeout_s=30):
+    """SIGTERM the chain's process group and wait until it is gone, so a new
+    chain can bind the same ports; SIGKILL it if it outlives `timeout_s`."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except OSError:
+            return
+        time.sleep(0.2)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        return
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except OSError:
+            return
+        time.sleep(0.2)
 
 
 def init_client():
@@ -409,7 +450,7 @@ class Harness:
 
     def spec(self, ptb, assign):
         return ptb.call(self.target("agreements", "spec", "new"), "@" + self.collection,
-                        CARGO_ASSET, CARGO_QTY, assign=assign)
+                        WANT_ASSET, CARGO_QTY, assign=assign)
 
     # --- config admin ---
 
@@ -497,6 +538,10 @@ class Harness:
                .transfer(["out.0", "out.1"], self.at("lister")))
         return self.measure("cancel", "lister", ptb, "lister")[1]
 
+    def delete_cap(self, cap):
+        ptb = Ptb().call(self.target("delivery_agreements", "delivery", "delete_cap"), "@" + cap)
+        return self.measure("delete_cap", "lister", ptb, "lister")[1]
+
     def close_lapsed(self, agreement):
         ptb = Ptb().call(self.target("delivery_agreements", "delivery", "close_lapsed"),
                          "@" + agreement, "@" + self.admin_cap, CLOCK, types=[SUI])
@@ -525,7 +570,7 @@ class Harness:
         return self.measure(label, actor, ptb, "hauler (claim gate)")[1]
 
     def deliver(self, agreement, actor="hauler"):
-        want = self.mint(CARGO_QTY, CARGO_ASSET, actor)
+        want = self.mint(CARGO_QTY, WANT_ASSET, actor)
         ptb = Ptb().call(self.target("delivery_agreements", "delivery", "deliver"),
                          "@" + agreement, "@" + want, CLOCK, types=[SUI])
         return self.measure("deliver", actor, ptb, "anyone")[1]
@@ -559,8 +604,10 @@ class Harness:
 
         say("open path")
         ag, cap, post = self.post_open()
-        self.life("open: post, accept, deliver",
-                  [post, self.accept_open(ag), self.deliver(ag)])
+        acc, dlv = self.accept_open(ag), self.deliver(ag)
+        self.life("open: post, accept, deliver", [post, acc, dlv])
+        self.life("open: post, accept, deliver, delete_cap",
+                  [post, acc, dlv, self.delete_cap(cap)])
 
         ag, cap, post = self.post_open(haul_ms=SHORT_HAUL_MS)
         acc = self.accept_open(ag)
@@ -676,7 +723,7 @@ def write_report(h, publishes, gas_price):
 
 
 def run(keep=False):
-    reset_state()
+    reset_state(keep_cache=True)
     # `fail` exits through SystemExit, so `finally` stops the chain on errors too.
     try:
         up()
@@ -691,9 +738,20 @@ def run(keep=False):
             down()
 
 
-def reset_state():
+def reset_state(keep_cache=False):
+    """Stop the chain and delete its state. With `keep_cache`, keep the git
+    dependency cache so `run` doesn't re-clone the Sui framework and pins."""
     down()
-    shutil.rmtree(STATE, ignore_errors=True)
+    if not keep_cache or not STATE.exists():
+        shutil.rmtree(STATE, ignore_errors=True)
+        return
+    for path in [*STATE.iterdir(), *(HOME.iterdir() if HOME.is_dir() else ())]:
+        if path in (HOME, GIT_CACHE):
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def main():

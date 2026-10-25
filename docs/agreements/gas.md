@@ -1,6 +1,6 @@
 # Delivery agreements: gas and sponsorship
 
-A sponsor pays about **0.0087 SUI net per agreement** that runs to delivery, about 0.0041 SUI for one cancelled before anyone accepted, and about 0.0056 SUI for one that lapses and the config admin closes. The claim gate adds almost nothing net. Storage is nearly all of it: computation is at the 1,000-unit minimum for every user transaction.
+A sponsor pays about **0.0087 SUI net per agreement** that runs to delivery (0.0081 SUI if the lister then deletes the spent `ListerCap`), about 0.0041 SUI for one cancelled before anyone accepted, and about 0.0056 SUI for one that lapses and the config admin closes. The claim gate adds almost nothing net. Storage is nearly all of it: computation is at the 1,000-unit minimum for every user transaction.
 
 Measured with [`scripts/gas_harness.py`](../../scripts/gas_harness.py) on 2026-10-24: Sui 1.73.1 localnet, reference gas price 1,000 MIST, payments in SUI, protocol fees on (0.01 SUI posting fee, 250 bps delivery fee). Rerun it after any contract change.
 
@@ -14,7 +14,7 @@ The agreement object holds most of the storage. `post` pays for it, and the tran
 
 What a sponsor keeps paying for:
 - the coins sent to the hauler, beneficiary and treasury;
-- the `ListerCap` left with the lister after a non-cancel ending;
+- the `ListerCap` left with the lister after a non-cancel ending, until they delete it with `delete_cap`;
 - 1% of every storage charge, which Sui never refunds.
 
 ## Per agreement
@@ -22,6 +22,7 @@ What a sponsor keeps paying for:
 | Life | Outlay | Net |
 | --- | ---: | ---: |
 | post, accept, deliver | 0.024265 SUI | 0.008675 SUI |
+| post, accept, deliver, delete_cap | 0.026253 SUI | 0.008135 SUI |
 | post, accept, default (or forfeit) | 0.021597 SUI | 0.007670 SUI |
 | post, cancel | 0.014092 SUI | 0.004077 SUI |
 | post, lapse, close_lapsed (admin) | 0.015391 SUI | 0.005640 SUI |
@@ -44,9 +45,10 @@ A big gate raises the outlay, because the agreement object holds the principal l
 | `default` / `forfeit` | anyone / hauler | 0.003964 | −0.001498 |
 | `cancel` | lister | 0.004656 | −0.002718 to −0.003598 |
 | `close_lapsed` | admin | 0.005955 | −0.001155 |
+| `delete_cap` | lister | 0.001988 | −0.000540 |
 | config admin (`approve_currency`, fee setters) | admin | 0.004846–0.006046 | 0.000420–0.001675 |
 
-All amounts in SUI. The closing transactions are negative because their rebate is larger than their outlay. Their exact rebate depends on the agreement's size, which grows with its accept requirements. `close_lapsed` gets back less than `cancel` because the lister's `ListerCap` survives it.
+All amounts in SUI. The closing transactions are negative because their rebate is larger than their outlay. Their exact rebate depends on the agreement's size, which grows with its accept requirements. `close_lapsed` gets back less than `cancel` because the lister's `ListerCap` survives it; `delete_cap` returns that part later.
 
 Publishing the stack once costs about 0.79 SUI, mostly armature (0.58 SUI) if it is not already on chain.
 
