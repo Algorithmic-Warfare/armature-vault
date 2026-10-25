@@ -31,11 +31,13 @@ HOME with throwaway keys, the generated Move workspace, and results/ with
 gas-report.json and gas-report.md. Every `sui` call gets that HOME, and
 SUI_CONFIG_DIR and MOVE_HOME inside it, so your own keystore, envs and git
 cache are never touched. `run` starts from a fresh chain but keeps the isolated
-git dependency cache; `reset` deletes that too. Dependency revs are read from
-the packages' Move.toml files. Needs `sui` on PATH (1.72+) and Python 3.11+.
+git dependency cache; `reset` deletes that too. Which packages depend on which,
+and the revs of the git dependencies, are read from the packages' Move.toml
+files. Needs `sui` on PATH (1.72+) and Python 3.11+.
 """
 
 import argparse
+import graphlib
 import json
 import os
 import pathlib
@@ -86,17 +88,14 @@ SHORT_ACCEPT_MS = 5_000       # for close_lapsed: long enough for the post to la
 
 ACTORS = ("admin", "lister", "hauler", "member", "other")
 
-# Generated manifests: each package depends on its siblings by local path, so
-# every type resolves to the packages published on this chain.
-MANIFESTS = {
-    "multicoin": [],
-    "armature": [],
-    "agreements": ["multicoin"],
-    "delivery_agreements": ["agreements", "multicoin"],
-    "roles": ["armature"],
-    "agreement_roles": ["agreements", "roles", "armature"],
-}
-PUBLISH_ORDER = tuple(MANIFESTS)
+# The repo packages to publish, under packages/. Their dependencies, and the
+# revs of the git packages they pin, come from their Move.toml files.
+REPO_PACKAGES = (
+    "primitives/agreements",
+    "primitives/roles",
+    "composites/delivery_agreements",
+    "extensions/agreement_roles",
+)
 
 # Every `sui` call runs with this environment: Sui reads SUI_CONFIG_DIR and
 # MOVE_HOME before HOME, so setting only HOME would leak into a user's own.
@@ -309,42 +308,74 @@ def now_ms():
 
 # === Publishing ===
 
-def pin(package, dep):
-    """The git rev `package`'s Move.toml pins `dep` to."""
-    with open(PACKAGES / package / "Move.toml", "rb") as f:
-        return tomllib.load(f)["dependencies"][dep]["rev"]
+def read_manifests():
+    """The repo packages' dependency graph, read from their Move.toml files:
+    each package to publish mapped to the packages it depends on, each repo
+    package's directory, each git dependency's (url, subdir, rev) pin, and the
+    packages' environments. A git dependency is published from its pinned
+    sources with no dependencies of its own beyond the Sui framework."""
+    graph, dirs, pins, envs = {}, {}, {}, {}
+    for rel in REPO_PACKAGES:
+        with open(PACKAGES / rel / "Move.toml", "rb") as f:
+            manifest = tomllib.load(f)
+        name = manifest["package"]["name"]
+        deps = manifest.get("dependencies", {})
+        graph[name], dirs[name] = list(deps), PACKAGES / rel
+        envs.update(manifest.get("environments", {}))
+        for dep, spec in deps.items():
+            if "git" not in spec:
+                continue
+            pin = (spec["git"], spec.get("subdir", ""), spec["rev"])
+            if pins.setdefault(dep, pin) != pin:
+                fail(f"packages/{rel} pins {dep} at {pin[2]}, another package at {pins[dep][2]}")
+            graph.setdefault(dep, [])
+    for name, deps in graph.items():
+        for dep in deps:
+            if dep not in graph:
+                fail(f"{name} depends on {dep}, which is neither in REPO_PACKAGES nor a git pin")
+    return graph, dirs, pins, envs
 
 
-def cached_sources(repo, rev, subdir):
-    """`repo`'s checkout at `rev` in the isolated git cache. Never the user's
-    own cache, which may hold an older rev of the same repo."""
+def cached_sources(url, rev, subdir):
+    """The checkout of `url` at `rev` in the isolated git cache. Never the
+    user's own cache, which may hold an older rev of the same repo."""
+    repo = url.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
     for path in (GIT_CACHE / "git").glob(f"*{repo}*{rev}*/{subdir}/sources"):
         return path
     return None
 
 
+def fetch_git_sources(pins, envs):
+    """Fetch every git pin into the isolated cache by building a scratch
+    package under .gas-harness/ that depends on all of them, and return each
+    pin's cached sources. The repo's own packages are never built in place."""
+    fetch = STATE / "fetch"
+    shutil.rmtree(fetch, ignore_errors=True)
+    (fetch / "sources").mkdir(parents=True)
+    lines = ["[package]", 'name = "gas_harness_fetch"', 'edition = "2024"', 'version = "0.0.1"',
+             "", "[dependencies]"]
+    lines += [f'{name} = {{ git = "{url}", subdir = "{subdir}", rev = "{rev}" }}'
+              for name, (url, subdir, rev) in pins.items()]
+    lines += ["", "[environments]"] + [f'{env} = "{chain}"' for env, chain in envs.items()]
+    (fetch / "Move.toml").write_text("\n".join(lines) + "\n")
+    sui("move", "build", "--path", str(fetch), "-e", "testnet_stillness")
+    sources = {}
+    for name, (url, subdir, rev) in pins.items():
+        sources[name] = cached_sources(url, rev, subdir)
+        if sources[name] is None:
+            fail(f"could not find sources for {name} at {rev} under {GIT_CACHE / 'git'}")
+    return sources
+
+
 def prepare_workspace():
-    # Fetch the pinned git dependencies into the cache by building a package
-    # that uses them: agreement_roles links armature directly and multicoin
-    # through agreements. The revs come from the primitives that pin them.
-    sui("move", "build", "--path", str(PACKAGES / "extensions" / "agreement_roles"),
-        "-e", "testnet_stillness")
-    multicoin_rev = pin("primitives/agreements", "multicoin")
-    armature_rev = pin("primitives/roles", "armature")
-    sources = {
-        "multicoin": cached_sources("multicoin", multicoin_rev, "packages/multicoin"),
-        "armature": cached_sources("armature", armature_rev, "packages/armature_framework"),
-        "agreements": PACKAGES / "primitives" / "agreements" / "sources",
-        "delivery_agreements": PACKAGES / "composites" / "delivery_agreements" / "sources",
-        "roles": PACKAGES / "primitives" / "roles" / "sources",
-        "agreement_roles": PACKAGES / "extensions" / "agreement_roles" / "sources",
-    }
-    for name, src in sources.items():
-        if src is None or not src.is_dir():
-            fail(f"could not find sources for {name} (multicoin {multicoin_rev}, "
-                 f"armature {armature_rev}) under {GIT_CACHE / 'git'}")
+    """Generate a workspace in which each package depends on the others by
+    local path, so every type resolves to the packages published on this
+    chain, and return the order to publish them in."""
+    graph, dirs, pins, envs = read_manifests()
+    sources = fetch_git_sources(pins, envs)
+    sources.update({name: path / "sources" for name, path in dirs.items()})
     shutil.rmtree(MOVE, ignore_errors=True)
-    for name, deps in MANIFESTS.items():
+    for name, deps in graph.items():
         pkg = MOVE / name
         shutil.copytree(sources[name], pkg / "sources")
         lines = ["[package]", f'name = "{name}"', 'edition = "2024"', 'version = "0.0.1"', "",
@@ -352,6 +383,7 @@ def prepare_workspace():
         lines += [f'{dep} = {{ local = "../{dep}" }}' for dep in deps]
         (pkg / "Move.toml").write_text("\n".join(lines) + "\n")
     PUBFILE.unlink(missing_ok=True)
+    return tuple(graphlib.TopologicalSorter(graph).static_order())
 
 
 def created(result, suffix):
@@ -366,10 +398,10 @@ def created_containing(result, needle):
 
 
 def publish_all():
-    prepare_workspace()
+    order = prepare_workspace()
     use("admin")
     pkgs, publishes = {}, {}
-    for name in PUBLISH_ORDER:
+    for name in order:
         say(f"publishing {name}")
         result = sui_json("client", "test-publish", str(MOVE / name), "--build-env", "testnet",
                           "--pubfile-path", str(PUBFILE), "--gas-budget", GAS_BUDGET)

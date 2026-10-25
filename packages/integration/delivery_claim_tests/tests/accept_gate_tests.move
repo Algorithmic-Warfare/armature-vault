@@ -5,13 +5,13 @@
 module delivery_claim_tests::accept_gate_tests;
 
 use agreement_roles::claim;
+use agreement_roles::test_ou;
 use agreements::request::{Self, Request};
 use agreements::spec;
 use armature::ou::OU;
-use delivery_agreements::delivery::{Self, DeliveryAgreement, Draft};
+use delivery_agreements::delivery::{DeliveryAgreement, Draft};
+use delivery_agreements::test_config::{Self, TOKEN};
 use delivery_agreements::terms::{Self, Terms};
-use delivery_claim_tests::test_config::{Self, TOKEN};
-use delivery_claim_tests::test_ou;
 use multicoin::multicoin;
 use roles::acl::{Self, Principal};
 use std::unit_test::assert_eq;
@@ -64,13 +64,7 @@ fun new_draft(w: &mut World, terms: Terms): Draft<TOKEN> {
     w.scenario.next_tx(LISTER);
     let cargo = multicoin::create_balance_for_testing(src(), ITEM, QTY, w.scenario.ctx());
     let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
-    let config = test_config::no_fees(w.scenario.ctx());
-    let draft = delivery::draft(
-        cargo, reward, terms, &config, test_config::empty(w.scenario.ctx()), &w.clock,
-        w.scenario.ctx(),
-    );
-    config.destroy_for_testing();
-    draft
+    test_config::draft_with_terms(cargo, reward, terms, &w.clock, w.scenario.ctx())
 }
 
 /// LISTER posts an agreement on `terms` only `principals` may accept, and

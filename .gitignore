@@ -10,3 +10,6 @@ coverage/
 
 # Gas harness state (scripts/gas_harness.py)
 .gas-harness/
+
+# Stray CLI output, such as a failed `sui client publish` saved to test.log
+test.log

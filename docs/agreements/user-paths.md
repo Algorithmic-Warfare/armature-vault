@@ -119,6 +119,7 @@ let cap = draft.publish();
 - **Observers bind through their own module.** `bind_observer<T, O>` needs `Permit` of the observer's type, so you call the observer's bind function, not the core's.
 - **Result:** `AgreementPosted` lists every requirement with its config, the identity rule and the observer binding.
 - **Fees:** as in L1. An observer's fee is separate and collected by its own module.
+- **Attach an identity rule once.** Don't also attach it with `require_to_accept`, and name only a rule that calls `set_identity`. Either mistake makes every accept abort ([E2](#e2-write-an-identity-rule)).
 - **Fails with:** `EIdentityRuleSet` for a second identity rule and `EAlreadyBound` for a second observer, plus L1's errors.
 
 ### L3. Limit who can claim
@@ -157,7 +158,7 @@ let (cargo, reward) = agreement.cancel(cap, &clock, ctx);   // Balance, Coin<T>
 - **Result:** the cargo and the reward coin are returned to the cap holder, the agreement and the cap are deleted, and `AgreementCancelled` is emitted. A bound observer receives a `Cancelled` record. The posting fee is not refunded.
 - **Fails with:** `ENotOpen` once a hauler has accepted, and `EWrongCap` for another agreement's cap.
 - **To post the same terms again,** read `agreement.terms()` before cancelling and pass them to `post` with the returned cargo and reward. Their windows are relative, so this works after the listing has lapsed too, with a fresh accept window.
-- **If the cap is lost,** the config admin can close the agreement once it lapses, sending the cargo and reward to the address that signed `draft` ([A2](#a2-close-a-lapsed-agreement)).
+- **If the cap is lost,** the config admin can close the agreement once it lapses ([A2](#a2-close-a-lapsed-agreement)). With a beneficiary address, that sends the cargo and reward to the address that signed `draft`. For terms that pay the cap holder it sends them to the lost cap as `Proceeds`, which only that cap can collect, so they can't be recovered.
 
 ### L5. Delete a spent cap
 
@@ -388,7 +389,7 @@ public fun satisfy(request: &mut Request, cap: &AccessCap) {
 }
 ```
 
-`set_identity` aborts unless your type is the agreement's identity rule (`ENotIdentityRule`), and accepting aborts if no identity was recorded (`EIdentityMissing`). If the same rule can also be attached as a plain requirement, check `request.identity_rule()` first and only set the identity when it names your type.
+`set_identity` aborts unless your type is the agreement's identity rule (`ENotIdentityRule`), and accepting aborts if no identity was recorded (`EIdentityMissing`). If the same rule can also be attached as a plain requirement, check `request.identity_rule()` first and only set the identity when it names your type. That check names a type, not an instance: in an agreement that attaches your rule both as its identity rule and with `require_to_accept`, every instance sets the identity, and the second `set_identity` aborts with `EIdentityAlreadySet`, so the agreement can never be accepted. Tell listers to attach an identity rule once.
 
 ### E3. Write an observer
 
@@ -443,7 +444,7 @@ config::set_treasury(&admin_cap, &mut config, treasury);
 
 ### A2. Close a lapsed agreement
 
-**When:** nobody accepted an open agreement before its `accept_by_ms`, and its lister can't cancel it, for example because the `ListerCap` was lost or burned.
+**When:** nobody accepted an open agreement before its `accept_by_ms`, and its lister can't cancel it, for example because the `ListerCap` was lost or burned. Closing ends the listing either way, but only terms with a beneficiary address get the escrow back: for terms that pay the cap holder, the refund goes to the lost cap.
 
 ```move
 agreement.close_lapsed(&admin_cap, &clock, ctx);   // the config::AdminCap

@@ -82,7 +82,12 @@ A migrated OU gets a new object ID. Because a principal names an OU by ID, the b
 | `WithdrawEvent` | `withdraw_receipt` |
 | `VaultDeinitializedEvent` | `deinitialize_ou_vault` |
 
-ACL events are emitted only for real changes, so replaying `AclGrantedEvent` minus `AclRevokedEvent` gives the current ACL. `update_registry_key` emits no event.
+ACL events are emitted only for real changes, so an indexer can rebuild the current ACL from them, with two caveats:
+
+- **Count, don't deduplicate.** `initialize_ou_vault` stores its starting lists as given, duplicates included, and emits one `AclGrantedEvent` per element. `revoke` removes one copy and emits one `AclRevokedEvent`. A principal holds a role while its `AclGrantedEvent`s for that role outnumber its `AclRevokedEvent`s.
+- **`VaultDeinitializedEvent` revokes everything.** `deinitialize_ou_vault` empties the whole ACL without emitting any `AclRevokedEvent`.
+
+`update_registry_key` emits no event.
 
 ## `armature_vault::keyspace`
 

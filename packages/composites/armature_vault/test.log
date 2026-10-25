@@ -1,3 +1,0 @@
-The package has unpublished dependencies. If you want to publish with unpublished dependencies, please publish them one by one, or (not recommended) pass the `--with-unpublished-dependencies` flag.
- Unpublished dependencies: armature, multicoin, warehouse_receipts, world
-        

@@ -7,9 +7,8 @@
 module delivery_claim_tests::flow_tests;
 
 use agreement_roles::claim;
-use delivery_claim_tests::test_config::{Self, TOKEN};
+use agreement_roles::test_ou;
 use delivery_claim_tests::test_ledger::{Self, TestLedger};
-use delivery_claim_tests::test_ou;
 use agreements::spec::{Self, Spec};
 use armature::ou::OU;
 use delivery_agreements::delivery::{
@@ -22,6 +21,7 @@ use delivery_agreements::delivery::{
     AgreementDefaulted
 };
 use delivery_agreements::terms;
+use delivery_agreements::test_config::{Self, TOKEN};
 use multicoin::multicoin::{Self, Balance};
 use roles::acl::{Self, Principal};
 use std::type_name;
@@ -102,13 +102,8 @@ fun post(w: &mut World, gate: vector<Principal>): Posted {
     w.scenario.next_tx(LISTER);
     let cargo = mint(src(), ITEM, QTY, &mut w.scenario);
     let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
-    let config = test_config::no_fees(w.scenario.ctx());
     let terms = terms::new(want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY);
-    let mut draft = delivery::draft(
-        cargo, reward, terms, &config, test_config::empty(w.scenario.ctx()), &w.clock,
-        w.scenario.ctx(),
-    );
-    config.destroy_for_testing();
+    let mut draft = test_config::draft_with_terms(cargo, reward, terms, &w.clock, w.scenario.ctx());
     let ledger = w.scenario.take_shared_by_id<TestLedger>(w.ledger);
     test_ledger::bind(&ledger, &mut draft);
     ts::return_shared(ledger);

@@ -15,6 +15,9 @@
 /// returned `Frame`, and must return the frame with `enqueue` or
 /// `destroy_empty_frame`. A frame belongs to the agreement and action of the
 /// request it came from and can only be enqueued back onto a matching request.
+/// It doesn't record the request itself, so a rule should return its frame
+/// before handing control back: a leaked frame can be enqueued later, or onto
+/// another open request for the same agreement and action.
 ///
 /// Anyone can open a request for an action type they define. A rule that only
 /// means to gate some agreement types should check `is_action<A>` before it

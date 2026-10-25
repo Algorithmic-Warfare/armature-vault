@@ -23,4 +23,4 @@ sui move test --build-env testnet_stillness
 
 - `tests/accept_gate_tests.move`: a gate attached with `require_to_accept`: what the posted agreement records, terms that pay the cap holder, and that neither `accept` nor `begin_accept` straight into `finish_accept` skips it.
 - `tests/flow_tests.move`: whole gated, observed agreements claimed by OU members and listed players, through delivery and default, including board changes after posting, checking every event, balance and outcome record.
-- `tests/test_config.move`, `tests/test_ledger.move`, `tests/test_ou.move`: fixtures for a fee-free config, an observer that reads outcome records, and an OU and its board.
+- `tests/test_ledger.move`: an observer that reads outcome records. The fee-free drafting and OU fixtures are the dependencies' own `delivery_agreements::test_config` and `agreement_roles::test_ou`: a dependency's `#[test_only]` modules build in test mode too.

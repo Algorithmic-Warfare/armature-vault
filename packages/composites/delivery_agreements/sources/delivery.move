@@ -427,7 +427,9 @@ public fun require_to_accept<T>(draft: &mut Draft<T>, requirement: Requirement) 
 
 /// Like `require_to_accept`, and also trust this requirement's rule to record
 /// the hauler's identity. An agreement has at most one identity rule, and an
-/// accept cannot complete unless it records an identity.
+/// accept cannot complete unless it records an identity, exactly once. Don't
+/// also add the same rule with `require_to_accept`, and name only a rule that
+/// calls `set_identity`: either makes every accept abort.
 public fun require_identity_to_accept<T>(draft: &mut Draft<T>, requirement: Requirement) {
     assert!(draft.agreement.identity_rule.is_none(), EIdentityRuleSet);
     draft.agreement.identity_rule.fill(requirement.type_name());
