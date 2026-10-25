@@ -56,9 +56,12 @@
 /// Lifecycle: draft -> published (open) -> accepted -> deleted by `deliver`,
 /// `forfeit` or `default`. An open agreement is deleted by `cancel`, or, once
 /// `accept_by_ms` passes with nobody accepting, by the config admin's
-/// `close_lapsed`, which sends the cargo and reward back to the lister.
+/// `close_lapsed`, which sends the cargo and reward back to the lister. Only
+/// `cancel` consumes the `ListerCap`; after any other ending its holder can
+/// reclaim the cap's storage with `delete_cap`.
 module delivery_agreements::delivery;
 
+use agreements::payout;
 use agreements::request::{Self, Request};
 use agreements::requirement::Requirement;
 use agreements::spec::{Self, Spec};
@@ -169,7 +172,7 @@ public struct Draft<phantom T> {
 }
 
 /// Right to cancel an open agreement. Has `store` so a DAO or other wrapper
-/// can custody it.
+/// can custody it. `cancel` consumes it; otherwise `delete_cap` does.
 public struct ListerCap has key, store {
     id: UID,
     agreement_id: ID,
@@ -312,6 +315,8 @@ public struct AgreementLapsed has copy, drop {
 /// which `config` must approve. `collateral` is the amount of `T` a hauler must
 /// lock. `accept_by_ms` is an absolute timestamp; `haul_ms` is the delivery
 /// window measured from accept. Both windows are at most `max_duration_ms`.
+/// `want` must name a different collection or asset than `cargo`, so handing
+/// the cargo back can never count as delivery.
 /// `post_fee` must be exactly `config`'s posting fee in its coin type `F` (an
 /// empty coin of any type when there is none); it goes to the treasury now and
 /// is not refunded. The agreement fixes `config`'s delivery rate and treasury.
@@ -333,6 +338,11 @@ public fun draft<T, F>(
     assert!(accept_by_ms > now && accept_by_ms - now <= MAX_DURATION_MS, EInvalidTerms);
     assert!(haul_ms > 0 && haul_ms <= MAX_DURATION_MS, EInvalidTerms);
     assert!(want.qty() > 0 && collateral > 0, EInvalidTerms);
+    let cargo_spec = spec::of(&cargo);
+    assert!(
+        want.collection() != cargo_spec.collection() || want.asset_id() != cargo_spec.asset_id(),
+        EInvalidTerms,
+    );
     config.assert_approved<T>();
     config.collect_post_fee(post_fee);
     Draft {
@@ -340,7 +350,7 @@ public fun draft<T, F>(
             id: object::new(ctx),
             lister: ctx.sender(),
             beneficiary,
-            cargo_spec: spec::of(&cargo),
+            cargo_spec,
             cargo: option::some(cargo),
             reward: reward.into_balance(),
             want,
@@ -399,7 +409,7 @@ public fun publish<T>(draft: Draft<T>, ctx: &mut TxContext): ListerCap {
         lister: agreement.lister,
         cap_id: object::id(&cap),
         beneficiary: agreement.beneficiary,
-        cargo: spec::of(agreement.cargo.borrow()),
+        cargo: agreement.cargo_spec,
         want: agreement.want,
         currency: type_name::with_original_ids<T>(),
         reward: agreement.reward.value(),
@@ -583,10 +593,11 @@ public fun cancel<T>(
 }
 
 /// Delete an open agreement nobody accepted before `accept_by_ms`, sending the
-/// cargo and reward to the lister. Only the config's `AdminCap` holder can call
-/// it, so a listing whose `ListerCap` was lost, or is held by a wrapper with no
-/// way to cancel, still ends. The escrow goes only to the lister, never to the
-/// caller.
+/// cargo and reward to the lister, the address that signed `draft`. Only the
+/// config's `AdminCap` holder can call it, so a listing whose `ListerCap` was
+/// lost or burned still ends. The escrow goes to the lister even when someone
+/// else holds the cap, and never to the caller, so a wrapper holding the cap of
+/// a listing drafted by another signer should `cancel` instead.
 public fun close_lapsed<T>(
     self: DeliveryAgreement<T>,
     _: &AdminCap,
@@ -606,10 +617,17 @@ public fun close_lapsed<T>(
         currency: type_name::with_original_ids<T>(),
         reward: reward.value(),
     });
-    // Like `pay`, send nothing rather than an empty balance.
-    if (cargo.value() == 0) cargo.destroy_zero()
-    else transfer::public_transfer(cargo, lister);
+    payout::pay(cargo, lister);
     pay(reward, lister, ctx);
+}
+
+/// Delete a `ListerCap`, reclaiming its storage. Meant for after the agreement
+/// ended by `deliver`, `default`, `forfeit` or `close_lapsed`. Deleting it
+/// while the agreement is still open gives up the right to cancel, leaving
+/// `close_lapsed` as the only way to end it.
+public fun delete_cap(cap: ListerCap) {
+    let ListerCap { id, .. } = cap;
+    id.delete();
 }
 
 // === Observing ===

@@ -56,7 +56,7 @@ stateDiagram-v2
 | `deliver` | Already the hauler's; the `want` goes to the beneficiary | Hauler, less the delivery fee, which goes to the treasury | Hauler |
 | `forfeit`, `default` | Kept by the hauler | Beneficiary | Beneficiary |
 
-Every ending deletes the agreement, so each pays out exactly once. Reward, collateral and delivery fee are paid as `Coin<T>`, and a zero amount isn't sent, so nobody receives an empty coin. The posting fee went to the treasury at `draft`, whatever the ending.
+Every ending deletes the agreement, so each pays out exactly once. Only `cancel` also deletes the `ListerCap`; after the others its holder can delete it with `delete_cap`. Reward, collateral and delivery fee are paid as `Coin<T>`, and a zero amount isn't sent, so nobody receives an empty coin. The posting fee went to the treasury at `draft`, whatever the ending.
 
 ### Time rules
 
@@ -69,7 +69,7 @@ Every ending deletes the agreement, so each pays out exactly once. Reward, colla
 | Cancel | Any time while open |
 | Close lapsed | `now >= accept_by_ms` while open (config admin only) |
 
-The accept window (`accept_by_ms` from drafting) and `haul_ms` are each at most 30 days (`max_duration_ms`); `draft` aborts with `EInvalidTerms` otherwise.
+The accept window (`accept_by_ms` from drafting) and `haul_ms` are each at most 30 days (`max_duration_ms`); `draft` aborts with `EInvalidTerms` otherwise. It also aborts with `EInvalidTerms` when `want` names the cargo's own collection and asset, since a hauler could then accept and hand the cargo straight back as delivery.
 
 ### Pricing is the lister's job
 
@@ -91,7 +91,7 @@ The `config` module creates one shared `Config` at publish. It holds the approve
 - **Terms are fixed at drafting.** Each agreement copies the delivery rate and treasury (and records the posting fee it paid), so later config changes never alter an existing agreement, open or accepted.
 - **Other endings take no fee.** `default`, `forfeit`, `cancel` and `close_lapsed` take none, and don't refund the posting fee.
 - **The `AdminCap`** changes the config with `approve_currency<T>`, `revoke_currency<T>`, `set_post_fee<F>` (a fee must be more than 0), `clear_post_fee`, `set_delivery_fee_bps` (at most 10,000) and `set_treasury`. Each emits `ConfigUpdated` with the whole config, including the currency list. The publisher receives the cap; it has `store`, so a DAO can hold it.
-- **The `AdminCap` also closes lapsed agreements.** `delivery::close_lapsed` deletes an open agreement once `accept_by_ms` has passed, for listings whose `ListerCap` is lost or held by a wrapper that can't cancel. The cargo and reward go to the agreement's `lister`, never to the admin.
+- **The `AdminCap` also closes lapsed agreements.** `delivery::close_lapsed` deletes an open agreement once `accept_by_ms` has passed, for listings whose `ListerCap` is lost or burned. The cargo and reward go to the agreement's `lister`, the signer of `draft`, never to the admin or the cap holder.
 
 ## Extensions
 
@@ -151,7 +151,7 @@ An observer is bound with `bind_observer<T, O>(draft, Permit<O>, instance, fee)`
 - **Records can't be forged or misrouted.** Only the core mints `OutcomeRecord`. `receive_outcome<O>` checks that the record is bound to `O` and to the receiving object, so an extension that pointed its binding at someone else's instance can't get its records counted.
 - **No contention.** Each record is its own object, so endings don't serialize on a shared ledger.
 
-A record holds the outcome, lister, beneficiary, hauler, hauler identity and the identity rule that attested it, the observer binding with its declared fee, the cargo and want specs, the `currency` (`T`), the `reward` and `collateral` amounts, and the posted, deadline and closed timestamps. The reward is the escrowed amount, before any delivery fee. The collateral is `none` when the agreement was cancelled before anyone accepted. The identity rule is the lister's choice, so an observer should ignore identities from rules it doesn't trust.
+A record holds the outcome, lister, beneficiary, hauler, hauler identity and the identity rule that attested it, the observer binding with its declared fee, the cargo and want specs, the `currency` (`T`), the `reward` and `collateral` amounts, and the posted, deadline and closed timestamps. The reward is the escrowed amount, before any delivery fee. The collateral is `none` when the agreement was cancelled or lapsed before anyone accepted. The identity rule is the lister's choice, so an observer should ignore identities from rules it doesn't trust.
 
 ## Fees and what is at stake
 

@@ -10,7 +10,7 @@ use std::internal;
 
 public struct Bid has drop {}
 
-public fun open_bid(auction_id: ID, requires: vector<Requirement>, ctx: &TxContext): Request {
+public fun open_bid(auction_id: ID, requires: vector<Requirement>, ctx: &mut TxContext): Request {
     request::new(internal::permit<Bid>(), auction_id, option::none(), requires, ctx)
 }
 

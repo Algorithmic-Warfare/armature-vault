@@ -178,12 +178,12 @@ fun delivery_request_cannot_complete_a_bid() {
     let mut clk = clock::create_for_testing(sc.ctx());
     clk.set_for_testing(1_000);
     sc.next_tx(SELLER);
-    let item = object::id_from_address(@0x70);
+    let (src, dst) = (object::id_from_address(@0x70), object::id_from_address(@0x71));
     let config = test_config::no_fees(sc.ctx());
     let mut draft = delivery::draft(
-        multicoin::create_balance_for_testing(item, 0, 1, sc.ctx()),
+        multicoin::create_balance_for_testing(src, 0, 1, sc.ctx()),
         test_config::mint(1, sc.ctx()),
-        spec::new(item, 0, 1),
+        spec::new(dst, 0, 1),
         1,
         5_000,
         10_000,

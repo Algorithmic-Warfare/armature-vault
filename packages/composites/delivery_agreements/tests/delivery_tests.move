@@ -303,6 +303,23 @@ fun close_lapsed_returns_cargo_and_reward_to_lister() {
 }
 
 #[test]
+fun delete_cap_after_delivery_reclaims_the_cap() {
+    let (mut scenario, mut clock) = setup();
+    post(&mut scenario, &clock);
+    accept(&mut scenario, &mut clock);
+    scenario.next_tx(OTHER);
+    let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
+    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    agreement.deliver(delivered, &clock, scenario.ctx());
+
+    scenario.next_tx(LISTER);
+    delivery::delete_cap(scenario.take_from_sender<ListerCap>());
+    scenario.next_tx(LISTER);
+    assert_eq!(ts::ids_for_address<ListerCap>(LISTER).length(), 0);
+    finish(scenario, clock);
+}
+
+#[test]
 fun close_lapsed_sends_nothing_for_empty_cargo_and_reward() {
     let (mut scenario, mut clock) = setup();
     scenario.next_tx(LISTER);
@@ -375,6 +392,46 @@ fun post_rejects_zero_collateral() {
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), 0, ACCEPT_BY_MS,
+        HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
+// Handing the cargo straight back must never count as delivery.
+#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+fun post_rejects_want_the_cargo_already_satisfies() {
+    let (mut scenario, clock) = setup();
+    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, cargo_spec(), COLLATERAL_QTY, ACCEPT_BY_MS,
+        HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+fun post_rejects_want_of_part_of_the_cargo() {
+    let (mut scenario, clock) = setup();
+    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, spec::new(src(), ITEM, 1), COLLATERAL_QTY, ACCEPT_BY_MS,
+        HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
+#[test]
+fun post_allows_another_asset_in_the_cargo_collection() {
+    let (mut scenario, clock) = setup();
+    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, spec::new(src(), ITEM + 1, CARGO_QTY), COLLATERAL_QTY, ACCEPT_BY_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);

@@ -108,6 +108,7 @@ public struct Ledger has key {
     defaulted: u64,
     forfeited: u64,
     cancelled: u64,
+    lapsed: u64,
     fees_credited: u64,
     last_agreement_id: Option<ID>,
     last_hauler: Option<address>,
@@ -122,6 +123,7 @@ public fun new_ledger(treasury: address, ctx: &mut TxContext): ID {
         defaulted: 0,
         forfeited: 0,
         cancelled: 0,
+        lapsed: 0,
         fees_credited: 0,
         last_agreement_id: option::none(),
         last_hauler: option::none(),
@@ -148,6 +150,7 @@ public fun ingest(ledger: &mut Ledger, ticket: Receiving<OutcomeRecord>) {
     if (outcome.outcome_is_defaulted()) ledger.defaulted = ledger.defaulted + 1;
     if (outcome.outcome_forfeited()) ledger.forfeited = ledger.forfeited + 1;
     if (outcome.outcome_is_cancelled()) ledger.cancelled = ledger.cancelled + 1;
+    if (outcome.outcome_is_lapsed()) ledger.lapsed = ledger.lapsed + 1;
     let fee = record.record_observer().binding_fee();
     if (fee.is_some()) ledger.fees_credited = ledger.fees_credited + fee.borrow().qty();
     ledger.last_agreement_id = option::some(record.record_agreement_id());
@@ -168,6 +171,8 @@ public fun defaulted(l: &Ledger): u64 { l.defaulted }
 public fun forfeited(l: &Ledger): u64 { l.forfeited }
 
 public fun cancelled(l: &Ledger): u64 { l.cancelled }
+
+public fun lapsed(l: &Ledger): u64 { l.lapsed }
 
 public fun fees_credited(l: &Ledger): u64 { l.fees_credited }
 

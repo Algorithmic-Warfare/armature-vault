@@ -1,4 +1,5 @@
-/// Divide a balance among recipients by basis points.
+/// Pay out multicoin balances: whole, or divided among recipients by basis
+/// points.
 module agreements::payout;
 
 use multicoin::multicoin::{Self, Balance};
@@ -62,8 +63,14 @@ public fun pay_by_bps(
         if (amount > 0) transfer::public_transfer(balance.split(amount, ctx), recipients[i]);
         i = i + 1;
     };
+    pay(balance, recipients[n - 1]);
+}
+
+/// Send `balance` to `to`, or destroy it when empty so nobody is sent an empty
+/// balance.
+public fun pay(balance: Balance, to: address) {
     if (multicoin::value(&balance) == 0) multicoin::destroy_zero(balance)
-    else transfer::public_transfer(balance, recipients[n - 1]);
+    else transfer::public_transfer(balance, to);
 }
 
 public fun bps(): u64 { BPS }

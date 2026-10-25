@@ -43,6 +43,27 @@ fun received(sc: &Scenario, owner: address): u64 {
 
 fun pieces(owner: address): u64 { ts::ids_for_address<Balance>(owner).length() }
 
+// === Whole balances ===
+
+#[test]
+fun pay_sends_the_whole_balance() {
+    let mut sc = ts::begin(PAYER);
+    payout::pay(multicoin::create_balance_for_testing(coll(), ASSET, 42, sc.ctx()), A);
+    sc.next_tx(PAYER);
+    assert_eq!(received(&sc, A), 42);
+    assert_eq!(pieces(A), 1);
+    sc.end();
+}
+
+#[test]
+fun pay_destroys_an_empty_balance() {
+    let mut sc = ts::begin(PAYER);
+    payout::pay(multicoin::create_balance_for_testing(coll(), ASSET, 0, sc.ctx()), A);
+    sc.next_tx(PAYER);
+    assert_eq!(pieces(A), 0);
+    sc.end();
+}
+
 // === Exact and rounded splits ===
 
 #[test]

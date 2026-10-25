@@ -2,21 +2,23 @@
 
 Minimal on-chain agreements built only on [MultiCoin](https://github.com/Algorithmic-Warfare/multicoin), the shared [agreements](../../primitives/agreements) primitive and the Sui framework. Items are multicoin balances; payments are Sui coins in an admin-approved currency.
 
-- [docs/agreements/design.md](../../docs/agreements/design.md): the full design, its guarantees and how it is meant to be extended.
-- [docs/agreements/user-paths.md](../../docs/agreements/user-paths.md): every user path, step by step.
+- [docs/agreements/design.md](../../../docs/agreements/design.md): the full design, its guarantees and how it is meant to be extended.
+- [docs/agreements/user-paths.md](../../../docs/agreements/user-paths.md): every user path, step by step.
 - [agreement_roles](../../extensions/agreement_roles): limit who can claim an agreement to a list of principals (one player, machine keys or an OU's board), as armature_vault does.
 
 ## `delivery_agreements::delivery`
 
 A delivery agreement is a forward swap of items between two multicoin balances, backed by collateral and paid in one coin type `T`: a `DeliveryAgreement<T>`. `T` must be approved in the shared `Config` when the agreement is drafted (see [Config](#delivery_agreementsconfig)).
 
-1. **`draft`, then `publish`**: the lister escrows `cargo` (a multicoin `Balance`) and a `reward` (a `Coin<T>`). They name the `want` (an exact collection, asset and quantity that counts as delivery), the collateral a hauler must lock (an amount of `T`), an accept-by time and a haul window, each at most 30 days (`max_duration_ms`). They also pay the posting fee, if one is set. Extensions are attached between the two calls (see [Extensions](#extensions)). `publish` shares the agreement and returns a `ListerCap`. `post` does both for an agreement with no extensions.
+1. **`draft`, then `publish`**: the lister escrows `cargo` (a multicoin `Balance`) and a `reward` (a `Coin<T>`). They name the `want` (an exact collection, asset and quantity that counts as delivery, in a different collection or asset than the cargo, so the cargo itself can't be handed back), the collateral a hauler must lock (an amount of `T`), an accept-by time and a haul window, each at most 30 days (`max_duration_ms`). They also pay the posting fee, if one is set. Extensions are attached between the two calls (see [Extensions](#extensions)). `publish` shares the agreement and returns a `ListerCap`. `post` does both for an agreement with no extensions.
 2. **`accept`**: a hauler locks a `Coin<T>` of exactly the collateral amount (`EWrongCollateral` otherwise) and receives the cargo at once. The deadline is the accept time plus the haul window. If the agreement has accept requirements, use `begin_accept`, satisfy them, then `finish_accept`.
 3. **`deliver`**: anyone hands in exactly the `want` balance before the deadline. It goes to the beneficiary, the delivery fee goes to the treasury, and the rest of the reward plus the collateral go to the hauler. The agreement is deleted.
 4. **`default`**: after the deadline, anyone can send the reward and collateral to the beneficiary. The agreement is deleted.
    - **`forfeit`**: the hauler can trigger the same payout before the deadline, for example after deciding not to do the haul. Only the hauler can call it. `default` stays open to anyone, so the funds never depend on a hauler who has walked away.
-5. **`cancel`**: while the agreement is still open, the `ListerCap` holder gets the cargo `Balance` and the reward `Coin<T>` back. The agreement is deleted.
-6. **`close_lapsed`**: once `accept_by_ms` has passed with nobody accepting, the config `AdminCap` holder can delete the agreement. The cargo and reward go to the lister, the address that signed `draft`, never to the admin. This covers listings whose `ListerCap` is lost or held by a wrapper that can't cancel. It aborts with `ENotLapsed` before `accept_by_ms` and `ENotOpen` after an accept.
+5. **`cancel`**: while the agreement is still open, the `ListerCap` holder gets the cargo `Balance` and the reward `Coin<T>` back. The agreement and the cap are deleted.
+6. **`close_lapsed`**: once `accept_by_ms` has passed with nobody accepting, the config `AdminCap` holder can delete the agreement. The cargo and reward go to the lister, the address that signed `draft`, never to the admin. This covers listings whose `ListerCap` is lost or burned. The refund follows the signer of `draft`, not the cap, so a wrapper holding the cap of a listing another signer drafted should `cancel` instead. It aborts with `ENotLapsed` before `accept_by_ms` and `ENotOpen` after an accept.
+
+Only `cancel` consumes the `ListerCap`. After any other ending, its holder can delete it with `delete_cap` and get its storage back. Deleting it while the agreement is open gives up the right to cancel.
 
 Payouts are coins of `T`. A zero amount isn't sent, so nobody receives an empty coin.
 

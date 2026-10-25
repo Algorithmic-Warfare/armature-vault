@@ -25,6 +25,7 @@ Code blocks show the commands of one programmable transaction block (PTB), writt
 | Post a job with rules or a track record | [L2](#l2-post-with-extensions) |
 | Post a job for one player, my organisation's haulers, or both | [L3](#l3-limit-who-can-claim) |
 | Take back a job nobody accepted | [L4](#l4-cancel) |
+| Get back the storage of a finished job's cap | [L5](#l5-delete-a-spent-cap) |
 | Take a job | [H1](#h1-accept-an-open-agreement), [H2](#h2-accept-a-gated-agreement) |
 | Do the haul and get paid | [H3](#h3-haul-and-deliver-with-warehouse-receipts) |
 | Back out of a job I accepted | [H4](#h4-forfeit) |
@@ -90,7 +91,7 @@ transfer::public_transfer(cap, lister);
 - **Result:** a shared `DeliveryAgreement<T>` and an `AgreementPosted` event. Keep the `ListerCap`: it is the only way to cancel. It has `store`, so a DAO or vault can hold it.
 - **Currency:** `T` must be approved; check with `config.is_approved<T>()` or list them with `config.currencies()`. Revoking `T` later doesn't affect this agreement.
 - **Fees:** `post_fee` goes to the treasury at once and isn't refunded if you cancel. Read the current fee from `config.post_fee()`, which names its coin type and amount; when it is `none`, pass an empty coin of any type, such as `coin::zero<SUI>(ctx)`. The agreement also copies the config's delivery fee rate and treasury, and `AgreementPosted` shows all three.
-- **Fails with:** `EInvalidTerms` if `accept_by_ms` isn't in the future or is more than 30 days away, `haul_ms` is 0 or more than 30 days, or the `want` quantity or `collateral` is 0. `config::ECurrencyNotApproved` if `T` isn't approved. `config::EWrongPostFeeCurrency` or `config::EWrongPostFeeAmount` if `post_fee` isn't exactly the posting fee, and `config::EUnexpectedFee` if no posting fee is set and `post_fee` isn't empty.
+- **Fails with:** `EInvalidTerms` if `accept_by_ms` isn't in the future or is more than 30 days away, `haul_ms` is 0 or more than 30 days, the `want` quantity or `collateral` is 0, or `want` names the cargo's own collection and asset. `config::ECurrencyNotApproved` if `T` isn't approved. `config::EWrongPostFeeCurrency` or `config::EWrongPostFeeAmount` if `post_fee` isn't exactly the posting fee, and `config::EUnexpectedFee` if no posting fee is set and `post_fee` isn't empty.
 - **Pricing:** set collateral to at least the cargo's value plus the reward. The hauler holds the cargo from the moment they accept, and collateral is your only protection.
 
 ### L2. Post with extensions
@@ -146,9 +147,20 @@ claim::require_to_claim(&mut draft,
 let (cargo, reward) = agreement.cancel(cap, &clock, ctx);   // Balance, Coin<T>
 ```
 
-- **Result:** the cargo and the reward coin are returned to the cap holder, the agreement is deleted, and `AgreementCancelled` is emitted. A bound observer receives a `Cancelled` record. The posting fee is not refunded.
+- **Result:** the cargo and the reward coin are returned to the cap holder, the agreement and the cap are deleted, and `AgreementCancelled` is emitted. A bound observer receives a `Cancelled` record. The posting fee is not refunded.
 - **Fails with:** `ENotOpen` once a hauler has accepted, and `EWrongCap` for another agreement's cap.
 - **If the cap is lost,** the config admin can close the agreement once it lapses, sending the cargo and reward to the address that signed `draft` ([A2](#a2-close-a-lapsed-agreement)).
+
+### L5. Delete a spent cap
+
+**When:** the agreement ended by `deliver`, `default`, `forfeit` or `close_lapsed`, and you still hold its `ListerCap`.
+
+```move
+delivery::delete_cap(cap);
+```
+
+- **Result:** the cap is deleted and its storage rebate goes to the gas payer. Nothing else changes.
+- **Deleting it while the agreement is open gives up the right to cancel.** Only the config admin's `close_lapsed` can end the listing then.
 
 ---
 
@@ -221,7 +233,7 @@ agreement.deliver(delivered, &clock, ctx);
 ```
 
 - **Result:** the delivered receipts go to the beneficiary. The delivery fee, `reward * delivery_fee_bps / 10,000` rounded down, goes to the agreement's treasury, and the rest of the reward and the collateral go to you, as coins of `T`. A zero amount, such as a delivery fee at a rate of 0, isn't sent. The agreement is deleted, and `AgreementDelivered` and an observer record are produced. The event's `reward` is what you received, and `delivery_fee` is what the treasury received.
-- **Fails with:** `ETooLate` at or after `deadline_ms`, and `spec::EWrongAsset` or `spec::EWrongAmount` unless the balance is exactly `want`. Handing back the source receipts is not delivery.
+- **Fails with:** `ETooLate` at or after `deadline_ms`, and `spec::EWrongAsset` or `spec::EWrongAmount` unless the balance is exactly `want`. Handing back the source receipts is not delivery: `draft` rejects a `want` in the cargo's own collection and asset.
 
 ### H4. Forfeit
 
@@ -369,7 +381,7 @@ config::set_treasury(&admin_cap, &mut config, treasury);
 
 ### A2. Close a lapsed agreement
 
-**When:** nobody accepted an open agreement before its `accept_by_ms`, and its lister can't cancel it, for example because the `ListerCap` was lost or is held by a wrapper with no way to cancel.
+**When:** nobody accepted an open agreement before its `accept_by_ms`, and its lister can't cancel it, for example because the `ListerCap` was lost or burned.
 
 ```move
 agreement.close_lapsed(&admin_cap, &clock, ctx);   // the config::AdminCap
@@ -377,4 +389,5 @@ agreement.close_lapsed(&admin_cap, &clock, ctx);   // the config::AdminCap
 
 - **Result:** the cargo and reward go to the agreement's `lister`, the address that signed `draft`, never to the caller. The agreement is deleted and `AgreementLapsed` is emitted. A bound observer receives a `Lapsed` record. No fee is taken and the posting fee is not refunded. An empty cargo or a zero reward isn't sent.
 - **Refunds follow the signer, not the cap.** If a DAO or other wrapper listed through its own signer and holds the cap, the refund lands at that signer's address. Such a lister should cancel with its cap instead.
+- **The cap survives.** Whoever holds it can delete it with `delete_cap` ([L5](#l5-delete-a-spent-cap)).
 - **Fails with:** `ENotLapsed` before `accept_by_ms`, and `ENotOpen` once a hauler has accepted.

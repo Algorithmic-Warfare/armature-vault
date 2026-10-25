@@ -504,6 +504,31 @@ fun observer_records_a_lapsed_agreement_the_admin_closed() {
     finish(scenario, clock);
 }
 
+#[test]
+fun ledger_counts_a_lapsed_agreement() {
+    let (mut scenario, mut clock) = setup();
+    let ledger_id = create_ledger(&mut scenario);
+    let mut d = new_draft(&mut scenario, &clock);
+    bind_ledger(&mut d, ledger_id, &mut scenario);
+    publish(d, &mut scenario);
+
+    clock.set_for_testing(ACCEPT_BY_MS);
+    scenario.next_tx(OTHER);
+    let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
+    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
+    transfer::public_transfer(admin_cap, OTHER);
+    ingest(ledger_id, &mut scenario);
+
+    scenario.next_tx(OTHER);
+    let ledger = scenario.take_shared_by_id<Ledger>(ledger_id);
+    assert_eq!(ledger.lapsed(), 1);
+    assert_eq!(ledger.cancelled(), 0);
+    assert_eq!(ledger.fees_credited(), FEE_QTY);
+    ts::return_shared(ledger);
+    finish(scenario, clock);
+}
+
 #[test, expected_failure(abort_code = delivery::EWrongObserver)]
 fun observer_rejects_records_from_an_imposter_binding() {
     let (mut scenario, mut clock) = setup();

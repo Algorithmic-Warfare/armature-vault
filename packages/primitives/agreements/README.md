@@ -20,7 +20,7 @@ An agreement module opens and completes its own requests:
 ```move
 public struct Bid has drop {}
 
-public fun begin_bid(self: &Auction, ctx: &TxContext): Request {
+public fun begin_bid(self: &Auction, ctx: &mut TxContext): Request {
     request::new(internal::permit<Bid>(), object::id(self), option::none(), self.bid_requirements, ctx)
 }
 
@@ -60,6 +60,8 @@ A `Spec` is an exact multicoin amount: `{ collection, asset_id, qty }`.
 - Each recipient gets the floor of their share. The units left over go one each to the largest fractional remainders, with ties going to the earlier recipient.
 - Nobody without a share is paid, and nobody gets more than one unit over their exact share.
 
+`pay(balance, to)` sends a whole balance, or destroys it when it is empty, so nobody receives an empty balance. `pay_by_bps` pays its last recipient this way, and delivery uses it to return a lapsed agreement's cargo.
+
 ## Dependency pin
 
 `multicoin` is pinned to `2772c26`, the same revision as warehouse-receipts and every agreement package. On-chain, a `Balance` is only the same type if every package links the same published multicoin, so bump them together.
@@ -78,4 +80,4 @@ sui move test  --build-env testnet_stillness
 
 - `tests/request_tests.move`: ordering, follow-ups, identity, and every abort. It uses two stand-in agreement types, `tests/test_agreements.move` (a lease with two actions, plus example rules) and `tests/test_auction.move`, so requests are shown not to cross actions or agreement types.
 - `tests/spec_tests.move`: `Spec` and `Requirement`.
-- `tests/payout_tests.move`: exact and rounded splits, ties, zero shares, empty and maximum balances, invalid shares, and a sweep of totals checking every payout adds up and stays within one unit of its exact share.
+- `tests/payout_tests.move`: `pay`, exact and rounded splits, ties, zero shares, empty and maximum balances, invalid shares, and a sweep of totals checking every payout adds up and stays within one unit of its exact share.

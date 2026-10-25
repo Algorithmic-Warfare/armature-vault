@@ -85,7 +85,7 @@ public fun new<A>(
     agreement_id: ID,
     identity_rule: Option<TypeName>,
     mut requires: vector<Requirement>,
-    ctx: &TxContext,
+    ctx: &mut TxContext,
 ): Request {
     // Stored reversed so `pop_back` yields the first declared requirement first.
     requires.reverse();

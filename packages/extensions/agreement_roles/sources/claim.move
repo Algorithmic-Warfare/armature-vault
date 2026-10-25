@@ -31,7 +31,9 @@
 /// let cargo = agreement.finish_accept(req, collateral, &clock);
 ///
 /// // The freelancer is listed directly and needs no OU.
+/// let mut req = agreement.begin_accept(&clock, ctx);
 /// claim::satisfy_directly(&mut req);
+/// let cargo = agreement.finish_accept(req, collateral, &clock);
 /// ```
 module agreement_roles::claim;
 

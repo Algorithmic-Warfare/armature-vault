@@ -28,7 +28,7 @@ public fun open_sign(
     lease_id: ID,
     identity_rule: Option<type_name::TypeName>,
     requires: vector<Requirement>,
-    ctx: &TxContext,
+    ctx: &mut TxContext,
 ): Request {
     request::new(internal::permit<Sign>(), lease_id, identity_rule, requires, ctx)
 }
@@ -37,7 +37,7 @@ public fun complete_sign(request: Request, lease_id: ID): (address, Option<ID>) 
     request.complete(internal::permit<Sign>(), lease_id)
 }
 
-public fun open_renew(lease_id: ID, requires: vector<Requirement>, ctx: &TxContext): Request {
+public fun open_renew(lease_id: ID, requires: vector<Requirement>, ctx: &mut TxContext): Request {
     request::new(internal::permit<Renew>(), lease_id, option::none(), requires, ctx)
 }
 

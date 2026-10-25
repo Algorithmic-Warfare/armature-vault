@@ -29,7 +29,7 @@ Packages are grouped into three tiers under `packages/`:
 | Package | Depends on | What it is |
 |---|---|---|
 | [`primitives/roles`](packages/primitives/roles) | armature | The shared `Principal` (player, machine or OU board member) for role-gated packages. `agreement_roles` uses it now; `armature_vault` moves to it at its next fresh publish |
-| [`primitives/agreements`](packages/primitives/agreements) | multicoin | What every agreement type shares: requests and requirements (how extensions gate an action), `Spec` (an exact multicoin amount) and `payout` (splitting a balance by bps) |
+| [`primitives/agreements`](packages/primitives/agreements) | multicoin | What every agreement type shares: requests and requirements (how extensions gate an action), `Spec` (an exact multicoin amount) and `payout` (sending a balance, or splitting it by bps) |
 | [`composites/armature_vault`](packages/composites/armature_vault) | armature, world, multicoin, warehouse_receipts | The OU-gated receipt vault and keyspace described below |
 | [`composites/delivery_agreements`](packages/composites/delivery_agreements) | agreements, multicoin | Collateralized delivery agreements with optional accept rules and observers ([design](docs/agreements/design.md), [user paths](docs/agreements/user-paths.md)) |
 | [`extensions/agreement_roles`](packages/extensions/agreement_roles) | agreements, roles, armature, multicoin, delivery_agreements | A claim gate that limits an agreement to a list of principals: one player (a reservation), machine keys, or an OU's board |
