@@ -193,6 +193,9 @@ public struct Draft<phantom T> {
 /// Right to cancel an open agreement and, when its terms pay the cap holder,
 /// to collect its proceeds. Has `store` so a DAO or other wrapper can custody
 /// it. `cancel` consumes it, and so does `collect`; otherwise `delete_cap`.
+/// With a beneficiary address, transferring the cap moves only the right to
+/// cancel: a listing the config admin closes with `close_lapsed` still refunds
+/// the lister, so a new holder should cancel a lapsed listing promptly.
 public struct ListerCap has key, store {
     id: UID,
     agreement_id: ID,
@@ -503,11 +506,7 @@ public fun post<T, F>(
 
 /// Start accepting. Returns the request every accept requirement must be
 /// satisfied on, in order, before `finish_accept`.
-public fun begin_accept<T>(
-    self: &DeliveryAgreement<T>,
-    clock: &Clock,
-    ctx: &mut TxContext,
-): Request {
+public fun begin_accept<T>(self: &DeliveryAgreement<T>, clock: &Clock, ctx: &TxContext): Request {
     assert!(self.hauler.is_none(), ENotOpen);
     assert!(clock.timestamp_ms() < self.accept_by_ms, ETooLate);
     request::new(
@@ -617,12 +616,15 @@ public fun default<T>(self: DeliveryAgreement<T>, clock: &Clock, ctx: &mut TxCon
     pay_default(self, false, clock, ctx);
 }
 
-/// The hauler gives up: reward and collateral go to the beneficiary now
-/// instead of after the deadline. Same payout as `default`; the hauler keeps
-/// whatever cargo they still hold.
+/// The hauler gives up before the deadline: reward and collateral go to the
+/// beneficiary now instead of after it. Same payout as `default`; the hauler
+/// keeps whatever cargo they still hold. Once the deadline passes only
+/// `default` ends the agreement, so a hauler who missed it cannot have the
+/// failure recorded as a forfeit.
 public fun forfeit<T>(self: DeliveryAgreement<T>, clock: &Clock, ctx: &mut TxContext) {
     assert!(self.hauler.is_some(), ENotAccepted);
     assert!(*self.hauler.borrow() == ctx.sender(), ENotHauler);
+    assert!(clock.timestamp_ms() < self.deadline_ms, ETooLate);
     pay_default(self, true, clock, ctx);
 }
 
@@ -657,7 +659,10 @@ public fun cancel<T>(
 /// burned still ends. The escrow never goes to the caller. With a beneficiary
 /// address it goes to the lister even when someone else holds the cap, so a
 /// wrapper that drafts through another signer should use terms that pay the
-/// cap holder.
+/// cap holder. A holder who is not the lister can still `cancel` after
+/// `accept_by_ms`, and whichever transaction lands first decides who gets the
+/// escrow, so the admin should close only listings lapsed long enough that a
+/// holder would have cancelled.
 public fun close_lapsed<T>(
     self: DeliveryAgreement<T>,
     _: &AdminCap,

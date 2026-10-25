@@ -28,11 +28,11 @@ What a sponsor keeps paying for:
 | post, lapse, close_lapsed (admin) | 0.015718 SUI | 0.005651 SUI |
 | cap holder: post, accept, deliver, collect | 0.028966 SUI | 0.008162 SUI |
 | cap holder: post, lapse, close_lapsed (admin), collect | 0.020016 SUI | 0.005126 SUI |
-| claim gate (1 player or 1 OU): post_for, accept, deliver | 0.026689 SUI | 0.008707 SUI |
-| claim gate via draft + require_to_claim + publish (2 principals) | 0.027191 SUI | 0.008712 SUI |
-| claim gate with 32 principals: post_for, accept, deliver | 0.042254 SUI | 0.008862 SUI |
+| claim gate (1 player or 1 OU): post, accept, deliver | 0.026689 SUI | 0.008707 SUI |
+| claim gate (2 principals): post, accept, deliver | 0.027191 SUI | 0.008712 SUI |
+| claim gate (32 principals): post, accept, deliver | 0.042254 SUI | 0.008862 SUI |
 
-A big gate raises the outlay, because the agreement object holds the principal list, but nearly all of it comes back when the agreement closes.
+A gated post is one PTB: `draft`, `require_to_accept(claim::requirement(principals))`, `publish`. A big gate raises the outlay, because the agreement object holds the principal list, but nearly all of it comes back when the agreement closes.
 
 ## Per transaction
 
@@ -40,8 +40,8 @@ A big gate raises the outlay, because the agreement object holds the principal l
 | --- | --- | ---: | ---: |
 | `post` | lister | 0.009763 | 0.007122 |
 | `post`, terms that pay the cap holder | lister | 0.009520 | 0.006879 |
-| `claim::post_for` (1 principal) | lister | 0.010652 | 0.008011 |
-| `claim::post_for` (32 principals) | lister | 0.018434 | 0.015793 |
+| post with a claim gate (1 principal) | lister | 0.010652 | 0.008011 |
+| post with a claim gate (32 principals) | lister | 0.018434 | 0.015793 |
 | `accept` | hauler | 0.008516 | 0.002377 |
 | accept through a claim gate (player or OU) | hauler | 0.009406 | 0.002386 |
 | `deliver` | anyone | 0.006632 | −0.000810 (open) to −0.009395 (32-principal gate) |

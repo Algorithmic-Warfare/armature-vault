@@ -12,7 +12,7 @@ How extensions gate an agreement's actions. Adapted from world-contracts `dev` (
 - **A `Requirement`** is a config type's name plus its BCS encoding. Only the module that defines the config type can satisfy it, because satisfying needs `Permit` of that type.
 - **An action is a marker type** the agreement module defines, such as delivery's `AcceptAction`. `request::new<A>` and `request::complete<A>` take `Permit<A>`, so only that module can open or complete requests for its actions.
 - **A `Request`** has no abilities. It holds the agreement ID, the action, the actor (always the sender), an optional identity rule and the outstanding requirements. The transaction can't end until the agreement module completes it.
-- **Rules satisfy requirements in declaration order** with `take_next`. A rule can add follow-ups through the returned `Frame`, which resolve next. A frame only goes back onto a request for the same agreement and action.
+- **Rules satisfy requirements in declaration order** with `take_next`. A rule can add follow-ups through the returned `Frame`, which resolve next. A frame only goes back onto a request for the same agreement and action. `next()` borrows the requirement `take_next` would pop; `requires()` lists the outstanding ones next-last, the reverse of declaration order.
 - **`complete`** aborts unless the request was opened for this agreement and action, every requirement is satisfied, and the identity rule (if any) recorded an identity.
 
 An agreement module opens and completes its own requests:
@@ -20,7 +20,7 @@ An agreement module opens and completes its own requests:
 ```move
 public struct Bid has drop {}
 
-public fun begin_bid(self: &Auction, ctx: &mut TxContext): Request {
+public fun begin_bid(self: &Auction, ctx: &TxContext): Request {
     request::new(internal::permit<Bid>(), object::id(self), option::none(), self.bid_requirements, ctx)
 }
 
@@ -30,7 +30,7 @@ public fun finish_bid(self: &mut Auction, request: Request) {
 }
 ```
 
-Anyone can open requests for an action type they define. A rule that should gate only some agreement types or actions checks `request.is_action<A>()` before taking anything of value.
+Anyone can open requests for an action type they define, naming any agreement ID. A rule that should gate only some agreement types or actions checks `request.is_action<A>()` before taking anything of value. For the same reason, an event a rule emits about a request, such as `agreement_roles::claim::Claimed`, is only as trustworthy as the request's action: an indexer should accept it only for an action type, by its original package ID, whose module it trusts.
 
 | Error | When |
 |---|---|

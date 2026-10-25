@@ -1,6 +1,6 @@
 # agreement_roles
 
-A claim gate for agreements built on [`agreements`](../../primitives/agreements), such as [delivery_agreements](../../composites/delivery_agreements): only a listed set of principals may take the gated action, for example accepting a delivery. Principals come from [`roles`](../../primitives/roles):
+A claim gate for agreements built on [`agreements`](../../primitives/agreements), such as [delivery_agreements](../../composites/delivery_agreements): only a listed set of principals may take the gated action, for example accepting a delivery. It depends on no agreement type. Principals come from [`roles`](../../primitives/roles):
 
 - one `player`: reserves the agreement for that player,
 - `machine` keys: service or bot keys,
@@ -15,19 +15,15 @@ An agreement with no gate is open to anyone.
 
 ### Listing
 
-```move
-// One call: draft, gate and publish.
-let terms = terms::new(want, collateral, accept_ms, haul_ms, beneficiary);
-let cap = claim::post_for<T, F>(cargo, reward, terms,
-    vector[acl::ou(haulers_id), acl::player(freelancer)], &config, post_fee, &clock, ctx);
+`requirement(principals)` builds the gate. Attach it to a delivery draft as an accept requirement, in the same transaction as `draft` and `publish`:
 
-// Or gate a draft that also gets other extensions.
-claim::require_to_claim(&mut draft, vector[acl::ou(haulers_id), acl::player(freelancer)]);
+```move
+let mut draft = delivery::draft<T, F>(cargo, reward, terms, &config, post_fee, &clock, ctx);
+draft.require_to_accept(claim::requirement(vector[acl::ou(haulers_id), acl::player(freelancer)]));
+let cap = draft.publish();
 ```
 
-- `post_for<T, F>` takes `delivery::draft`'s arguments with `principals` after `terms`: the cargo `Balance`, a `Coin<T>` reward and the agreement's `delivery_agreements::terms::Terms`, then the shared `delivery_agreements::config::Config` and a `post_fee` coin of exactly the posting fee (an empty coin of any type when none is set). `T` must be an approved currency. See [terms](../../composites/delivery_agreements/README.md#delivery_agreementsterms) and [config](../../composites/delivery_agreements/README.md#delivery_agreementsconfig).
-- **For a DAO that keeps the cap,** pass terms from `terms::new_for_cap_holder` with an `ou` gate: only the OU's board can claim, and every payout to the lister's side goes to the cap the DAO holds.
-- `require_to_claim<T>` gates a `Draft<T>` in any currency.
+- **For a DAO that keeps the cap,** draft on terms from `terms::new_for_cap_holder` with an `ou` gate: only the OU's board can claim, and every payout to the lister's side goes to the cap the DAO holds. See [terms](../../composites/delivery_agreements/README.md#delivery_agreementsterms).
 - A gate lists 1 to 32 principals (`EInvalidPrincipals` otherwise).
 - **The list is fixed when the agreement is published.** To change it, cancel and post again with the same `agreement.terms()`.
 - **OU membership is not fixed.** An `ou` principal is checked at claim time, so board changes after posting apply to open agreements. Anything that must change while an agreement is open belongs in an OU.
@@ -48,11 +44,13 @@ let cargo = agreement.finish_accept(req, collateral, &clock);   // collateral: C
 
 A caller who satisfies no listed principal aborts with `ENotAuthorized`. Calling `accept` without satisfying the gate aborts with `agreements::request::ERequestNotComplete`.
 
-A successful claim emits `Claimed { agreement_id, action, actor, principal }`. `principal` is the first listed principal the actor matched, so an `Ou` principal tells an indexer which OU the actor claimed for. The event only lands if the action completes, because the request must finish in the same transaction.
+A successful claim emits `Claimed { agreement_id, action, actor, principal }`. `principal` is the first listed principal the actor matched, so an `Ou` principal tells an indexer which OU the actor claimed for.
+
+**Filter `Claimed` on `action`.** Anyone can open a request for an action type they define, naming any agreement ID, gate it on their own principals and complete it, so a `Claimed` naming a real agreement can come from an unrelated module. For delivery, accept only events whose `action` is `delivery_agreements::delivery::AcceptAction` under delivery's original package ID. Only delivery can open and complete such a request, so each one shares its transaction with that agreement's `AgreementAccepted`.
 
 ### Gating other actions
 
-The gate doesn't check which action it guards, or which agreement type. `requirement(principals)` builds the same requirement for any requirement slot of an agreement type built on `agreements`; `tests/any_agreement_tests.move` gates a bid on a test auction this way.
+The gate doesn't check which action it guards, or which agreement type. `requirement(principals)` builds the same requirement for any requirement slot of an agreement type built on `agreements`; the tests gate a bid on a test auction this way.
 
 ### Reading a gate
 
@@ -62,13 +60,11 @@ The gate doesn't check which action it guards, or which agreement type. `require
 
 | Dependency | Why |
 |---|---|
-| agreements (local) | `Request`, `Requirement` and `Spec`. The gate works on any agreement type's request. |
+| agreements (local) | `Request` and `Requirement`. The gate works on any agreement type's request. |
 | roles (local) | `Principal`. |
-| delivery_agreements (local) | `Draft`, `ListerCap`, `Terms` and `Config`, for the delivery shortcuts `require_to_claim` and `post_for`, and the end-to-end tests. |
 | armature `ae60685` | `armature::ou::OU`. The same revision as roles and armature_vault. |
-| multicoin `2772c26` | `Balance`, for `post_for`'s cargo. The same revision as delivery_agreements. |
 
-Only `require_to_claim` and `post_for` need `delivery_agreements`. Sui's package manager has no dev-dependencies, so dropping it would also mean moving the delivery end-to-end tests into a separate test package.
+It depends on no agreement type, so a new agreement type can use the gate without linking delivery. CI holds it to these three. Its end-to-end tests with delivery agreements live in the unpublished [delivery_claim_tests](../../integration/delivery_claim_tests) package, since Sui's package manager has no dev-dependencies.
 
 ## Build & test
 
@@ -78,7 +74,7 @@ sui move build --build-env testnet_stillness
 sui move test  --build-env testnet_stillness
 ```
 
-- `tests/claim_tests.move`: the gate's checks, limits and decoding.
-- `tests/flow_tests.move`: whole agreements claimed by OU members and listed players, through delivery and default, including board changes after posting.
-- `tests/any_agreement_tests.move`: the same gate on a second agreement type (`tests/test_auction.move`, built only on `agreements`), with live OU boards, and a delivery request that can't complete a bid.
-- `tests/test_ou.move`, `tests/test_ledger.move`: test fixtures for an OU and its board, and an observer that reads outcome records.
+- `tests/claim_tests.move`: the gate on a test auction's bids (`tests/test_auction.move`, built only on `agreements`): every principal, live OU boards, composed gates, the `Claimed` event (including a forged one), limits and decoding.
+- `tests/test_ou.move`: a fixture for an OU and its board.
+
+Delivery accepts through the gate, and whole gated agreements through delivery and default, are tested in [delivery_claim_tests](../../integration/delivery_claim_tests).

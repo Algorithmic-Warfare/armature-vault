@@ -28,9 +28,11 @@ Usage (from anywhere):
 
 Everything lives under .gas-harness/ (git-ignored): chain state, an isolated
 HOME with throwaway keys, the generated Move workspace, and results/ with
-gas-report.json and gas-report.md. `run` starts from a fresh chain but keeps
-the isolated HOME's git dependency cache; `reset` deletes that too. Needs `sui`
-on PATH (1.72+).
+gas-report.json and gas-report.md. Every `sui` call gets that HOME, and
+SUI_CONFIG_DIR and MOVE_HOME inside it, so your own keystore, envs and git
+cache are never touched. `run` starts from a fresh chain but keeps the isolated
+git dependency cache; `reset` deletes that too. Dependency revs are read from
+the packages' Move.toml files. Needs `sui` on PATH (1.72+) and Python 3.11+.
 """
 
 import argparse
@@ -42,6 +44,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -60,9 +63,6 @@ RPC_PORT = int(os.environ.get("GAS_HARNESS_RPC_PORT", "19100"))
 FAUCET_PORT = int(os.environ.get("GAS_HARNESS_FAUCET_PORT", "19223"))
 RPC_URL = f"http://127.0.0.1:{RPC_PORT}"
 FAUCET_URL = f"http://127.0.0.1:{FAUCET_PORT}/v2/gas"
-
-MULTICOIN_REV = "2772c26d24c02671726d39f167b8f772777875d9"
-ARMATURE_REV = "ae60685f888ac5dd4d24413fb989002ef5315c74"
 
 SUI = "0x2::sui::SUI"
 CLOCK = "@0x6"
@@ -94,9 +94,17 @@ MANIFESTS = {
     "agreements": ["multicoin"],
     "delivery_agreements": ["agreements", "multicoin"],
     "roles": ["armature"],
-    "agreement_roles": ["agreements", "delivery_agreements", "roles", "armature", "multicoin"],
+    "agreement_roles": ["agreements", "roles", "armature"],
 }
 PUBLISH_ORDER = tuple(MANIFESTS)
+
+# Every `sui` call runs with this environment: Sui reads SUI_CONFIG_DIR and
+# MOVE_HOME before HOME, so setting only HOME would leak into a user's own.
+SUI_ENV = dict(os.environ, HOME=str(HOME), SUI_CONFIG_DIR=str(HOME / ".sui" / "sui_config"),
+               MOVE_HOME=str(GIT_CACHE))
+
+# The `sui start` this process launched, so `down` can reap it.
+_chain = None
 
 
 def say(msg):
@@ -111,8 +119,7 @@ def fail(msg):
 # === Chain ===
 
 def sui(*args, check=True):
-    env = dict(os.environ, HOME=str(HOME))
-    out = subprocess.run(["sui", *args], capture_output=True, text=True, env=env)
+    out = subprocess.run(["sui", *args], capture_output=True, text=True, env=SUI_ENV)
     if check and out.returncode != 0:
         fail(f"sui {' '.join(args[:3])} failed:\n{out.stdout[-3000:]}\n{out.stderr[-3000:]}")
     return out
@@ -152,17 +159,27 @@ def rpc_ready():
         return False
 
 
-def running():
-    if not PID_FILE.exists():
-        return False
+def chain_pid():
+    """The PID in PID_FILE if it still leads this harness's `sui start`, else
+    None. A stale file can name a PID the system has since given to another
+    process."""
     try:
-        os.kill(int(PID_FILE.read_text()), 0)
+        pid = int(PID_FILE.read_text())
+        if os.getpgid(pid) != pid:
+            return None
     except (OSError, ValueError):
-        return False
-    return rpc_ready()
+        return None
+    cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                         capture_output=True, text=True).stdout
+    return pid if " start " in cmd and str(NETWORK) in cmd else None
+
+
+def running():
+    return chain_pid() is not None and rpc_ready()
 
 
 def up():
+    global _chain
     STATE.mkdir(exist_ok=True)
     HOME.mkdir(exist_ok=True)
     if running():
@@ -177,8 +194,9 @@ def up():
     proc = subprocess.Popen(
         ["sui", "start", "--network.config", str(NETWORK),
          f"--with-faucet=127.0.0.1:{FAUCET_PORT}", "--fullnode-rpc-port", str(RPC_PORT)],
-        stdout=log, stderr=log, env=dict(os.environ, HOME=str(HOME)), start_new_session=True,
+        stdout=log, stderr=log, env=SUI_ENV, start_new_session=True,
     )
+    _chain = proc
     PID_FILE.write_text(str(proc.pid))
     for _ in range(90):
         if proc.poll() is not None:
@@ -192,12 +210,15 @@ def up():
 
 
 def down():
-    if PID_FILE.exists():
-        try:
-            stop(int(PID_FILE.read_text()))
-        except ValueError:
-            pass
-        PID_FILE.unlink()
+    """Stop the chain this process started, or else the one PID_FILE names if
+    it is still the harness's. Never signals a process it can't vouch for."""
+    if _chain is not None:
+        pid = _chain.pid if _chain.poll() is None else None
+    else:
+        pid = chain_pid()
+    if pid is not None:
+        stop(pid)
+    PID_FILE.unlink(missing_ok=True)
     say("local chain stopped")
 
 
@@ -208,23 +229,32 @@ def stop(pgid, timeout_s=30):
         os.killpg(pgid, signal.SIGTERM)
     except OSError:
         return
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except OSError:
-            return
-        time.sleep(0.2)
+    if gone(pgid, timeout_s):
+        return
     try:
         os.killpg(pgid, signal.SIGKILL)
     except OSError:
         return
-    while True:
+    if not gone(pgid, 10):
+        fail(f"process group {pgid} survived SIGKILL")
+
+
+def gone(pgid, timeout_s):
+    """Wait up to `timeout_s` for the group to exit. Reaps the leader when this
+    process started it: until then it is a zombie, which Linux still counts as
+    a member of its group."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.waitpid(pgid, os.WNOHANG)
+        except ChildProcessError:  # not our child, or already reaped
+            pass
         try:
             os.killpg(pgid, 0)
         except OSError:
-            return
+            return True
         time.sleep(0.2)
+    return False
 
 
 def init_client():
@@ -279,22 +309,31 @@ def now_ms():
 
 # === Publishing ===
 
+def pin(package, dep):
+    """The git rev `package`'s Move.toml pins `dep` to."""
+    with open(PACKAGES / package / "Move.toml", "rb") as f:
+        return tomllib.load(f)["dependencies"][dep]["rev"]
+
+
 def cached_sources(repo, rev, subdir):
-    base = HOME / ".move" / "git"
-    for root in (base, pathlib.Path.home() / ".move" / "git"):
-        for path in root.glob(f"*{repo}*{rev}*/{subdir}/sources"):
-            return path
+    """`repo`'s checkout at `rev` in the isolated git cache. Never the user's
+    own cache, which may hold an older rev of the same repo."""
+    for path in (GIT_CACHE / "git").glob(f"*{repo}*{rev}*/{subdir}/sources"):
+        return path
     return None
 
 
 def prepare_workspace():
     # Fetch the pinned git dependencies into the cache by building a package
-    # that uses them.
+    # that uses them: agreement_roles links armature directly and multicoin
+    # through agreements. The revs come from the primitives that pin them.
     sui("move", "build", "--path", str(PACKAGES / "extensions" / "agreement_roles"),
         "-e", "testnet_stillness")
+    multicoin_rev = pin("primitives/agreements", "multicoin")
+    armature_rev = pin("primitives/roles", "armature")
     sources = {
-        "multicoin": cached_sources("multicoin", MULTICOIN_REV, "packages/multicoin"),
-        "armature": cached_sources("armature", ARMATURE_REV, "packages/armature_framework"),
+        "multicoin": cached_sources("multicoin", multicoin_rev, "packages/multicoin"),
+        "armature": cached_sources("armature", armature_rev, "packages/armature_framework"),
         "agreements": PACKAGES / "primitives" / "agreements" / "sources",
         "delivery_agreements": PACKAGES / "composites" / "delivery_agreements" / "sources",
         "roles": PACKAGES / "primitives" / "roles" / "sources",
@@ -302,7 +341,8 @@ def prepare_workspace():
     }
     for name, src in sources.items():
         if src is None or not src.is_dir():
-            fail(f"could not find sources for {name}")
+            fail(f"could not find sources for {name} (multicoin {multicoin_rev}, "
+                 f"armature {armature_rev}) under {GIT_CACHE / 'git'}")
     shutil.rmtree(MOVE, ignore_errors=True)
     for name, deps in MANIFESTS.items():
         pkg = MOVE / name
@@ -512,19 +552,9 @@ class Harness:
             names.append(name)
         ptb.vec(f"{self.p['roles']}::acl::Principal", names, "principals")
 
-    def post_for(self, specs, label):
-        cargo = self.mint(CARGO_QTY, CARGO_ASSET, "lister")
-        ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
-        self.terms(ptb, "terms")
-        self.principals(ptb, specs)
-        ptb.call(self.target("agreement_roles", "claim", "post_for"),
-                 "@" + cargo, "coins.0", "terms", "principals", "@" + self.config, "coins.1",
-                 CLOCK, types=[SUI, SUI], assign="cap")
-        ptb.transfer(["cap"], self.at("lister"))
-        res, row = self.measure(label, "lister", ptb, "lister (claim gate)")
-        return self.agreement_of(res), created(res, "::delivery::ListerCap")[0], row
-
-    def draft_gate_publish(self, specs, label):
+    def post_gated(self, specs, label):
+        """Post an agreement only `specs`' principals may accept: draft, add a
+        claim gate as an accept requirement, publish."""
         cargo = self.mint(CARGO_QTY, CARGO_ASSET, "lister")
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
         self.terms(ptb, "terms")
@@ -532,8 +562,10 @@ class Harness:
         ptb.call(self.target("delivery_agreements", "delivery", "draft"),
                  "@" + cargo, "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
                  types=[SUI, SUI], assign="draft")
-        ptb.call(self.target("agreement_roles", "claim", "require_to_claim"), "draft",
-                 "principals", types=[SUI])
+        ptb.call(self.target("agreement_roles", "claim", "requirement"), "principals",
+                 assign="gate")
+        ptb.call(self.target("delivery_agreements", "delivery", "require_to_accept"), "draft",
+                 "gate", types=[SUI])
         ptb.call(self.target("delivery_agreements", "delivery", "publish"), "draft",
                  types=[SUI], assign="cap")
         ptb.transfer(["cap"], self.at("lister"))
@@ -668,34 +700,31 @@ class Harness:
                   [post, lapse, self.collect(cap, with_coins=True)])
 
         say("claim gate (agreement_roles)")
-        ag, cap, post = self.post_for([("player", self.at("hauler"))],
-                                      "post_for (1 player)")
+        ag, cap, post = self.post_gated([("player", self.at("hauler"))], "post, gated (1 player)")
         acc = self.accept_gated(ag, "hauler", False, "accept as listed player")
-        self.life("gated player: post_for, accept, deliver", [post, acc, self.deliver(ag)])
+        self.life("gated player: post, accept, deliver", [post, acc, self.deliver(ag)])
 
-        ag, cap, post = self.post_for([("ou", "@" + self.ou)], "post_for (1 OU)")
+        ag, cap, post = self.post_gated([("ou", "@" + self.ou)], "post, gated (1 OU)")
         acc = self.accept_gated(ag, "member", True, "accept as OU board member")
-        self.life("gated OU: post_for, accept, deliver",
+        self.life("gated OU: post, accept, deliver",
                   [post, acc, self.deliver(ag, actor="member")])
 
-        ag, cap, post = self.draft_gate_publish(
-            [("ou", "@" + self.ou), ("player", self.at("hauler"))],
-            "draft + require_to_claim + publish (OU, player)")
+        ag, cap, post = self.post_gated(
+            [("ou", "@" + self.ou), ("player", self.at("hauler"))], "post, gated (OU, player)")
         acc = self.accept_gated(ag, "member", True, "accept as OU board member (2-entry gate)")
-        self.life("gated draft: draft/gate/publish, accept, deliver",
+        self.life("gated OU or player: post, accept, deliver",
                   [post, acc, self.deliver(ag, actor="member")])
 
         # Worst case: a full 32-principal gate, matched by the last entry.
         fillers = [("machine", "@0x" + format(0x1000 + i, "064x")) for i in range(31)]
-        ag, cap, post = self.post_for(fillers + [("player", self.at("hauler"))],
-                                      "post_for (32 principals)")
+        ag, cap, post = self.post_gated(fillers + [("player", self.at("hauler"))],
+                                        "post, gated (32 principals)")
         acc = self.accept_gated(ag, "hauler", False, "accept matching 32nd principal")
-        self.life("gated 32 principals: post_for, accept, deliver",
+        self.life("gated 32 principals: post, accept, deliver",
                   [post, acc, self.deliver(ag)])
 
-        ag, cap, post = self.post_for([("player", self.at("hauler"))],
-                                      "post_for (1 player)")
-        self.life("gated player: post_for, cancel", [post, self.cancel(ag, cap)])
+        ag, cap, post = self.post_gated([("player", self.at("hauler"))], "post, gated (1 player)")
+        self.life("gated player: post, cancel", [post, self.cancel(ag, cap)])
 
         self.admin_teardown_features()
 

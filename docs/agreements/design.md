@@ -26,7 +26,8 @@ With [warehouse receipts](https://github.com/loash-industries/warehouse-receipts
 | [`packages/primitives/agreements`](../../packages/primitives/agreements) | What every agreement type shares: `request`, `requirement`, `spec` and `payout` |
 | [`packages/composites/delivery_agreements`](../../packages/composites/delivery_agreements) | The core: `delivery`, `terms` for an agreement's terms, and `config` for approved currencies and protocol fees |
 | [`packages/composites/delivery_agreements/tests/test_extensions.move`](../../packages/composites/delivery_agreements/tests/test_extensions.move) | Minimal test extensions: an allowlist, an identity rule, a follow-up rule, a ledger observer and a wrapper that drafts for an entity |
-| [`packages/extensions/agreement_roles`](../../packages/extensions/agreement_roles) | A claim gate that limits an agreement to a list of principals: one player (a reservation), machine keys, or an OU's board |
+| [`packages/extensions/agreement_roles`](../../packages/extensions/agreement_roles) | A claim gate that limits an agreement action to a list of principals: one player (a reservation), machine keys, or an OU's board. Depends on no agreement type |
+| [`packages/integration/delivery_claim_tests`](../../packages/integration/delivery_claim_tests) | Unpublished end-to-end tests of the claim gate on delivery agreements |
 | [`packages/primitives/roles`](../../packages/primitives/roles) | The shared `Principal` used by `agreement_roles`; `armature_vault` switches to it at its next fresh publish |
 
 ## The core agreement
@@ -73,7 +74,7 @@ Paying the cap is what makes payouts follow an object. A wallet, a DAO's custody
 |---|---|
 | Accept | `now < accept_by_ms` |
 | Deliver | `now < deadline_ms`, where `deadline_ms = accepted_at + haul_ms` |
-| Forfeit | Any time after accept (hauler only) |
+| Forfeit | `now < deadline_ms` (hauler only) |
 | Default | `now >= deadline_ms` |
 | Cancel | Any time while open |
 | Close lapsed | `now >= accept_by_ms` while open (config admin only) |
@@ -100,7 +101,7 @@ The `config` module creates one shared `Config` at publish. It holds the approve
 - **Terms are fixed at drafting.** Each agreement copies the delivery rate and treasury (and records the posting fee it paid), so later config changes never alter an existing agreement, open or accepted.
 - **Other endings take no fee.** `default`, `forfeit`, `cancel` and `close_lapsed` take none, and don't refund the posting fee.
 - **The `AdminCap`** changes the config with `approve_currency<T>`, `revoke_currency<T>`, `set_post_fee<F>` (a fee must be more than 0), `clear_post_fee`, `set_delivery_fee_bps` (at most 10,000) and `set_treasury`. Each emits `ConfigUpdated` with the whole config, including the currency list. The publisher receives the cap; it has `store`, so a DAO can hold it.
-- **The `AdminCap` also closes lapsed agreements.** `delivery::close_lapsed` deletes an open agreement once `accept_by_ms` has passed, for listings whose `ListerCap` is lost or burned. The cargo and reward go to the agreement's `lister`, the signer of `draft`, or to its cap for terms that pay the cap holder, and never to the admin.
+- **The `AdminCap` also closes lapsed agreements.** `delivery::close_lapsed` deletes an open agreement once `accept_by_ms` has passed, for listings whose `ListerCap` is lost or burned. The cargo and reward go to the agreement's `lister`, the signer of `draft`, or to its cap for terms that pay the cap holder, and never to the admin. With a beneficiary address, a cap holder who isn't the lister can still `cancel` the lapsed listing, and whichever transaction lands first decides who gets the escrow, so the admin should close only listings lapsed long enough that a holder would have cancelled.
 
 ## Extensions
 
@@ -225,7 +226,7 @@ Every agreement event that carries a reward, collateral or delivery fee also car
 
 Terminal events delete the agreement and are self-contained: each names everyone who was paid. For terms that pay the cap holder, the beneficiary they name is the cap's address, where a `Proceeds` waits for `collect`. Index from the package's publish checkpoint. Off-chain failure rates need no observer at all: count `AgreementDefaulted` against `AgreementDelivered` per `hauler` or `hauler_identity`.
 
-The events cover discovery on both paths. Open jobs and who may take them come from `AgreementPosted`: a claim gate's principals are in `accept_requirements` (decode with `principals_of` or the same BCS layout). Which OU a gated job was taken for comes from `Claimed`. Who is on an OU's board comes from armature's own board events. Open, lapsed and overdue have no event; derive them from `accept_by_ms` and `deadline_ms` against chain time. `AgreementLapsed` marks the admin closing a lapsed agreement, not the moment it lapsed.
+The events cover discovery on both paths. Open jobs and who may take them come from `AgreementPosted`: a claim gate's principals are in `accept_requirements` (decode with `principals_of` or the same BCS layout). Which OU a gated job was taken for comes from `Claimed`, counted only when its `action` is delivery's `AcceptAction` (see [Recording it](#agreement_roles-who-may-claim)). Who is on an OU's board comes from armature's own board events. Open, lapsed and overdue have no event; derive them from `accept_by_ms` and `deadline_ms` against chain time. `AgreementLapsed` marks the admin closing a lapsed agreement, not the moment it lapsed.
 
 ## Rule packages
 
@@ -234,12 +235,13 @@ The events cover discovery on both paths. Open jobs and who may take them come f
 One requirement, `CanClaim { principals }`: the actor must satisfy any one of the listed principals. There are no roles, rosters or administrators; the list is part of the agreement.
 
 - **`Principal`** comes from the shared [`roles`](../../packages/primitives/roles) package, a copy of `armature_vault`'s, which the vault switches to at its next fresh publish: `Player { addr }`, `Machine { addr }`, or `Ou { ou_id }`, the last meaning any current board member of that OU.
-- **One `Player` is a reservation.** `post_for(...)` drafts, gates and publishes in one call. A character reservation would be a separate rule written against a world `AccessCap` and attached as the identity rule.
+- **One `Player` is a reservation.** A character reservation would be a separate rule written against a world `AccessCap` and attached as the identity rule.
 - **An `Ou` principal follows the board.** It is read at claim time, so "offer this to our haulers" means the board at accept time, not at posting time. The list itself is fixed when the agreement is published; anything that must change over time belongs in an OU.
-- **Attaching it.** `require_to_claim(draft, principals)` adds it as an accept requirement. `requirement(principals)` builds it for anything else, such as another agreement type's action. A list holds 1 to 32 principals, and several gates on one agreement must all pass.
-- **Satisfying it.** `satisfy(request, &org)` checks the actor while acting as a member of `org`; `Player` and `Machine` principals match whatever OU is passed. `satisfy_directly(request)` covers `Player` and `Machine` without an OU. The gate takes any `agreements::request::Request` and does not check the action, so it works for any action of any agreement type built on `agreements`. Only `require_to_claim` and `post_for` are specific to delivery.
+- **Attaching it.** `requirement(principals)` builds it, and `draft.require_to_accept(requirement)` adds it as a delivery accept requirement; another agreement type attaches it to its own action the same way. A list holds 1 to 32 principals, and several gates on one agreement must all pass.
+- **Satisfying it.** `satisfy(request, &org)` checks the actor while acting as a member of `org`; `Player` and `Machine` principals match whatever OU is passed. `satisfy_directly(request)` covers `Player` and `Machine` without an OU. The gate takes any `agreements::request::Request` and does not check the action, so it works for any action of any agreement type built on `agreements`. The package depends on no agreement type; its delivery end-to-end tests live in the unpublished `delivery_claim_tests` package.
 - **Reading it.** `principals_of(requirement)` decodes the list, so a client can show who may claim from `AgreementPosted`.
 - **Recording it.** A successful claim emits `Claimed { agreement_id, action, actor, principal }`, where `principal` is the first listed principal the actor matched. An `Ou` principal means they claimed as a board member of that OU.
+- **Trusting the record.** Anyone can open a request for an action type they define, naming any agreement ID, gate it on their own principals and complete it, so a `Claimed` naming a delivery agreement can come from an unrelated module. Count a claim only when its `action` is `delivery::AcceptAction` under delivery's original package ID: only delivery can open and complete that request, so the claim shares its transaction with the agreement's `AgreementAccepted`.
 
 ## Composition
 

@@ -1,4 +1,4 @@
-/// OU fixtures shared by the claim and flow tests: create an OU and change its
+/// OU fixtures for the claim tests: create an OU and change its
 /// board as an executed proposal would.
 #[test_only]
 module agreement_roles::test_ou;

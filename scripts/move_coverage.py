@@ -51,6 +51,10 @@ PACKAGES = tuple(sorted(
     for p in PACKAGES_DIR.glob("**/Move.toml")
     if "build" not in p.relative_to(PACKAGES_DIR).parts
 ))
+# Integration packages under packages/integration/ have tests but no sources,
+# so there is nothing of their own to measure. All packages are still copied,
+# so their local path dependencies resolve.
+MEASURED = tuple(p for p in PACKAGES if (PACKAGES_DIR / p / "sources").is_dir())
 COPY_IGNORE = shutil.ignore_patterns("build", "traces", "*.mvcov", "lcov.info", "test.log")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TEST_ONLY_FN = re.compile(r"#\[test_only\]\s*(?:#\[[^\]]*\]\s*|//[^\n]*\n\s*)*"
@@ -305,8 +309,8 @@ def report_package(pkg, rows, show_uncovered):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("packages", nargs="*", default=list(PACKAGES),
-                    help=f"packages to report (default: {' '.join(PACKAGES)})")
+    ap.add_argument("packages", nargs="*", default=list(MEASURED),
+                    help=f"packages to report (default: {' '.join(MEASURED)})")
     ap.add_argument("--build-env", default="testnet", help="sui --build-env (default: testnet)")
     ap.add_argument("--out", default=str(ROOT / "coverage"), help="report directory (default: coverage/)")
     ap.add_argument("--min", type=float, metavar="PCT",

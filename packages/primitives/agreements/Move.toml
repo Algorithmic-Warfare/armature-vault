@@ -6,9 +6,10 @@ edition = "2024"
 # agreements — the pieces every agreement type in this repo shares: requests and
 # requirements (how extensions gate an agreement's actions), `Spec` (an exact
 # multicoin amount) and `payout` (dividing a balance by basis points).
-# delivery_agreements uses all four (from `payout`, only the `bps()` scale its
-# delivery fee is measured in); auctions and item exchanges will use them too,
-# so one rule extension can gate every agreement type.
+# delivery_agreements uses all four (from `payout`, `pay` to return a lapsed
+# agreement's cargo and the `bps()` scale its delivery fee is measured in);
+# auctions and item exchanges will use them too, so one rule extension can gate
+# every agreement type.
 #
 # multicoin is pinned to the same revision as warehouse-receipts and
 # delivery_agreements, so `multicoin::Balance` is one published type throughout.

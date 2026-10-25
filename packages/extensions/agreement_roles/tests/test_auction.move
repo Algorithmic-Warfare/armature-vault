@@ -25,7 +25,7 @@ public fun create(bid_requirements: vector<Requirement>, ctx: &mut TxContext): I
     id
 }
 
-public fun begin_bid(self: &Auction, ctx: &mut TxContext): Request {
+public fun begin_bid(self: &Auction, ctx: &TxContext): Request {
     request::new(internal::permit<Bid>(), object::id(self), option::none(), self.bid_requirements, ctx)
 }
 

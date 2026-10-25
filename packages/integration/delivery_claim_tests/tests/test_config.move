@@ -1,7 +1,7 @@
 /// A config with no fees that approves `TOKEN`, for tests that don't exercise
 /// the protocol config, and the coin those tests pay in.
 #[test_only]
-module agreement_roles::test_config;
+module delivery_claim_tests::test_config;
 
 use delivery_agreements::config::{Self, Config};
 use std::type_name::{Self, TypeName};

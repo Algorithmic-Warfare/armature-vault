@@ -1,8 +1,8 @@
-/// Make a delivery agreement claimable only by a list of principals.
+/// Make an agreement action claimable only by a list of principals.
 ///
 /// A `CanClaim` requirement names the principals, from the shared
-/// `roles::acl::Principal`, that may act on the agreement. The actor must
-/// satisfy any one of them:
+/// `roles::acl::Principal`, that may take the action, such as accepting a
+/// delivery. The actor must satisfy any one of them:
 ///
 /// - `Player { addr }` or `Machine { addr }`: that wallet or service key. A
 ///   single `Player` reserves the agreement for one player.
@@ -18,12 +18,12 @@
 /// The gate does not check the action or the agreement type. `satisfy` and
 /// `satisfy_directly` take any `agreements::request::Request`, so the same
 /// requirement gates a delivery accept or an action of any other agreement
-/// type built on `agreements`. Only `require_to_claim` and
-/// `post_for` are specific to delivery.
+/// type built on `agreements`. This package depends on no agreement type.
 ///
 /// ```move
 /// // Lister: the haulers OU's board and one freelancer may claim.
-/// claim::require_to_claim(&mut draft, vector[acl::ou(haulers_id), acl::player(freelancer)]);
+/// let gate = claim::requirement(vector[acl::ou(haulers_id), acl::player(freelancer)]);
+/// draft.require_to_accept(gate);
 ///
 /// // A board member of the haulers OU claims, acting as that OU.
 /// let mut req = agreement.begin_accept(&clock, ctx);
@@ -40,16 +40,10 @@ module agreement_roles::claim;
 use agreements::request::Request;
 use agreements::requirement::{Self, Requirement};
 use armature::ou::OU;
-use delivery_agreements::config::Config;
-use delivery_agreements::delivery::{Self, Draft, ListerCap};
-use delivery_agreements::terms::Terms;
-use multicoin::multicoin::Balance;
 use roles::acl::{Self, Principal};
 use std::internal;
 use std::type_name::TypeName;
 use sui::bcs;
-use sui::clock::Clock;
-use sui::coin::Coin;
 use sui::event;
 
 // === Errors ===
@@ -78,8 +72,15 @@ public struct CanClaim has drop {
 /// `actor` satisfied a claim gate on `agreement_id` for `action` (for a
 /// delivery accept, `delivery::AcceptAction`) by matching `principal`, the
 /// first listed principal they satisfy. An `Ou` principal means they claimed
-/// as a board member of that OU. Emitted only if the action completes, since
-/// the request must be finished in the same transaction.
+/// as a board member of that OU.
+///
+/// Trust it only as far as `action`. Anyone can open a request for an action
+/// type they define, naming any `agreement_id`, gate it on their own
+/// principals and complete it, so a `Claimed` for a real agreement can come
+/// from an unrelated module. Accept one only when `action` is a type, by its
+/// original package ID, whose module you trust: only delivery can open and
+/// complete a request for `delivery::AcceptAction`, so such a claim always
+/// shares its transaction with that agreement's `AgreementAccepted`.
 public struct Claimed has copy, drop {
     agreement_id: ID,
     action: TypeName,
@@ -89,34 +90,12 @@ public struct Claimed has copy, drop {
 
 // === Public Functions ===
 
-/// A requirement only `principals` can satisfy. Attach it with
-/// `require_to_accept`, or to another agreement type's action.
+/// A requirement only `principals` can satisfy. Attach it to a delivery draft
+/// with `require_to_accept`, or to another agreement type's action.
 public fun requirement(principals: vector<Principal>): Requirement {
     let len = principals.length();
     assert!(len > 0 && len <= MAX_PRINCIPALS, EInvalidPrincipals);
     requirement::from_config(CanClaim { principals })
-}
-
-/// Only `principals` may accept the draft.
-public fun require_to_claim<T>(draft: &mut Draft<T>, principals: vector<Principal>) {
-    draft.require_to_accept(requirement(principals));
-}
-
-/// Post an agreement on `terms` that only `principals` can accept: `draft`,
-/// `require_to_claim`, `publish`.
-public fun post_for<T, F>(
-    cargo: Balance,
-    reward: Coin<T>,
-    terms: Terms,
-    principals: vector<Principal>,
-    config: &Config,
-    post_fee: Coin<F>,
-    clock: &Clock,
-    ctx: &mut TxContext,
-): ListerCap {
-    let mut draft = delivery::draft(cargo, reward, terms, config, post_fee, clock, ctx);
-    require_to_claim(&mut draft, principals);
-    draft.publish()
 }
 
 /// Satisfy the request's next requirement, a claim gate, acting as a member of

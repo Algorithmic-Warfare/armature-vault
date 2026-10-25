@@ -51,38 +51,39 @@ jobs:
     timeout-minutes: 25
     strategy:
       fail-fast: false
-      # One job per Move package.
-      #   path:  the package directory under packages/ ({primitives,composites,extensions}/<pkg>)
-      #   name:  the package name in its Move.toml (the Move.lock root entry)
+      # One job per Move package. Its name (the Move.lock root entry) is read
+      # from its Move.toml, so it can't drift from the path.
+      #   path:  the package directory under packages/
+      #          ({primitives,composites,extensions,integration}/<pkg>)
       #   pins:  which shared revs its Move.lock must carry
       #   deps:  the only direct dependencies it may have. This keeps the
       #          dependency boundaries explicit: delivery_agreements must never
       #          gain anything beyond multicoin and the agreements primitive,
-      #          and only agreement_roles and armature_vault may bring armature
-      #          into the agreements stack.
+      #          agreement_roles must never depend on an agreement type, and
+      #          only roles, agreement_roles and armature_vault may bring
+      #          armature into the agreements stack. Only the unpublished
+      #          integration packages may combine tiers.
       matrix:
         include:
           - path: composites/armature_vault
-            name: armature_vault
             pins: armature multicoin world warehouse_receipts
             # @todo(roles): add `roles` here when armature_vault switches to it.
             deps: armature multicoin std sui warehouse_receipts world
           - path: primitives/roles
-            name: roles
             pins: armature
             deps: armature std sui
           - path: primitives/agreements
-            name: agreements
             pins: multicoin
             deps: multicoin std sui
           - path: composites/delivery_agreements
-            name: delivery_agreements
             pins: multicoin
             deps: agreements multicoin std sui
           - path: extensions/agreement_roles
-            name: agreement_roles
             pins: armature multicoin
-            deps: agreements armature delivery_agreements multicoin roles std sui
+            deps: agreements armature roles std sui
+          - path: integration/delivery_claim_tests
+            pins: armature multicoin
+            deps: agreement_roles agreements armature delivery_agreements multicoin roles std sui
     defaults:
       run:
         working-directory: packages/${{ matrix.path }}
@@ -135,6 +136,19 @@ jobs:
 
       - name: sui --version
         run: sui --version
+
+      # The Sui framework and every git dependency are cloned into ~/.move.
+      # The key changes with the CLI (which picks the framework rev) and with
+      # any manifest (which picks the other revs); a stale restore only lacks
+      # new revs, which the build then fetches.
+      - name: Cache Move git dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.move
+          key: move-${{ runner.os }}-${{ steps.sui.outputs.version }}-${{ matrix.path }}-${{ hashFiles('packages/**/Move.toml') }}
+          restore-keys: |
+            move-${{ runner.os }}-${{ steps.sui.outputs.version }}-${{ matrix.path }}-
+            move-${{ runner.os }}-${{ steps.sui.outputs.version }}-
 
       # --build-env note: each package's Move.toml declares `testnet_stillness`
       # (publish target). CI builds under `testnet`, the lowest-common-
@@ -218,10 +232,14 @@ jobs:
 
       - name: Check dependency boundary
         env:
-          NAME: ${{ matrix.name }}
           ALLOWED: ${{ matrix.deps }}
         run: |
           set -euo pipefail
+          NAME=$(sed -n 's/^name = "\(.*\)"$/\1/p' Move.toml | head -n 1)
+          if [ -z "$NAME" ]; then
+            echo "::error::no package name in $(pwd)/Move.toml"
+            exit 1
+          fi
           line=$(grep -A4 "^\[pinned\.testnet\.$NAME\]" Move.lock | grep '^deps = ' || true)
           if [ -z "$line" ]; then
             echo "::error::no [pinned.testnet.$NAME] deps line in Move.lock"

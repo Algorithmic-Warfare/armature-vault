@@ -12,7 +12,8 @@ the vault outlives it.
 
 ## Packages
 
-Packages are grouped into three tiers under `packages/`:
+Packages are grouped into three tiers under `packages/`, plus unpublished
+integration tests:
 
 - **`primitives/`**: shared building blocks with no lifecycle of their own. They
   depend only on external pins, never on another package in this repo.
@@ -25,6 +26,11 @@ Packages are grouped into three tiers under `packages/`:
   if they only work with that one, and never on each other. Anything that
   needs armature, world-contracts or another outside system lives here rather
   than in a composite's core.
+- **`integration/`**: test-only packages that exercise packages from different
+  tiers together. Sui's package manager has no dev-dependencies, so a
+  test-only link from an extension to a composite would otherwise become a
+  published dependency. They have no sources, are never published, and
+  nothing depends on them.
 
 | Package | Depends on | What it is |
 |---|---|---|
@@ -32,18 +38,17 @@ Packages are grouped into three tiers under `packages/`:
 | [`primitives/agreements`](packages/primitives/agreements) | multicoin | What every agreement type shares: requests and requirements (how extensions gate an action), `Spec` (an exact multicoin amount) and `payout` (sending a balance, or splitting it by bps) |
 | [`composites/armature_vault`](packages/composites/armature_vault) | armature, world, multicoin, warehouse_receipts | The OU-gated receipt vault and keyspace described below |
 | [`composites/delivery_agreements`](packages/composites/delivery_agreements) | agreements, multicoin | Collateralized delivery agreements with optional accept rules and observers ([design](docs/agreements/design.md), [user paths](docs/agreements/user-paths.md)) |
-| [`extensions/agreement_roles`](packages/extensions/agreement_roles) | agreements, roles, armature, multicoin, delivery_agreements | A claim gate that limits an agreement to a list of principals: one player (a reservation), machine keys, or an OU's board |
+| [`extensions/agreement_roles`](packages/extensions/agreement_roles) | agreements, roles, armature | A claim gate that limits an agreement action to a list of principals: one player (a reservation), machine keys, or an OU's board |
+| [`integration/delivery_claim_tests`](packages/integration/delivery_claim_tests) | agreements, roles, delivery_agreements, agreement_roles, armature, multicoin | Unpublished. End-to-end tests of the claim gate on delivery agreements |
 
-`agreement_roles`' gate takes any `agreements` request, so it already gates
-every agreement type. It still depends on `delivery_agreements` for two
-delivery shortcuts (`require_to_claim`, `post_for`) and for its end-to-end
-tests: Sui's package manager has no dev-dependencies, so a test-only link to a
-composite is still a full dependency.
+`agreement_roles`' gate takes any `agreements` request, so it gates every
+agreement type without depending on one. A delivery lister attaches it with
+`draft.require_to_accept(claim::requirement(principals))`.
 
 CI checks each package's direct dependencies against the `deps` list in its
 `.github/workflows/move-test.yml` matrix entry, so `delivery_agreements` can
-never gain anything beyond multicoin and `agreements`. Keep that matrix and
-this table in sync.
+never gain anything beyond multicoin and `agreements`, and `agreement_roles`
+never an agreement type. Keep that matrix and this table in sync.
 
 ## What it does
 

@@ -85,7 +85,7 @@ public fun new<A>(
     agreement_id: ID,
     identity_rule: Option<TypeName>,
     mut requires: vector<Requirement>,
-    ctx: &mut TxContext,
+    ctx: &TxContext,
 ): Request {
     // Stored reversed so `pop_back` yields the first declared requirement first.
     requires.reverse();
@@ -187,6 +187,8 @@ public fun identity_rule(r: &Request): Option<TypeName> { r.identity_rule }
 
 public fun identity(r: &Request): Option<ID> { r.identity }
 
+/// The outstanding requirements, next one last: the reverse of declaration
+/// order, so `take_next` pops from the back. Use `next` for the one it takes.
 public fun requires(r: &Request): &vector<Requirement> { &r.requires }
 
 /// Borrow the next requirement (the one `take_next` would pop) without removing

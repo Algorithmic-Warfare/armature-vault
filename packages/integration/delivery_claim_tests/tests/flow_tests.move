@@ -4,12 +4,12 @@
 /// outcome record. The hauler is always the claiming player, never the OU, and
 /// the OU's other board members gain nothing.
 #[test_only]
-module agreement_roles::flow_tests;
+module delivery_claim_tests::flow_tests;
 
 use agreement_roles::claim;
-use agreement_roles::test_config::{Self, TOKEN};
-use agreement_roles::test_ledger::{Self, TestLedger};
-use agreement_roles::test_ou;
+use delivery_claim_tests::test_config::{Self, TOKEN};
+use delivery_claim_tests::test_ledger::{Self, TestLedger};
+use delivery_claim_tests::test_ou;
 use agreements::spec::{Self, Spec};
 use armature::ou::OU;
 use delivery_agreements::delivery::{
@@ -112,7 +112,7 @@ fun post(w: &mut World, gate: vector<Principal>): Posted {
     let ledger = w.scenario.take_shared_by_id<TestLedger>(w.ledger);
     test_ledger::bind(&ledger, &mut draft);
     ts::return_shared(ledger);
-    claim::require_to_claim(&mut draft, gate);
+    draft.require_to_accept(claim::requirement(gate));
     let cap = draft.publish();
     let (agreement_id, cap_id) = (cap.cap_agreement_id(), object::id(&cap));
     transfer::public_transfer(cap, LISTER);

@@ -499,31 +499,17 @@ fun flow_observed_cancel_before_accept() {
     finish(scenario, clock);
 }
 
-/// `forfeit` has no deadline check, so the hauler can still close the agreement
-/// after the deadline, before anyone calls `default`. The payout is the same.
-#[test]
-fun flow_observed_forfeit_after_deadline() {
+/// A hauler who missed the deadline cannot forfeit, so the failure is recorded
+/// by `default` (`forfeited = false`), never as giving up.
+#[test, expected_failure(abort_code = delivery::ETooLate)]
+fun flow_observed_forfeit_at_deadline_is_rejected() {
     let (mut scenario, mut clock) = setup();
-    let (agreement_id, ledger_id) = observed(&mut scenario, &clock);
+    observed(&mut scenario, &clock);
     accept_plain(&mut scenario, &mut clock);
-    clock.set_for_testing(DEADLINE_MS + 1);
+    clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(HAULER);
     let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
     agreement.forfeit(&clock, scenario.ctx());
-    assert_eq!(
-        event::events_by_type<AgreementDefaulted>(),
-        vector[
-            delivery::defaulted_event_for_testing(
-                agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, test_config::token(),
-                REWARD_QTY, COLLATERAL_QTY, true,
-            ),
-        ],
-    );
-    assert_tokens(&mut scenario, REWARD_QTY + COLLATERAL_QTY, 0, 0, FEE_QTY);
-    let record = take_record(ledger_id, &mut scenario);
-    assert_accepted_record(&record, DEADLINE_MS + 1);
-    assert!(record.record_outcome().outcome_forfeited());
-    record.delete_outcome();
     finish(scenario, clock);
 }
 

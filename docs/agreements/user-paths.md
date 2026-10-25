@@ -4,7 +4,7 @@ Every way a player, service or extension author interacts with a delivery agreem
 
 Code blocks show the commands of one programmable transaction block (PTB), written as Move calls. `delivery` is `delivery_agreements::delivery`, `terms` is `delivery_agreements::terms`, `config` is `delivery_agreements::config`, `spec` is `agreements::spec`, `request` is `agreements::request`, `claim` is `agreement_roles::claim`, `acl` is `roles::acl`, and `coin` is `sui::coin`. Times are milliseconds from the Sui `Clock`.
 
-`T` is the agreement's currency: the coin type of its reward, collateral and delivery fee, which must be approved in the shared `Config`. `F` is the posting fee's coin type. A PTB passes `T` as a type argument to every call on a `DeliveryAgreement<T>` or `Draft<T>`, and `T` then `F` to `draft`, `post` and `claim::post_for`. Cargo and `want` are multicoin balances; only payments are coins.
+`T` is the agreement's currency: the coin type of its reward, collateral and delivery fee, which must be approved in the shared `Config`. `F` is the posting fee's coin type. A PTB passes `T` as a type argument to every call on a `DeliveryAgreement<T>` or `Draft<T>`, and `T` then `F` to `draft` and `post`. Cargo and `want` are multicoin balances; only payments are coins.
 
 ## Who is involved
 
@@ -126,15 +126,19 @@ let cap = draft.publish();
 **When:** the job is for one player you've already agreed terms with, for your organisation's haulers, or for a mix. Uses [`agreement_roles`](../../packages/extensions/agreement_roles).
 
 ```move
-// One player only (a reservation), in one call: draft, gate, publish.
-let cap = claim::post_for<T, F>(cargo, reward, terms, vector[acl::player(player_address)],
-    &config, post_fee, &clock, ctx);
+let mut draft = delivery::draft<T, F>(cargo, reward, terms, &config, post_fee, &clock, ctx);
 
-// Or on a draft, alongside other extensions: the haulers OU's board, a
-// freelancer and a courier bot.
-claim::require_to_claim(&mut draft,
-    vector[acl::ou(haulers_ou_id), acl::player(freelancer), acl::machine(bot)]);
+// One player only (a reservation).
+draft.require_to_accept(claim::requirement(vector[acl::player(player_address)]));
+
+// Or the haulers OU's board, a freelancer and a courier bot.
+draft.require_to_accept(claim::requirement(
+    vector[acl::ou(haulers_ou_id), acl::player(freelancer), acl::machine(bot)]));
+
+let cap = draft.publish();
 ```
+
+- **It is L2 with a claim gate,** so it combines with an identity rule, an observer or `set_on_behalf_of` on the same draft.
 
 - **Principals** come from the shared `roles::acl` package, which copies `armature_vault`'s: `Player { addr }`, `Machine { addr }`, or `Ou { ou_id }`, meaning any current board member of that OU.
 - **Result:** only an actor who satisfies one of the principals can complete an accept. Anyone else aborts with `claim::ENotAuthorized`. Each successful claim emits `claim::Claimed`, naming the principal matched.
@@ -179,7 +183,7 @@ transfer::public_transfer(cap, custodian);   // or store it in the wrapper's own
 - **Result:** the agreement's beneficiary is the cap's own address, and `AgreementPosted.pays_cap_holder` is true. Everything paid to the lister's side arrives at the cap as one `Proceeds<T>`: the delivered `want`, the reward and collateral on default or forfeit, and the cargo and reward if the config admin closes the lapsed listing. Collect it with [L7](#l7-collect-proceeds).
 - **Cancelling is the same as L4.** The escrow goes straight back to the cap holder.
 - **Keep the cap safe.** `delete_cap` refuses it, and proceeds sent to a lost cap can't be recovered.
-- **It combines with the other paths:** `draft` (L2) and `claim::post_for` (L3) take the same terms.
+- **It combines with the other paths:** `draft` (L2 and L3) takes the same terms.
 
 ### L7. Collect proceeds
 
@@ -270,13 +274,14 @@ agreement.deliver(delivered, &clock, ctx);
 
 ### H4. Forfeit
 
-**When:** you accepted but won't deliver, and want to release the funds now instead of waiting for the deadline.
+**When:** you accepted but won't deliver, the deadline hasn't passed, and you want to release the funds now instead of waiting for it.
 
 ```move
 agreement.forfeit(&clock, ctx);   // only the hauler
 ```
 
 - **Result:** the reward and collateral go to the beneficiary now, with no fee taken, and you keep the cargo. `AgreementDefaulted { forfeited: true }` is emitted, and a bound observer receives the record. Forfeiting doesn't hide the failure.
+- **Fails with:** `ENotHauler` for anyone but the hauler, `ENotAccepted` while open, and `ETooLate` at or after `deadline_ms`. Past the deadline only `default` ([X2](#x2-collect-a-default)) ends it, recorded as `forfeited: false`.
 
 ---
 
@@ -340,7 +345,7 @@ public fun ingest(ledger: &mut Ledger, ticket: Receiving<OutcomeRecord>) {
 | Who an agreement was posted for | `AgreementPosted.on_behalf_of`: the entity and the wrapper type that vouched for it |
 | Proceeds waiting for a cap | `AgreementPosted.pays_cap_holder` with a terminal event; the `Proceeds` objects owned by the cap's address (`beneficiary`) |
 | Who may take a gated job | The claim gate in `AgreementPosted.accept_requirements`, decoded with `claim::principals_of`; for `Ou` principals, the OU's board from armature's board events |
-| Which OU a gated job was taken for | `claim::Claimed.principal` (an `Ou` principal), joined to `AgreementAccepted` by `agreement_id` |
+| Which OU a gated job was taken for | `claim::Claimed.principal` (an `Ou` principal) where `Claimed.action` is `delivery::AcceptAction` under delivery's original package ID, joined to `AgreementAccepted` by `agreement_id`. Drop claims with any other `action`: anyone can emit one naming a real agreement from an action type of their own |
 | Overdue jobs | No event: `AgreementAccepted.deadline_ms` before the latest checkpoint time, with no terminal event |
 
 Terminal events delete the agreement, so index from the package's publish checkpoint.
@@ -446,5 +451,6 @@ agreement.close_lapsed(&admin_cap, &clock, ctx);   // the config::AdminCap
 
 - **Result:** the cargo and reward go to the agreement's `lister`, the address that signed `draft`, or to its cap as `Proceeds` for terms that pay the cap holder, and never to the caller. The agreement is deleted and `AgreementLapsed` is emitted. A bound observer receives a `Lapsed` record. No fee is taken and the posting fee is not refunded. An empty cargo or a zero reward isn't sent.
 - **With a beneficiary address, refunds follow the signer, not the cap.** If a DAO or other wrapper listed through someone's key and holds the cap, the refund lands at that key's address. Such a lister should post on terms that pay the cap holder ([L6](#l6-post-with-payouts-to-the-cap-holder)).
+- **Give the cap holder time first.** The holder can still `cancel` a lapsed listing ([L4](#l4-cancel)), and whichever transaction lands first decides where the escrow goes. Close only listings lapsed long enough that a holder who meant to cancel would have.
 - **The cap survives.** Whoever holds it can delete it with `delete_cap` ([L5](#l5-delete-a-spent-cap)), or, for terms that pay the cap holder, collect the refund with it ([L7](#l7-collect-proceeds)).
 - **Fails with:** `ENotLapsed` before `accept_by_ms`, and `ENotOpen` once a hauler has accepted.

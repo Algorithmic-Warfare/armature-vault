@@ -1,7 +1,7 @@
 /// Binds an observer so the flow tests can read each agreement's outcome
 /// record. It charges no fee and keeps nothing.
 #[test_only]
-module agreement_roles::test_ledger;
+module delivery_claim_tests::test_ledger;
 
 use delivery_agreements::delivery::{Self, Draft, OutcomeRecord};
 use std::internal;
