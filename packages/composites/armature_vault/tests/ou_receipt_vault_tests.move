@@ -12,6 +12,7 @@
 #[test_only]
 module armature_vault::ou_receipt_vault_tests {
     use armature::{ou::{Self, OU}, governance, proposal, remove_member::RemoveMember};
+    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
     use armature_vault::{
         acl::{Self as acl, Principal},
         ou_receipt_vault::{Self as vault, OuReceiptVault, Role}
@@ -1135,6 +1136,7 @@ module armature_vault::ou_receipt_vault_tests {
         abort
     }
 
+    // @todo(docs): the key is (ssu_id, registrant_ou_id).
     /// M2: registry slot is reusable after deinit — a fresh registration under the
     /// same (ssu_id, editor_ou_id) key succeeds.
     #[test]
@@ -1380,6 +1382,7 @@ module armature_vault::ou_receipt_vault_tests {
         ts::end(scenario);
     }
 
+    // @todo(docs): the field is `registrant_ou_id`, not `registry_key_ou_id`.
     /// M2: after `update_registry_key`, deinit uses the *new* registry slot (the
     /// vault's `registry_key_ou_id` tracks the migration).
     #[test]

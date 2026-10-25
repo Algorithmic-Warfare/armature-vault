@@ -10,6 +10,41 @@ ACL is dynamic and role-based rather than a single fixed tribe. It lives in its 
 package (not inside `armature_world_bridge`) because that bridge is transitional and
 the vault outlives it.
 
+## Packages
+
+Packages are grouped into three tiers under `packages/`:
+
+- **`primitives/`**: shared building blocks with no lifecycle of their own. They
+  depend only on external pins, never on another package in this repo.
+- **`composites/`**: packages that own shared objects and state and have an
+  end-to-end lifecycle (a vault, an agreement type). They depend on primitives
+  and external pins, never on each other or on extensions.
+- **`extensions/`**: opt-in packages that attach to a composite's extension
+  points (rules, observers and so on), authorized through
+  `Permit<T>`. They depend on primitives, plus the one composite they extend
+  if they only work with that one, and never on each other. Anything that
+  needs armature, world-contracts or another outside system lives here rather
+  than in a composite's core.
+
+| Package | Depends on | What it is |
+|---|---|---|
+| [`primitives/roles`](packages/primitives/roles) | armature | The shared `Principal` (player, machine or OU board member) for role-gated packages. `agreement_roles` uses it now; `armature_vault` moves to it at its next fresh publish |
+| [`primitives/agreements`](packages/primitives/agreements) | multicoin | What every agreement type shares: requests and requirements (how extensions gate an action), `Spec` (an exact multicoin amount) and `payout` (splitting a balance by bps) |
+| [`composites/armature_vault`](packages/composites/armature_vault) | armature, world, multicoin, warehouse_receipts | The OU-gated receipt vault and keyspace described below |
+| [`composites/delivery_agreements`](packages/composites/delivery_agreements) | agreements, multicoin | Collateralized delivery agreements with optional accept rules and observers ([design](docs/agreements/design.md), [user paths](docs/agreements/user-paths.md)) |
+| [`extensions/agreement_roles`](packages/extensions/agreement_roles) | agreements, roles, armature, multicoin, delivery_agreements | A claim gate that limits an agreement to a list of principals: one player (a reservation), machine keys, or an OU's board |
+
+`agreement_roles`' gate takes any `agreements` request, so it already gates
+every agreement type. It still depends on `delivery_agreements` for two
+delivery shortcuts (`require_to_claim`, `post_for`) and for its end-to-end
+tests: Sui's package manager has no dev-dependencies, so a test-only link to a
+composite is still a full dependency.
+
+CI checks each package's direct dependencies against the `deps` list in its
+`.github/workflows/move-test.yml` matrix entry, so `delivery_agreements` can
+never gain anything beyond multicoin and `agreements`. Keep that matrix and
+this table in sync.
+
 ## What it does
 
 Players mint standard `multicoin::Balance` receipts via the `warehouse_receipts`
@@ -66,6 +101,11 @@ permanently brick the ACL.
 
 ## Dependencies & environments
 
+- **Pending: `roles`** (local, `packages/primitives/roles`). The vault still ships
+  its own `armature_vault::acl`, which `roles::acl` copies. Switching the vault to
+  `roles` changes its types, so it waits for the next fresh publish (every cycle
+  rollover is one) rather than an upgrade of v1. The change points are marked
+  `@todo(roles)` in the package.
 - `armature` (framework) pinned to `ae60685` (Cycle 7, armature `main`) — OU identity
   (`armature::ou::OU`) / `is_governance_member`.
 - `world` pinned to `d33ff23` — same rev warehouse-receipts uses, so `StorageUnit`
@@ -78,6 +118,7 @@ permanently brick the ACL.
 **Target env:** `testnet_stillness`.
 
 ```
+cd packages/<package>
 sui move build --build-env testnet_stillness
 sui move test  --build-env testnet_stillness
 ```

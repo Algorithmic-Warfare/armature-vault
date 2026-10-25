@@ -1,0 +1,18 @@
+[package]
+name = "roles"
+version = "0.0.1"
+edition = "2024"
+
+# roles — the caller-identity primitive for role-gated packages in this repo.
+# agreement_roles' claim gate uses it now. armature_vault still ships its own copy as
+# armature_vault::acl and switches at its next fresh publish (see @todo(roles)).
+# A `Principal` is a player address, a machine key, or any board member of an
+# armature OU. Each consuming package defines its own Role type and ACL.
+#
+# armature is pinned to Cycle 7 (`ae60685`, armature `main`), the same revision
+# armature_vault uses, so `armature::ou::OU` is one type across the repo.
+[dependencies]
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "ae60685f888ac5dd4d24413fb989002ef5315c74" }
+
+[environments]
+testnet_stillness = "4c78adac"

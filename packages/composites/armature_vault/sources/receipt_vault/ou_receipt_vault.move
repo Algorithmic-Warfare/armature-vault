@@ -1,3 +1,6 @@
+// @todo(docs): in the module doc below, `Edit` holders can grant/revoke on every role,
+// including `Edit`, not only `Deposit`/`Withdraw`. Fix the comments in this file at the
+// next fresh publish, not in a v1 upgrade-in-place.
 /// OU receipt vault (`ou_receipt_vault`) — an OU-gated accumulator for warehouse
 /// receipts with a dynamic, multi-principal access-control list.
 ///
@@ -41,6 +44,7 @@
 /// types diverge and receipts cannot be deposited.
 module armature_vault::ou_receipt_vault {
     use armature::ou::OU;
+    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
     use armature_vault::acl::{Self as acl, Principal};
     use multicoin::multicoin::Balance;
     use sui::{dynamic_object_field as dof, event, table::{Self, Table}, vec_map::{Self, VecMap}};
@@ -105,6 +109,7 @@ module armature_vault::ou_receipt_vault {
         registrant_ou_id: ID,
     }
 
+    // @todo(docs): the registry key is (storage_unit_id, registrant_ou_id).
     /// Shared singleton registry mapping (storage_unit_id, editor_ou_id) → vault id.
     public struct OuReceiptVaultRegistry has key {
         id: UID,
@@ -326,6 +331,7 @@ module armature_vault::ou_receipt_vault {
 
     // === Public: deposit / withdraw ===
 
+    // @todo(docs): a bare `Machine` principal also passes with any `&OU`, not only `Player`.
     /// Deposit a warehouse receipt. The caller must satisfy the `Deposit` role using
     /// `org` as their OU context (or be a bare `Player` deposit principal, in which
     /// case any `&OU` may be passed). Receipt must belong to the vault's collection.
@@ -561,6 +567,8 @@ module armature_vault::ou_receipt_vault {
         vault.registrant_ou_id = new_registrant_org.id();
     }
 
+    // @todo(docs): the slot is keyed by `vault.registrant_ou_id`, not `editor_org`, and the
+    // field below is `registrant_ou_id`, not `registry_key_ou_id`.
     /// M2: free the registry slot for this vault's (SSU, current editor_org) key
     /// and effectively brick the vault by clearing its ACL. The caller must satisfy
     /// `Edit` using `editor_org`, and the vault must be empty

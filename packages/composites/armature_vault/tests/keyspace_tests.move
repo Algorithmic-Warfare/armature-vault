@@ -1,6 +1,7 @@
 #[test_only]
 module armature_vault::keyspace_tests {
     use armature::{ou::{Self, OU}, governance, proposal, remove_member::RemoveMember};
+    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
     use armature_vault::{acl as acl, keyspace::{Self, Keyspace, EncryptedEntry}};
     use std::string;
     use sui::test_scenario as ts;

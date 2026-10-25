@@ -28,6 +28,8 @@
 /// member check makes that association unspoofable.
 module armature_vault::keyspace {
     use armature::ou::OU;
+    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once
+    // acl.move moves there, and update the module doc's `armature_vault::acl` above.
     use armature_vault::acl::{Self as acl, Principal};
     use std::{option::{Self, Option}, string::String};
     use sui::{event, vec_map::{Self, VecMap}};

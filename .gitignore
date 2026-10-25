@@ -7,3 +7,6 @@ Move.lock
 
 # Move coverage reports (scripts/move_coverage.py)
 coverage/
+
+# Gas harness state (scripts/gas_harness.py)
+.gas-harness/

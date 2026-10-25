@@ -14,14 +14,56 @@ concurrency:
   group: move-test-${{ github.ref }}
   cancel-in-progress: true
 
+# Pinned dependency revs, shared by every package. Keep in sync with the
+# packages' Move.toml files: when you bump a pin there, bump it here too.
+env:
+  ARMATURE_REV: "ae60685f888ac5dd4d24413fb989002ef5315c74"
+  MULTICOIN_REV: "2772c26d24c02671726d39f167b8f772777875d9"
+  WORLD_REV: "d33ff232bd3878e8f9ad0721e18564b21facc925"
+  WAREHOUSE_RECEIPTS_REV: "212be7c5ee1ee8bca55305e86e1ae549df78c279"
+
 jobs:
   move-test:
-    name: sui move test
+    name: sui move test (${{ matrix.path }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      # One job per Move package.
+      #   path:  the package directory under packages/ ({primitives,composites,extensions}/<pkg>)
+      #   name:  the package name in its Move.toml (the Move.lock root entry)
+      #   pins:  which shared revs its Move.lock must carry
+      #   deps:  the only direct dependencies it may have. This keeps the
+      #          dependency boundaries explicit: delivery_agreements must never
+      #          gain anything beyond multicoin and the agreements primitive,
+      #          and only agreement_roles and armature_vault may bring armature
+      #          into the agreements stack.
+      matrix:
+        include:
+          - path: composites/armature_vault
+            name: armature_vault
+            pins: armature multicoin world warehouse_receipts
+            # @todo(roles): add `roles` here when armature_vault switches to it.
+            deps: armature multicoin std sui warehouse_receipts world
+          - path: primitives/roles
+            name: roles
+            pins: armature
+            deps: armature std sui
+          - path: primitives/agreements
+            name: agreements
+            pins: multicoin
+            deps: multicoin std sui
+          - path: composites/delivery_agreements
+            name: delivery_agreements
+            pins: multicoin
+            deps: agreements multicoin std sui
+          - path: extensions/agreement_roles
+            name: agreement_roles
+            pins: armature multicoin
+            deps: agreements armature delivery_agreements multicoin roles std sui
     defaults:
       run:
-        working-directory: packages/armature_vault
+        working-directory: packages/${{ matrix.path }}
     steps:
       - uses: actions/checkout@v4
 
@@ -72,7 +114,7 @@ jobs:
       - name: sui --version
         run: sui --version
 
-      # --build-env note: the package's Move.toml declares `testnet_stillness`
+      # --build-env note: each package's Move.toml declares `testnet_stillness`
       # (publish target). CI builds under `testnet`, the lowest-common-
       # denominator env that resolves all transitive deps.
       #
@@ -91,14 +133,13 @@ jobs:
 
       # Issue #9: lockfile dep-rev guard (root pin presence + transitive-link audit).
       #
-      # What this enforces:
-      #   1. Our root package's [pinned.testnet.armature_vault].deps resolves
-      #      multicoin to our pinned rev (2772c26) and world to our pinned rev
-      #      (d33ff23). If `override = true` is dropped on multicoin or the
+      # What this enforces, per package:
+      #   1. Every shared rev the package depends on (matrix.pins) appears as a
+      #      pinned source in its Move.lock. For armature_vault this is the
+      #      original guard: if `override = true` is dropped on multicoin or the
       #      top-level world pin is removed, those deps reroute and the check
       #      fails.
-      #   2. armature is at the pinned rev (ae60685, Cycle 7) and
-      #      warehouse_receipts is at the pinned rev (212be7c).
+      #   2. The package's direct dependencies are exactly within matrix.deps.
       #
       # What this DOES NOT enforce (intentionally surfaced, not failed):
       #   - Transitive packages may resolve multicoin/world to *different* revs.
@@ -113,47 +154,39 @@ jobs:
       #     suggests yes; world's digests differ, so world may not unify). This
       #     pre-existed PR #12 and is tracked in a separate follow-up issue.
       #
-      #     The audit step below surfaces the transitive linkage on every run
-      #     so a regression there is visible in CI logs without failing the
-      #     build; bake-in a strict assertion only after the follow-up resolves
-      #     the runtime-identity question.
+      #     The audit step below surfaces the transitive linkage on every
+      #     armature_vault run so a regression there is visible in CI logs
+      #     without failing the build; bake-in a strict assertion only after the
+      #     follow-up resolves the runtime-identity question.
       - name: Check pinned dep revs in Move.lock
+        env:
+          PINS: ${{ matrix.pins }}
         run: |
           set -euo pipefail
           if [ ! -f Move.lock ]; then
             echo "::error::Move.lock not found in $(pwd). Did 'sui move build' get reordered before this step? (sui move test alone does NOT regenerate the lock.)"
             exit 1
           fi
-          # Expected revs — keep in sync with packages/armature_vault/Move.toml.
-          # When you bump a pin in Move.toml, bump it here too.
-          EXPECTED_ARMATURE="ae60685f888ac5dd4d24413fb989002ef5315c74"
-          EXPECTED_MULTICOIN="2772c26d24c02671726d39f167b8f772777875d9"
-          EXPECTED_WORLD="d33ff232bd3878e8f9ad0721e18564b21facc925"
-          EXPECTED_WAREHOUSE_RECEIPTS="212be7c5ee1ee8bca55305e86e1ae549df78c279"
 
           fail=0
           # Anchor the assertion to a `source = ... rev = "..."` line so a stray
           # SHA-shaped substring in a manifest_digest can't satisfy the check.
-          check() {
-            local name="$1" rev="$2"
+          for name in $PINS; do
+            var="$(echo "$name" | tr '[:lower:]' '[:upper:]')_REV"
+            rev="${!var}"
             if grep -qE "source = \{[^}]*rev = \"$rev\"" Move.lock; then
               echo "ok   $name pinned at $rev"
             else
               echo "FAIL $name expected $rev — no [pinned.testnet.*] source line carries it"
               fail=1
             fi
-          }
-
-          check armature "$EXPECTED_ARMATURE"
-          check multicoin "$EXPECTED_MULTICOIN"
-          check world "$EXPECTED_WORLD"
-          check warehouse_receipts "$EXPECTED_WAREHOUSE_RECEIPTS"
+          done
 
           if [ "$fail" -ne 0 ]; then
             echo ""
             echo "::error::Move.lock dep-rev drift detected. Either:"
             echo "  - You intentionally bumped a pin in Move.toml — update the"
-            echo "    EXPECTED_* values above to match."
+            echo "    *_REV values at the top of this workflow to match."
             echo "  - You dropped \`override = true\` on multicoin or removed the"
             echo "    top-level world pin — restore the override so transitive"
             echo "    deps don't shadow our chosen rev for the root package."
@@ -161,11 +194,33 @@ jobs:
             exit 1
           fi
 
+      - name: Check dependency boundary
+        env:
+          NAME: ${{ matrix.name }}
+          ALLOWED: ${{ matrix.deps }}
+        run: |
+          set -euo pipefail
+          line=$(grep -A4 "^\[pinned\.testnet\.$NAME\]" Move.lock | grep '^deps = ' || true)
+          if [ -z "$line" ]; then
+            echo "::error::no [pinned.testnet.$NAME] deps line in Move.lock"
+            exit 1
+          fi
+          echo "$NAME → $line"
+          fail=0
+          for dep in $(echo "$line" | grep -oE '[A-Za-z0-9_]+ = "' | sed 's/ = "//'); do
+            case " $ALLOWED " in
+              *" $dep "*) ;;
+              *) echo "::error::$NAME depends on '$dep', which is not in its allowed list ($ALLOWED)"; fail=1 ;;
+            esac
+          done
+          exit "$fail"
+
       # Surface (not fail) the transitive dep linkage so any regression in how
       # warehouse_receipts / armature themselves resolve multicoin and world is
       # visible in CI logs. Wrap as a heredoc-friendly soft-warn rather than a
       # hard gate while the runtime-identity question is open (follow-up issue).
       - name: Audit transitive dep linkage (informational)
+        if: matrix.path == 'composites/armature_vault'
         run: |
           set -euo pipefail
           echo "Transitive dep mapping in Move.lock (informational — does not fail):"

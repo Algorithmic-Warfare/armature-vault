@@ -1,3 +1,9 @@
+// @todo(roles): this module now also lives in packages/primitives/roles as
+// `roles::acl`: the same `Principal`, with `satisfies` made public and
+// `satisfies_directly` added. At the next fresh publish (cycle rollover), delete
+// this file, add the `roles` dependency in Move.toml and switch every import to
+// `roles::acl`. It can't ship as an upgrade of the published v1: removing a
+// module isn't upgrade-compatible.
 /// Standalone ACL primitives for the armature-vault permission model.
 ///
 /// `Principal` is the caller-identity abstraction shared across all vault modules.

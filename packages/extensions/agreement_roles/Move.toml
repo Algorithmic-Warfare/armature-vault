@@ -1,0 +1,20 @@
+[package]
+name = "agreement_roles"
+version = "0.0.1"
+edition = "2024"
+
+# A claim gate that makes an agreement claimable only by a list of
+# principals (a player, a machine key, or any board member of an OU) from the
+# shared `roles` package, which copies armature_vault's principals. One player
+# is a reservation; an OU follows its board as it changes.
+#
+# armature is pinned to the same revision as armature_vault (testnet_stillness).
+[dependencies]
+agreements = { local = "../../primitives/agreements" }
+delivery_agreements = { local = "../../composites/delivery_agreements" }
+roles = { local = "../../primitives/roles" }
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "ae60685f888ac5dd4d24413fb989002ef5315c74" }
+multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "2772c26d24c02671726d39f167b8f772777875d9" }
+
+[environments]
+testnet_stillness = "4c78adac"

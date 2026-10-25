@@ -8,6 +8,7 @@
 #[test_only]
 module armature_vault::ou_receipt_vault_init_tests {
     use armature::{governance, ou::{Self, OU}};
+    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
     use armature_vault::{
         acl,
         ou_receipt_vault::{Self as vault, OuReceiptVault, OuReceiptVaultRegistry}

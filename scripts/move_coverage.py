@@ -9,7 +9,8 @@ working tree) and reports, per source file:
              compiler's source maps (each instruction's start line, plus each
              function's signature line); executed lines from the trace LCOV.
   functions  functions entered (trace LCOV)
-  branches   branch arms taken (trace LCOV)
+  branches   arms of conditional branches taken (trace LCOV; one-arm
+             unconditional edges are left out)
   bytecode   instructions executed (`sui move coverage summary`)
 
 `#[test_only]` functions in sources/ are left out of every metric.
@@ -17,7 +18,7 @@ working tree) and reports, per source file:
 Writes to --out (default: coverage/):
   lcov.info               LCOV for every package with repo-relative paths, for
                           Coverage Gutters, genhtml, Codecov
-  <package>.lcov.info     LCOV for that package
+  <package>.lcov.info     LCOV for that package ("/" in nested names becomes ".")
   <package>.bytecode.csv  per-function bytecode coverage, as the CLI prints it
   summary.json            the numbers printed below
   html/                   genhtml report, if genhtml is on PATH
@@ -44,11 +45,21 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PACKAGES_DIR = ROOT / "packages"
-PACKAGES = tuple(sorted(p.parent.name for p in PACKAGES_DIR.glob("*/Move.toml")))
+# Packages are named by their path under packages/, e.g. "primitives/roles".
+PACKAGES = tuple(sorted(
+    p.parent.relative_to(PACKAGES_DIR).as_posix()
+    for p in PACKAGES_DIR.glob("**/Move.toml")
+    if "build" not in p.relative_to(PACKAGES_DIR).parts
+))
 COPY_IGNORE = shutil.ignore_patterns("build", "traces", "*.mvcov", "lcov.info", "test.log")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TEST_ONLY_FN = re.compile(r"#\[test_only\]\s*(?:#\[[^\]]*\]\s*|//[^\n]*\n\s*)*"
                           r"(?:public(?:\([a-z]+\))?\s+)?(?:entry\s+)?(?:macro\s+)?fun\s+(\w+)")
+
+
+def report_name(pkg):
+    """A flat report file name for a package path such as "primitives/roles"."""
+    return pkg.replace("/", ".")
 
 
 def fail(msg):
@@ -159,14 +170,31 @@ def parse_lcov(text):
     return records
 
 
+def conditional_arms(brda):
+    """Keep only the arms of conditional branches: blocks with two or more arms.
+
+    The trace LCOV also emits a one-arm BRDA for unconditional edges (jumps,
+    loop back-edges, fall-through into a join). Those are not decisions: they
+    run whenever their block runs, which line and bytecode coverage already
+    measure, and the tracer never records some fall-through edges at all, so
+    they would show as untaken even when their block executed."""
+    arms = {}
+    for ln, block, _ in brda:
+        arms[block] = arms.get(block, 0) + 1
+    return {k: h for k, h in brda.items() if arms[k[1]] > 1}
+
+
 def restrict(rec, executable, test_only, skipped):
-    """Drop test-only functions and anything outside this file's own lines."""
+    """Drop test-only functions, anything outside this file's own lines, and
+    unconditional edges."""
     in_skipped = lambda ln: any(a <= ln <= b for a, b in skipped)
     return {
         "fn": {n: ln for n, ln in rec["fn"].items() if n not in test_only},
         "fnda": {n: h for n, h in rec["fnda"].items() if n not in test_only},
         "da": {ln: h for ln, h in rec["da"].items() if ln in executable},
-        "brda": {k: h for k, h in rec["brda"].items() if k[0] in executable and not in_skipped(k[0])},
+        "brda": conditional_arms(
+            {k: h for k, h in rec["brda"].items() if k[0] in executable and not in_skipped(k[0])}
+        ),
     }
 
 
@@ -330,7 +358,7 @@ def main():
                 print(text[-4000:], file=sys.stderr)
                 fail(f"{pkg}: `sui move coverage summary` failed")
             csvs[pkg] = text[text.find("ModuleName,"):]
-            (out_dir / f"{pkg}.bytecode.csv").write_text(csvs[pkg])
+            (out_dir / f"{report_name(pkg)}.bytecode.csv").write_text(csvs[pkg])
 
             # The test build's source maps, restricted to this package's sources/.
             sources = f"{path}/sources/"
@@ -360,7 +388,7 @@ def main():
                 files[rel] = (rec, executable)
             summary[pkg] = {"total": report_package(pkg, rows, args.uncovered), "files": rows}
             write_lcov({r: v for r, v in files.items() if r.startswith(f"packages/{pkg}/")},
-                       out_dir / f"{pkg}.lcov.info")
+                       out_dir / f"{report_name(pkg)}.lcov.info")
 
         write_lcov(files, out_dir / "lcov.info")
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

@@ -1,0 +1,18 @@
+[package]
+name = "agreements"
+version = "0.0.1"
+edition = "2024"
+
+# agreements — the pieces every agreement type in this repo shares: requests and
+# requirements (how extensions gate an agreement's actions), `Spec` (an exact
+# multicoin amount) and `payout` (dividing a balance by basis points).
+# delivery_agreements uses all but `payout` now; auctions and item exchanges
+# will use them too, so one rule extension can gate every agreement type.
+#
+# multicoin is pinned to the same revision as warehouse-receipts and
+# delivery_agreements, so `multicoin::Balance` is one published type throughout.
+[dependencies]
+multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "2772c26d24c02671726d39f167b8f772777875d9" }
+
+[environments]
+testnet_stillness = "4c78adac"

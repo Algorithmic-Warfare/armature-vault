@@ -14,6 +14,8 @@ version = "0.0.1"
 # (0xdbb778cb...), world to rev d33ff23 (0x7be18d62...) and warehouse_receipts
 # to main 212be7c (0x134dfa96...).
 [dependencies]
+# @todo(roles): add `roles = { local = "../../primitives/roles" }` when acl.move moves
+# to packages/primitives/roles (next fresh publish).
 armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "ae60685f888ac5dd4d24413fb989002ef5315c74", override = true }
 world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "d33ff232bd3878e8f9ad0721e18564b21facc925", override = true }
 # override = true: unify warehouse_receipts on the same multicoin build (2772c26,
