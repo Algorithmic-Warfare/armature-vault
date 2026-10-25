@@ -1,11 +1,11 @@
 #[test_only]
-module delivery_agreements::delivery_tests;
+module hauling_agreements::hauling_tests;
 
 use agreements::spec::{Self, Spec};
-use delivery_agreements::config;
-use delivery_agreements::delivery::{
+use hauling_agreements::config;
+use hauling_agreements::hauling::{
     Self,
-    DeliveryAgreement,
+    HaulingAgreement,
     ListerCap,
     AgreementPosted,
     AgreementAccepted,
@@ -14,8 +14,8 @@ use delivery_agreements::delivery::{
     AgreementCancelled,
     AgreementLapsed
 };
-use delivery_agreements::terms;
-use delivery_agreements::test_config::{Self, TOKEN};
+use hauling_agreements::terms;
+use hauling_agreements::test_config::{Self, TOKEN};
 use multicoin::multicoin::{Self, Balance};
 use std::unit_test::assert_eq;
 use sui::clock::{Self, Clock};
@@ -83,7 +83,7 @@ fun accept(scenario: &mut Scenario, clock: &mut Clock) {
     clock.set_for_testing(ACCEPT_AT_MS);
     scenario.next_tx(HAULER);
     let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
-    let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, clock, scenario.ctx());
     transfer::public_transfer(cargo, HAULER);
     ts::return_shared(agreement);
@@ -120,7 +120,7 @@ fun post_then_accept_releases_cargo_and_locks_collateral() {
     assert_eq!(
         event::events_by_type<AgreementPosted>(),
         vector[
-            delivery::posted_event_for_testing(
+            hauling::posted_event_for_testing(
                 agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
                 want(), test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
                 vector[], option::none(), option::none(), option::none(), 0, test_config::treasury(),
@@ -130,7 +130,7 @@ fun post_then_accept_releases_cargo_and_locks_collateral() {
 
     scenario.next_tx(OTHER);
     {
-        let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+        let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         assert!(agreement.is_open());
         assert_eq!(agreement.beneficiary(), BENEFICIARY);
         assert_eq!(agreement.want(), want());
@@ -146,14 +146,14 @@ fun post_then_accept_releases_cargo_and_locks_collateral() {
     accept(&mut scenario, &mut clock);
     assert_eq!(
         event::events_by_type<AgreementAccepted>(),
-        vector[delivery::accepted_event_for_testing(
+        vector[hauling::accepted_event_for_testing(
             agreement_id, HAULER, option::none(), option::none(), DEADLINE_MS,
         )],
     );
 
     scenario.next_tx(OTHER);
     {
-        let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+        let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         assert!(!agreement.is_open());
         assert_eq!(agreement.hauler(), option::some(HAULER));
         assert_eq!(agreement.deadline_ms(), DEADLINE_MS);
@@ -177,12 +177,12 @@ fun deliver_pays_beneficiary_and_returns_reward_and_collateral() {
     clock.set_for_testing(DEADLINE_MS - 1);
     scenario.next_tx(OTHER);
     let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementDelivered>(),
         vector[
-            delivery::delivered_event_for_testing(
+            hauling::delivered_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, want(),
                 test_config::token(), REWARD_QTY, COLLATERAL_QTY, 0, test_config::treasury(),
             ),
@@ -208,12 +208,12 @@ fun default_at_deadline_pays_beneficiary() {
 
     clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.default(&clock, scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementDefaulted>(),
         vector[
-            delivery::defaulted_event_for_testing(
+            hauling::defaulted_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, test_config::token(),
                 REWARD_QTY, COLLATERAL_QTY, false,
             ),
@@ -241,7 +241,7 @@ fun cancel_returns_cargo_and_reward_to_cap_holder() {
     transfer::public_transfer(cap, OTHER);
     scenario.next_tx(OTHER);
     let cap = scenario.take_from_sender<ListerCap>();
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     assert_eq!(object::id(&agreement), agreement_id);
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
     assert_eq!(multicoin::collection_id(&cargo), src());
@@ -250,7 +250,7 @@ fun cancel_returns_cargo_and_reward_to_cap_holder() {
     assert_eq!(
         event::events_by_type<AgreementCancelled>(),
         vector[
-            delivery::cancelled_event_for_testing(
+            hauling::cancelled_event_for_testing(
                 agreement_id, OTHER, cargo_spec(), test_config::token(), REWARD_QTY,
             ),
         ],
@@ -268,7 +268,7 @@ fun cancel_after_accept_window_lapses() {
     clock.set_for_testing(ACCEPT_BY_MS + 1);
     scenario.next_tx(LISTER);
     let cap = scenario.take_from_sender<ListerCap>();
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
     transfer::public_transfer(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
@@ -284,12 +284,12 @@ fun close_lapsed_returns_cargo_and_reward_to_lister() {
     clock.set_for_testing(ACCEPT_BY_MS);
     scenario.next_tx(ADMIN);
     let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementLapsed>(),
         vector[
-            delivery::lapsed_event_for_testing(
+            hauling::lapsed_event_for_testing(
                 agreement_id, LISTER, LISTER, ADMIN, cargo_spec(), test_config::token(),
                 REWARD_QTY,
             ),
@@ -312,11 +312,11 @@ fun delete_cap_after_delivery_reclaims_the_cap() {
     accept(&mut scenario, &mut clock);
     scenario.next_tx(OTHER);
     let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
 
     scenario.next_tx(LISTER);
-    delivery::delete_cap(scenario.take_from_sender<ListerCap>());
+    hauling::delete_cap(scenario.take_from_sender<ListerCap>());
     scenario.next_tx(LISTER);
     assert_eq!(ts::ids_for_address<ListerCap>(LISTER).length(), 0);
     finish(scenario, clock);
@@ -337,7 +337,7 @@ fun close_lapsed_sends_nothing_for_empty_cargo_and_reward() {
     clock.set_for_testing(ACCEPT_BY_MS);
     scenario.next_tx(ADMIN);
     let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
     transfer::public_transfer(admin_cap, ADMIN);
 
@@ -483,14 +483,14 @@ fun post_rejects_haul_window_over_max() {
 
 // === Accepting ===
 
-#[test, expected_failure(abort_code = delivery::ETooLate)]
+#[test, expected_failure(abort_code = hauling::ETooLate)]
 fun accept_rejects_at_accept_by() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
     clock.set_for_testing(ACCEPT_BY_MS);
     scenario.next_tx(HAULER);
     let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
-    let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
     transfer::public_transfer(cargo, HAULER);
     ts::return_shared(agreement);
@@ -506,7 +506,7 @@ fun accept_allowed_just_before_accept_by() {
     clock.set_for_testing(ACCEPT_BY_MS - 1);
     scenario.next_tx(HAULER);
     let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
-    let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
     assert_eq!(agreement.deadline_ms(), ACCEPT_BY_MS - 1 + HAUL_MS);
     transfer::public_transfer(cargo, HAULER);
@@ -514,14 +514,14 @@ fun accept_allowed_just_before_accept_by() {
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::ENotOpen)]
+#[test, expected_failure(abort_code = hauling::ENotOpen)]
 fun accept_rejects_second_hauler() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     scenario.next_tx(OTHER);
     let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
-    let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
     transfer::public_transfer(cargo, OTHER);
     ts::return_shared(agreement);
@@ -530,13 +530,13 @@ fun accept_rejects_second_hauler() {
 
 /// Collateral is a `Coin<T>` in the agreement's own currency, so the type
 /// system rules out any other coin; only the amount is checked.
-#[test, expected_failure(abort_code = delivery::EWrongCollateral)]
+#[test, expected_failure(abort_code = hauling::EWrongCollateral)]
 fun accept_rejects_short_collateral() {
     let (mut scenario, clock) = setup();
     post(&mut scenario, &clock);
     scenario.next_tx(HAULER);
     let collateral = test_config::mint(COLLATERAL_QTY - 1, scenario.ctx());
-    let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
     transfer::public_transfer(cargo, HAULER);
     ts::return_shared(agreement);
@@ -544,26 +544,26 @@ fun accept_rejects_short_collateral() {
 }
 
 /// Collateral is exact: overpaying is rejected, not partly refunded.
-#[test, expected_failure(abort_code = delivery::EWrongCollateral)]
+#[test, expected_failure(abort_code = hauling::EWrongCollateral)]
 fun accept_rejects_excess_collateral() {
     let (mut scenario, clock) = setup();
     post(&mut scenario, &clock);
     scenario.next_tx(HAULER);
     let collateral = test_config::mint(COLLATERAL_QTY + 1, scenario.ctx());
-    let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
     transfer::public_transfer(cargo, HAULER);
     ts::return_shared(agreement);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::EWrongCollateral)]
+#[test, expected_failure(abort_code = hauling::EWrongCollateral)]
 fun accept_rejects_empty_collateral() {
     let (mut scenario, clock) = setup();
     post(&mut scenario, &clock);
     scenario.next_tx(HAULER);
     let collateral = test_config::mint(0, scenario.ctx());
-    let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
     transfer::public_transfer(cargo, HAULER);
     ts::return_shared(agreement);
@@ -572,18 +572,18 @@ fun accept_rejects_empty_collateral() {
 
 // === Delivering ===
 
-#[test, expected_failure(abort_code = delivery::ENotAccepted)]
+#[test, expected_failure(abort_code = hauling::ENotAccepted)]
 fun deliver_rejects_open_agreement() {
     let (mut scenario, clock) = setup();
     post(&mut scenario, &clock);
     scenario.next_tx(HAULER);
     let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::ETooLate)]
+#[test, expected_failure(abort_code = hauling::ETooLate)]
 fun deliver_rejects_at_deadline() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
@@ -591,7 +591,7 @@ fun deliver_rejects_at_deadline() {
     clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(HAULER);
     let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
 }
@@ -604,7 +604,7 @@ fun deliver_rejects_source_collection() {
     // Handing the cargo straight back is not delivery.
     scenario.next_tx(HAULER);
     let cargo = scenario.take_from_sender<Balance>();
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(cargo, &clock, scenario.ctx());
     finish(scenario, clock);
 }
@@ -616,7 +616,7 @@ fun deliver_rejects_partial_quantity() {
     accept(&mut scenario, &mut clock);
     scenario.next_tx(HAULER);
     let delivered = mint(dst(), ITEM, CARGO_QTY - 1, &mut scenario);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
 }
@@ -629,7 +629,7 @@ fun deliver_rejects_excess_quantity() {
     accept(&mut scenario, &mut clock);
     scenario.next_tx(HAULER);
     let delivered = mint(dst(), ITEM, CARGO_QTY + 1, &mut scenario);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
 }
@@ -641,32 +641,32 @@ fun deliver_rejects_wrong_item_type() {
     accept(&mut scenario, &mut clock);
     scenario.next_tx(HAULER);
     let delivered = mint(dst(), ITEM + 1, CARGO_QTY, &mut scenario);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
 }
 
 // === Defaulting ===
 
-#[test, expected_failure(abort_code = delivery::ETooEarly)]
+#[test, expected_failure(abort_code = hauling::ETooEarly)]
 fun default_rejects_before_deadline() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     clock.set_for_testing(DEADLINE_MS - 1);
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.default(&clock, scenario.ctx());
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::ENotAccepted)]
+#[test, expected_failure(abort_code = hauling::ENotAccepted)]
 fun default_rejects_open_agreement() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
     clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.default(&clock, scenario.ctx());
     finish(scenario, clock);
 }
@@ -681,12 +681,12 @@ fun forfeit_pays_beneficiary_before_deadline() {
 
     clock.set_for_testing(ACCEPT_AT_MS + 1);
     scenario.next_tx(HAULER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.forfeit(&clock, scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementDefaulted>(),
         vector[
-            delivery::defaulted_event_for_testing(
+            hauling::defaulted_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, test_config::token(),
                 REWARD_QTY, COLLATERAL_QTY, true,
             ),
@@ -701,57 +701,57 @@ fun forfeit_pays_beneficiary_before_deadline() {
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::ENotHauler)]
+#[test, expected_failure(abort_code = hauling::ENotHauler)]
 fun forfeit_rejects_non_hauler() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     // Not even the beneficiary can force an early forfeit.
     scenario.next_tx(BENEFICIARY);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.forfeit(&clock, scenario.ctx());
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::ENotAccepted)]
+#[test, expected_failure(abort_code = hauling::ENotAccepted)]
 fun forfeit_rejects_open_agreement() {
     let (mut scenario, clock) = setup();
     post(&mut scenario, &clock);
     scenario.next_tx(HAULER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.forfeit(&clock, scenario.ctx());
     finish(scenario, clock);
 }
 
 // === Cancelling ===
 
-#[test, expected_failure(abort_code = delivery::ENotOpen)]
+#[test, expected_failure(abort_code = hauling::ENotOpen)]
 fun cancel_rejects_accepted_agreement() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     scenario.next_tx(LISTER);
     let cap = scenario.take_from_sender<ListerCap>();
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
     transfer::public_transfer(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::EWrongCap)]
+#[test, expected_failure(abort_code = hauling::EWrongCap)]
 fun cancel_rejects_other_agreements_cap() {
     let (mut scenario, clock) = setup();
     post(&mut scenario, &clock);
     scenario.next_tx(LISTER);
-    let first_id = ts::most_recent_id_shared<DeliveryAgreement<TOKEN>>().destroy_some();
+    let first_id = ts::most_recent_id_shared<HaulingAgreement<TOKEN>>().destroy_some();
     let first_cap = scenario.take_from_sender<ListerCap>();
     transfer::public_transfer(first_cap, OTHER);
     post(&mut scenario, &clock);
     scenario.next_tx(LISTER);
     // LISTER now holds only the second agreement's cap.
     let second_cap = scenario.take_from_sender<ListerCap>();
-    let first = scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(first_id);
+    let first = scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(first_id);
     let (cargo, reward) = first.cancel(second_cap, &clock, scenario.ctx());
     transfer::public_transfer(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
@@ -760,20 +760,20 @@ fun cancel_rejects_other_agreements_cap() {
 
 // === Closing lapsed agreements ===
 
-#[test, expected_failure(abort_code = delivery::ENotLapsed)]
+#[test, expected_failure(abort_code = hauling::ENotLapsed)]
 fun close_lapsed_rejects_before_accept_by() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
     clock.set_for_testing(ACCEPT_BY_MS - 1);
     scenario.next_tx(ADMIN);
     let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
     transfer::public_transfer(admin_cap, ADMIN);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::ENotOpen)]
+#[test, expected_failure(abort_code = hauling::ENotOpen)]
 fun close_lapsed_rejects_accepted_agreement() {
     let (mut scenario, mut clock) = setup();
     post(&mut scenario, &clock);
@@ -782,7 +782,7 @@ fun close_lapsed_rejects_accepted_agreement() {
     clock.set_for_testing(ACCEPT_BY_MS);
     scenario.next_tx(ADMIN);
     let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
     transfer::public_transfer(admin_cap, ADMIN);
     finish(scenario, clock);

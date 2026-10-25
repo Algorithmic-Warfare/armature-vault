@@ -1,4 +1,4 @@
-# delivery_agreements
+# hauling_agreements
 
 Minimal on-chain agreements built only on [MultiCoin](https://github.com/Algorithmic-Warfare/multicoin), the shared [agreements](../../primitives/agreements) primitive and the Sui framework. Items are multicoin balances; payments are Sui coins in an admin-approved currency.
 
@@ -6,13 +6,13 @@ Minimal on-chain agreements built only on [MultiCoin](https://github.com/Algorit
 - [docs/agreements/user-paths.md](../../../docs/agreements/user-paths.md): every user path, step by step.
 - [agreement_roles](../../extensions/agreement_roles): limit who can claim an agreement to a list of principals (one player, machine keys or an OU's board), as armature_vault does.
 
-## `delivery_agreements::delivery`
+## `hauling_agreements::hauling`
 
-A delivery agreement is a forward swap of items between two multicoin balances, backed by collateral and paid in one coin type `T`: a `DeliveryAgreement<T>`. `T` must be approved in the shared `Config` when the agreement is drafted (see [Config](#delivery_agreementsconfig)).
+A hauling agreement is a forward swap of items between two multicoin balances, backed by collateral and paid in one coin type `T`: a `HaulingAgreement<T>`. `T` must be approved in the shared `Config` when the agreement is drafted (see [Config](#hauling_agreementsconfig)).
 
-1. **`draft`, then `publish`**: the lister escrows `cargo` (a multicoin `Balance`) and a `reward` (a `Coin<T>`) on [`Terms`](#delivery_agreementsterms): the `want` (an exact collection, asset and quantity that counts as delivery, in a different collection or asset than the cargo, so the cargo itself can't be handed back), the collateral a hauler must lock (an amount of `T`), an accept window from drafting and a haul window from accepting, each at most 30 days (`terms::max_duration_ms`), and who receives the lister's side of the payouts. They also pay the posting fee, if one is set. Extensions are attached between the two calls (see [Extensions](#extensions)). `publish` shares the agreement and returns its `ListerCap`. `post` does both for an agreement with no extensions.
+1. **`draft`, then `publish`**: the lister escrows `cargo` (a multicoin `Balance`) and a `reward` (a `Coin<T>`) on [`Terms`](#hauling_agreementsterms): the `want` (an exact collection, asset and quantity that counts as delivery, in a different collection or asset than the cargo, so the cargo itself can't be handed back), the collateral a hauler must lock (an amount of `T`), an accept window from drafting and a haul window from accepting, each at most 30 days (`terms::max_duration_ms`), and who receives the lister's side of the payouts. They also pay the posting fee, if one is set. Extensions are attached between the two calls (see [Extensions](#extensions)). `publish` shares the agreement and returns its `ListerCap`. `post` does both for an agreement with no extensions.
 2. **`accept`**: a hauler locks a `Coin<T>` of exactly the collateral amount (`EWrongCollateral` otherwise) and receives the cargo at once. The deadline is the accept time plus the haul window. If the agreement has accept requirements, use `begin_accept`, satisfy them, then `finish_accept`.
-3. **`deliver`**: anyone hands in exactly the `want` balance before the deadline. It goes to the beneficiary (see [Terms](#delivery_agreementsterms)), the delivery fee goes to the treasury, and the rest of the reward plus the collateral go to the hauler. The agreement is deleted.
+3. **`deliver`**: anyone hands in exactly the `want` balance before the deadline. It goes to the beneficiary (see [Terms](#hauling_agreementsterms)), the delivery fee goes to the treasury, and the rest of the reward plus the collateral go to the hauler. The agreement is deleted.
 4. **`default`**: after the deadline, anyone can send the reward and collateral to the beneficiary. The agreement is deleted.
    - **`forfeit`**: the hauler can trigger the same payout before the deadline, for example after deciding not to do the haul. Only the hauler can call it, and only while `now < deadline_ms` (`ETooLate` after), so a missed deadline is always recorded as a default, not a forfeit. `default` stays open to anyone, so the funds never depend on a hauler who has walked away.
 5. **`cancel`**: while the agreement is still open, the `ListerCap` holder gets the cargo `Balance` and the reward `Coin<T>` back. The agreement and the cap are deleted.
@@ -22,7 +22,7 @@ A delivery agreement is a forward swap of items between two multicoin balances, 
 
 Payouts are coins of `T`. A zero amount isn't sent, so nobody receives an empty coin.
 
-## `delivery_agreements::terms`
+## `hauling_agreements::terms`
 
 An agreement's terms as one value, `Terms`: the `want`, the collateral, `accept_ms`, `haul_ms` and who receives the lister's side. It has `store`, so a wrapper can keep terms in its own objects, such as a governance payload, and pass them to `draft` or `post` later. Both windows are relative: the accept window starts at `draft`, which records the absolute `accept_by_ms`, and the haul window at accept. So stored terms never expire, and `agreement.terms()` returns terms the cap holder can post again after cancelling, even once the listing has lapsed.
 
@@ -34,7 +34,7 @@ Paying the cap holder is for listers that aren't one wallet: a DAO, a custody ob
 
 There is no dispute step: delivery is a check of the balance's type and amount.
 
-## `delivery_agreements::config`
+## `hauling_agreements::config`
 
 Approved currencies and protocol fees, set in one shared `Config` created at publish. There is no public constructor, so every agreement is drafted against that config. It starts with no currencies, no fees and the publisher as treasury, so nothing can be drafted until a currency is approved.
 
@@ -42,7 +42,7 @@ Approved currencies and protocol fees, set in one shared `Config` created at pub
 - **Posting fee**: a flat amount in one configured coin type `F` (`post_fee: Option<PostFee { currency, amount }>`) that the lister pays when drafting. `draft` and `post` take `config: &Config, post_fee: Coin<F>` after `terms`. The coin must match the fee exactly (`EWrongPostFeeCurrency`, `EWrongPostFeeAmount`), or be empty, of any type, when there is none (`EUnexpectedFee`). It goes to the treasury at once and is not refunded on cancel.
 - **Delivery fee**: `floor(reward * delivery_fee_bps / 10,000)`, taken from the reward at `deliver` and sent to the treasury, in `T`. The hauler gets the rest. `default`, `forfeit`, `cancel` and `close_lapsed` take no fee.
 - **Fixed per agreement.** Each agreement copies the delivery rate and treasury when drafted, so config changes never alter existing agreements, open or accepted. Read them with `delivery_fee_bps()` and `treasury()` on the agreement, or from `AgreementPosted`.
-- **`AdminCap`** changes the config with `approve_currency<T>` (`ECurrencyAlreadyApproved` if it already is), `revoke_currency<T>` (`ECurrencyNotApproved` if it isn't), `set_post_fee<F>` (`EInvalidPostFee` for 0), `clear_post_fee`, `set_delivery_fee_bps` (`EInvalidBps` above 10,000) and `set_treasury`. Each emits `ConfigUpdated` with the whole config, including the currency list. The publisher receives the cap; it has `store`, so a DAO can hold it. The cap also closes lapsed agreements with `delivery::close_lapsed`.
+- **`AdminCap`** changes the config with `approve_currency<T>` (`ECurrencyAlreadyApproved` if it already is), `revoke_currency<T>` (`ECurrencyNotApproved` if it isn't), `set_post_fee<F>` (`EInvalidPostFee` for 0), `clear_post_fee`, `set_delivery_fee_bps` (`EInvalidBps` above 10,000) and `set_treasury`. Each emits `ConfigUpdated` with the whole config, including the currency list. The publisher receives the cap; it has `store`, so a DAO can hold it. The cap also closes lapsed agreements with `hauling::close_lapsed`.
 
 ## Extensions
 
@@ -65,7 +65,7 @@ Built on `agreements::request` and `agreements::requirement`, adapted from the `
 - A `Requirement` is a type name plus a BCS-encoded config. Only the module that defines the config type can satisfy it, because satisfying needs `Permit` of that type.
 - `begin_accept` returns a `Request` with no abilities. Rule modules satisfy its requirements in declaration order with `take_next`. A rule can add follow-up requirements through the returned `Frame`, which resolve next. A frame can only be enqueued back onto a request for the same agreement and action.
 - `finish_accept` completes the request. It aborts unless every requirement is satisfied and the request was created for this agreement and this action, so a request satisfied against a loosely gated agreement can't be finished on a strictly gated one.
-- Actions are marker types; delivery's is `AcceptAction`. Only this module can create `Permit` of it, so only it can open or complete its requests. A rule that should gate delivery accepts only can check `request.is_action<AcceptAction>()`.
+- Actions are marker types; hauling's is `AcceptAction`. Only this module can create `Permit` of it, so only it can open or complete its requests. A rule that should gate hauling-agreement accepts only can check `request.is_action<AcceptAction>()`.
 - `accept` is `begin_accept` plus `finish_accept`. It aborts when requirements exist, so they can't be bypassed.
 - **Identity.** `require_identity_to_accept` also trusts that rule to record the hauler's identity with `set_identity`, for example the character ID behind a world `AccessCap`. An agreement has at most one identity rule, and an accept can't complete until it records an identity, exactly once. Don't also attach the identity rule with `require_to_accept`, and name only a rule that calls `set_identity`: either makes every accept abort. Identity appears in `AgreementAccepted`, the terminal events and outcome records. `AgreementAccepted` and outcome records also carry the `identity_rule` that attested it. The lister chooses that rule, so trust an identity only from rules you trust. Key reputation by it: a wallet address is free to replace.
 
@@ -150,7 +150,7 @@ Shared agreements have no version field, so after an upgrade every earlier versi
 ## Build & test
 
 ```bash
-cd packages/composites/delivery_agreements
+cd packages/composites/hauling_agreements
 sui move build --build-env testnet_stillness
 sui move test  --build-env testnet_stillness
 ```

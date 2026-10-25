@@ -1,4 +1,4 @@
-/// Delivery agreements: a collateralized forward swap of items, paid in a coin.
+/// Hauling agreements: a collateralized forward swap of items, paid in a coin.
 ///
 /// A lister escrows `cargo` (a multicoin balance of items) and a `reward` in
 /// coin type `T`, and names what counts as delivery (`want`: an exact
@@ -69,14 +69,14 @@
 /// `ListerCap`, and so does `collect` for terms that pay the cap holder. After
 /// any other ending, the holder of a cap for a beneficiary address can reclaim
 /// its storage with `delete_cap`.
-module delivery_agreements::delivery;
+module hauling_agreements::hauling;
 
 use agreements::payout;
 use agreements::request::{Self, Request};
 use agreements::requirement::Requirement;
 use agreements::spec::{Self, Spec};
-use delivery_agreements::config::{Self, AdminCap, Config, PostFee};
-use delivery_agreements::terms::Terms;
+use hauling_agreements::config::{Self, AdminCap, Config, PostFee};
+use hauling_agreements::terms::Terms;
 use multicoin::multicoin::{Self, Balance};
 use std::internal::{Self, Permit};
 use std::type_name::{Self, TypeName};
@@ -142,7 +142,7 @@ public struct Entity has store, copy, drop {
 }
 
 /// An agreement paid in coin type `T`.
-public struct DeliveryAgreement<phantom T> has key {
+public struct HaulingAgreement<phantom T> has key {
     id: UID,
     /// Sender of `draft`. Cancelling needs the cap, not this address.
     lister: address,
@@ -186,7 +186,7 @@ public struct DeliveryAgreement<phantom T> has key {
 /// it must `publish` it; extensions can only be attached in between. The cap
 /// is made with the draft, so terms that pay the cap holder know its address.
 public struct Draft<phantom T> {
-    agreement: DeliveryAgreement<T>,
+    agreement: HaulingAgreement<T>,
     cap: ListerCap,
 }
 
@@ -393,7 +393,7 @@ public fun draft<T, F>(
     };
     let beneficiary = terms.beneficiary().destroy_with_default(object::id(&cap).to_address());
     Draft {
-        agreement: DeliveryAgreement {
+        agreement: HaulingAgreement {
             id,
             lister: ctx.sender(),
             on_behalf_of: option::none(),
@@ -508,7 +508,7 @@ public fun post<T, F>(
 
 /// Start accepting. Returns the request every accept requirement must be
 /// satisfied on, in order, before `finish_accept`.
-public fun begin_accept<T>(self: &DeliveryAgreement<T>, clock: &Clock, ctx: &TxContext): Request {
+public fun begin_accept<T>(self: &HaulingAgreement<T>, clock: &Clock, ctx: &TxContext): Request {
     assert!(self.hauler.is_none(), ENotOpen);
     assert!(clock.timestamp_ms() < self.accept_by_ms, ETooLate);
     request::new(
@@ -524,7 +524,7 @@ public fun begin_accept<T>(self: &DeliveryAgreement<T>, clock: &Clock, ctx: &TxC
 /// come from `begin_accept` on this agreement with every requirement
 /// satisfied. How the cargo is moved is the hauler's business.
 public fun finish_accept<T>(
-    self: &mut DeliveryAgreement<T>,
+    self: &mut HaulingAgreement<T>,
     request: Request,
     collateral: Coin<T>,
     clock: &Clock,
@@ -554,7 +554,7 @@ public fun finish_accept<T>(
 /// `begin_accept` then `finish_accept`. Aborts if the agreement has accept
 /// requirements, so they cannot be bypassed.
 public fun accept<T>(
-    self: &mut DeliveryAgreement<T>,
+    self: &mut HaulingAgreement<T>,
     collateral: Coin<T>,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -571,7 +571,7 @@ public fun accept<T>(
 /// cap holder. The delivery fee, `reward * delivery_fee_bps / 10,000` rounded
 /// down, goes to the treasury and the rest of the reward to the hauler.
 public fun deliver<T>(
-    self: DeliveryAgreement<T>,
+    self: HaulingAgreement<T>,
     delivered: Balance,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -612,7 +612,7 @@ public fun deliver<T>(
 /// `Proceeds` to the cap when the terms pay the cap holder. Permissionless, so
 /// funds never wait on a party who has walked away. The hauler keeps whatever
 /// cargo they still hold.
-public fun default<T>(self: DeliveryAgreement<T>, clock: &Clock, ctx: &mut TxContext) {
+public fun default<T>(self: HaulingAgreement<T>, clock: &Clock, ctx: &mut TxContext) {
     assert!(self.hauler.is_some(), ENotAccepted);
     assert!(clock.timestamp_ms() >= self.deadline_ms, ETooEarly);
     pay_default(self, false, clock, ctx);
@@ -623,7 +623,7 @@ public fun default<T>(self: DeliveryAgreement<T>, clock: &Clock, ctx: &mut TxCon
 /// keeps whatever cargo they still hold. Once the deadline passes only
 /// `default` ends the agreement, so a hauler who missed it cannot have the
 /// failure recorded as a forfeit.
-public fun forfeit<T>(self: DeliveryAgreement<T>, clock: &Clock, ctx: &mut TxContext) {
+public fun forfeit<T>(self: HaulingAgreement<T>, clock: &Clock, ctx: &mut TxContext) {
     assert!(self.hauler.is_some(), ENotAccepted);
     assert!(*self.hauler.borrow() == ctx.sender(), ENotHauler);
     assert!(clock.timestamp_ms() < self.deadline_ms, ETooLate);
@@ -633,7 +633,7 @@ public fun forfeit<T>(self: DeliveryAgreement<T>, clock: &Clock, ctx: &mut TxCon
 /// Delete an open agreement, returning `(cargo, reward)` to the cap holder.
 /// Allowed before or after `accept_by_ms`, whoever the terms pay.
 public fun cancel<T>(
-    self: DeliveryAgreement<T>,
+    self: HaulingAgreement<T>,
     cap: ListerCap,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -666,7 +666,7 @@ public fun cancel<T>(
 /// escrow, so the admin should close only listings lapsed long enough that a
 /// holder would have cancelled.
 public fun close_lapsed<T>(
-    self: DeliveryAgreement<T>,
+    self: HaulingAgreement<T>,
     _: &AdminCap,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -747,80 +747,80 @@ public fun delete_outcome(record: OutcomeRecord) {
 
 // === Views ===
 
-public fun lister<T>(self: &DeliveryAgreement<T>): address { self.lister }
+public fun lister<T>(self: &HaulingAgreement<T>): address { self.lister }
 
 /// Who the lister drafted for, as a wrapper vouched with `set_on_behalf_of`.
-public fun on_behalf_of<T>(self: &DeliveryAgreement<T>): Option<Entity> { self.on_behalf_of }
+public fun on_behalf_of<T>(self: &HaulingAgreement<T>): Option<Entity> { self.on_behalf_of }
 
 /// The terms the agreement was drafted on. Their windows are relative, so they
 /// can be posted again, with a fresh accept window, after a cancel.
-public fun terms<T>(self: &DeliveryAgreement<T>): Terms { self.terms }
+public fun terms<T>(self: &HaulingAgreement<T>): Terms { self.terms }
 
 /// Receives the lister's side of the payouts: the terms' beneficiary, or the
 /// `ListerCap`'s address when they pay the cap holder.
-public fun beneficiary<T>(self: &DeliveryAgreement<T>): address { self.beneficiary }
+public fun beneficiary<T>(self: &HaulingAgreement<T>): address { self.beneficiary }
 
 /// The lister's side of the payouts goes to the `ListerCap` as `Proceeds`.
-public fun pays_cap_holder<T>(self: &DeliveryAgreement<T>): bool {
+public fun pays_cap_holder<T>(self: &HaulingAgreement<T>): bool {
     self.terms.pays_cap_holder()
 }
 
-public fun cargo<T>(self: &DeliveryAgreement<T>): &Option<Balance> { &self.cargo }
+public fun cargo<T>(self: &HaulingAgreement<T>): &Option<Balance> { &self.cargo }
 
 /// What the cargo held when drafted, before or after it is released.
-public fun cargo_spec<T>(self: &DeliveryAgreement<T>): Spec { self.cargo_spec }
+public fun cargo_spec<T>(self: &HaulingAgreement<T>): Spec { self.cargo_spec }
 
 /// The coin type the agreement is paid in.
-public fun currency<T>(_: &DeliveryAgreement<T>): TypeName { type_name::with_original_ids<T>() }
+public fun currency<T>(_: &HaulingAgreement<T>): TypeName { type_name::with_original_ids<T>() }
 
 /// The escrowed reward, before any delivery fee.
-public fun reward<T>(self: &DeliveryAgreement<T>): u64 { self.reward.value() }
+public fun reward<T>(self: &HaulingAgreement<T>): u64 { self.reward.value() }
 
-public fun want<T>(self: &DeliveryAgreement<T>): Spec { self.terms.want() }
+public fun want<T>(self: &HaulingAgreement<T>): Spec { self.terms.want() }
 
 /// The collateral a hauler must lock.
-public fun collateral_amount<T>(self: &DeliveryAgreement<T>): u64 { self.terms.collateral() }
+public fun collateral_amount<T>(self: &HaulingAgreement<T>): u64 { self.terms.collateral() }
 
 /// The collateral locked: 0 while open.
-public fun collateral_locked<T>(self: &DeliveryAgreement<T>): u64 { self.collateral.value() }
+public fun collateral_locked<T>(self: &HaulingAgreement<T>): u64 { self.collateral.value() }
 
 /// The end of the accept window, exclusive: drafting time plus `accept_ms`.
-public fun accept_by_ms<T>(self: &DeliveryAgreement<T>): u64 { self.accept_by_ms }
+public fun accept_by_ms<T>(self: &HaulingAgreement<T>): u64 { self.accept_by_ms }
 
-public fun haul_ms<T>(self: &DeliveryAgreement<T>): u64 { self.terms.haul_ms() }
+public fun haul_ms<T>(self: &HaulingAgreement<T>): u64 { self.terms.haul_ms() }
 
-public fun posted_at_ms<T>(self: &DeliveryAgreement<T>): u64 { self.posted_at_ms }
+public fun posted_at_ms<T>(self: &HaulingAgreement<T>): u64 { self.posted_at_ms }
 
-public fun accept_requirements<T>(self: &DeliveryAgreement<T>): vector<Requirement> {
+public fun accept_requirements<T>(self: &HaulingAgreement<T>): vector<Requirement> {
     self.accept_requirements
 }
 
-public fun identity_rule<T>(self: &DeliveryAgreement<T>): Option<TypeName> { self.identity_rule }
+public fun identity_rule<T>(self: &HaulingAgreement<T>): Option<TypeName> { self.identity_rule }
 
-public fun observer<T>(self: &DeliveryAgreement<T>): Option<Binding> { self.observer }
+public fun observer<T>(self: &HaulingAgreement<T>): Option<Binding> { self.observer }
 
-public fun hauler<T>(self: &DeliveryAgreement<T>): Option<address> { self.hauler }
+public fun hauler<T>(self: &HaulingAgreement<T>): Option<address> { self.hauler }
 
-public fun hauler_identity<T>(self: &DeliveryAgreement<T>): Option<ID> { self.hauler_identity }
+public fun hauler_identity<T>(self: &HaulingAgreement<T>): Option<ID> { self.hauler_identity }
 
-public fun deadline_ms<T>(self: &DeliveryAgreement<T>): u64 { self.deadline_ms }
+public fun deadline_ms<T>(self: &HaulingAgreement<T>): u64 { self.deadline_ms }
 
 /// The posting fee the lister paid, if any.
-public fun post_fee<T>(self: &DeliveryAgreement<T>): Option<PostFee> { self.post_fee }
+public fun post_fee<T>(self: &HaulingAgreement<T>): Option<PostFee> { self.post_fee }
 
-public fun delivery_fee_bps<T>(self: &DeliveryAgreement<T>): u16 { self.delivery_fee_bps }
+public fun delivery_fee_bps<T>(self: &HaulingAgreement<T>): u16 { self.delivery_fee_bps }
 
 /// Receives this agreement's delivery fee.
-public fun treasury<T>(self: &DeliveryAgreement<T>): address { self.treasury }
+public fun treasury<T>(self: &HaulingAgreement<T>): address { self.treasury }
 
-public fun is_open<T>(self: &DeliveryAgreement<T>): bool { self.hauler.is_none() }
+public fun is_open<T>(self: &HaulingAgreement<T>): bool { self.hauler.is_none() }
 
 public fun cap_agreement_id(cap: &ListerCap): ID { cap.agreement_id }
 
 /// The agreement's payouts come to this cap as `Proceeds`.
 public fun cap_receives_proceeds(cap: &ListerCap): bool { cap.receives_proceeds }
 
-public fun draft_agreement<T>(draft: &Draft<T>): &DeliveryAgreement<T> { &draft.agreement }
+public fun draft_agreement<T>(draft: &Draft<T>): &HaulingAgreement<T> { &draft.agreement }
 
 /// The wrapper's marker type, whose module vouched for the entity.
 public fun entity_kind(self: &Entity): TypeName { self.kind }
@@ -899,7 +899,7 @@ fun new_binding<O>(instance: ID, fee: Option<Spec>): Binding {
 
 /// Send an outcome record to the bound observer, if there is one. Called
 /// before the agreement is unpacked so the record can describe it.
-fun record<T>(self: &DeliveryAgreement<T>, outcome: Outcome, clock: &Clock, ctx: &mut TxContext) {
+fun record<T>(self: &HaulingAgreement<T>, outcome: Outcome, clock: &Clock, ctx: &mut TxContext) {
     if (self.observer.is_none()) return;
     let observer = *self.observer.borrow();
     let record = OutcomeRecord {
@@ -927,7 +927,7 @@ fun record<T>(self: &DeliveryAgreement<T>, outcome: Outcome, clock: &Clock, ctx:
 }
 
 fun pay_default<T>(
-    self: DeliveryAgreement<T>,
+    self: HaulingAgreement<T>,
     forfeited: bool,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -958,17 +958,17 @@ fun pay_default<T>(
 }
 
 fun close<T>(
-    self: DeliveryAgreement<T>,
+    self: HaulingAgreement<T>,
 ): (address, address, balance::Balance<T>, balance::Balance<T>) {
-    let DeliveryAgreement { id, beneficiary, cargo, reward, collateral, hauler, .. } = self;
+    let HaulingAgreement { id, beneficiary, cargo, reward, collateral, hauler, .. } = self;
     id.delete();
     cargo.destroy_none();
     (beneficiary, hauler.destroy_some(), reward, collateral)
 }
 
 /// Delete an open agreement, returning its `(cargo, reward)`.
-fun close_open<T>(self: DeliveryAgreement<T>): (Balance, balance::Balance<T>) {
-    let DeliveryAgreement { id, mut cargo, reward, collateral, hauler, .. } = self;
+fun close_open<T>(self: HaulingAgreement<T>): (Balance, balance::Balance<T>) {
+    let HaulingAgreement { id, mut cargo, reward, collateral, hauler, .. } = self;
     id.delete();
     collateral.destroy_zero();
     hauler.destroy_none();

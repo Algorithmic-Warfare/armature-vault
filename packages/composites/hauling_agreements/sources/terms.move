@@ -1,17 +1,17 @@
-/// The terms of a delivery agreement as one value: what counts as delivery,
+/// The terms of a hauling agreement as one value: what counts as delivery,
 /// the collateral a hauler locks, the accept and haul windows, and who receives
 /// the lister's side of the payouts.
 ///
 /// `Terms` has `store`, so a wrapper can keep them in its own objects, such as
 /// a governance payload that posts an agreement when it executes, and pass them
-/// to `delivery::draft` as they are. Both windows are relative: the accept
+/// to `hauling::draft` as they are. Both windows are relative: the accept
 /// window starts when the agreement is drafted and the haul window when it is
 /// accepted. So terms never expire while stored, and an agreement's terms, from
-/// `delivery::terms`, can be posted again after it is cancelled, even once it
+/// `hauling::terms`, can be posted again after it is cancelled, even once it
 /// has lapsed.
 ///
 /// The constructors check everything that doesn't depend on the cargo.
-/// `delivery::draft` checks the rest: that `want` names something other than
+/// `hauling::draft` checks the rest: that `want` names something other than
 /// the cargo.
 ///
 /// Who receives the lister's side:
@@ -20,10 +20,10 @@
 ///   do the reward and collateral on default or forfeit.
 /// - `new_for_cap_holder` sends those payouts to the agreement's `ListerCap`
 ///   instead, with the cargo and reward of a lapsed listing, as one
-///   `delivery::Proceeds` that the cap's holder opens with `delivery::collect`.
+///   `hauling::Proceeds` that the cap's holder opens with `hauling::collect`.
 ///   Payouts then follow the cap, so a wallet, a DAO or any other wrapper that
 ///   holds it receives them without a receiving address of its own.
-module delivery_agreements::terms;
+module hauling_agreements::terms;
 
 use agreements::spec::Spec;
 
@@ -69,7 +69,7 @@ public fun new(
 }
 
 /// Terms whose payouts go to the agreement's `ListerCap`, as one
-/// `delivery::Proceeds` for whoever holds the cap. Same checks as `new`.
+/// `hauling::Proceeds` for whoever holds the cap. Same checks as `new`.
 public fun new_for_cap_holder(
     want: Spec,
     collateral: u64,

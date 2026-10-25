@@ -1,27 +1,27 @@
-/// End-to-end flows through `delivery_agreements` with a claim gate: each test
+/// End-to-end flows through `hauling_agreements` with a claim gate: each test
 /// posts a gated, observed agreement, has a permitted player claim it, and
 /// drives it to a terminal transition, checking every event, balance and
 /// outcome record. The hauler is always the claiming player, never the OU, and
 /// the OU's other board members gain nothing.
 #[test_only]
-module delivery_claim_tests::flow_tests;
+module hauling_claim_tests::flow_tests;
 
 use agreement_roles::claim;
 use agreement_roles::test_ou;
-use delivery_claim_tests::test_ledger::{Self, TestLedger};
+use hauling_claim_tests::test_ledger::{Self, TestLedger};
 use agreements::spec::{Self, Spec};
 use armature::ou::OU;
-use delivery_agreements::delivery::{
+use hauling_agreements::hauling::{
     Self,
-    DeliveryAgreement,
+    HaulingAgreement,
     OutcomeRecord,
     AgreementPosted,
     AgreementAccepted,
     AgreementDelivered,
     AgreementDefaulted
 };
-use delivery_agreements::terms;
-use delivery_agreements::test_config::{Self, TOKEN};
+use hauling_agreements::terms;
+use hauling_agreements::test_config::{Self, TOKEN};
 use multicoin::multicoin::{Self, Balance};
 use roles::acl::{Self, Principal};
 use std::type_name;
@@ -114,7 +114,7 @@ fun post(w: &mut World, gate: vector<Principal>): Posted {
     assert_eq!(
         event::events_by_type<AgreementPosted>(),
         vector[
-            delivery::posted_event_for_testing(
+            hauling::posted_event_for_testing(
                 agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
                 want(), test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
                 vector[claim::requirement(gate)], option::none(), option::some(observer(w)),
@@ -125,8 +125,8 @@ fun post(w: &mut World, gate: vector<Principal>): Posted {
     Posted { agreement_id, gate }
 }
 
-fun observer(w: &World): delivery::Binding {
-    delivery::new_binding_for_testing<TestLedger>(w.ledger, option::none())
+fun observer(w: &World): hauling::Binding {
+    hauling::new_binding_for_testing<TestLedger>(w.ledger, option::none())
 }
 
 /// `who` claims `p` at ACCEPT_AT_MS, acting as a member of `org_id` when given,
@@ -135,7 +135,7 @@ fun observer(w: &World): delivery::Binding {
 fun claim_as(w: &mut World, p: &Posted, who: address, org_id: Option<ID>) {
     w.clock.set_for_testing(ACCEPT_AT_MS);
     w.scenario.next_tx(who);
-    let mut agreement = w.scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(p.agreement_id);
+    let mut agreement = w.scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(p.agreement_id);
     assert_eq!(agreement.accept_requirements(), vector[claim::requirement(p.gate)]);
     let mut req = agreement.begin_accept(&w.clock, w.scenario.ctx());
     if (org_id.is_some()) {
@@ -154,7 +154,7 @@ fun claim_as(w: &mut World, p: &Posted, who: address, org_id: Option<ID>) {
         event::events_by_type<claim::Claimed>(),
         vector[
             claim::claimed_event_for_testing(
-                p.agreement_id, type_name::with_original_ids<delivery::AcceptAction>(), who,
+                p.agreement_id, type_name::with_original_ids<hauling::AcceptAction>(), who,
                 principal,
             ),
         ],
@@ -162,7 +162,7 @@ fun claim_as(w: &mut World, p: &Posted, who: address, org_id: Option<ID>) {
     assert_eq!(
         event::events_by_type<AgreementAccepted>(),
         vector[
-            delivery::accepted_event_for_testing(
+            hauling::accepted_event_for_testing(
                 p.agreement_id, who, option::none(), option::none(), DEADLINE_MS,
             ),
         ],
@@ -177,12 +177,12 @@ fun claim_as(w: &mut World, p: &Posted, who: address, org_id: Option<ID>) {
 fun deliver(w: &mut World, p: &Posted, hauler: address) {
     w.clock.set_for_testing(DEADLINE_MS - 1);
     w.scenario.next_tx(OTHER);
-    let agreement = w.scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(p.agreement_id);
+    let agreement = w.scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(p.agreement_id);
     agreement.deliver(mint(dst(), ITEM, QTY, &mut w.scenario), &w.clock, w.scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementDelivered>(),
         vector[
-            delivery::delivered_event_for_testing(
+            hauling::delivered_event_for_testing(
                 p.agreement_id, LISTER, hauler, option::none(), BENEFICIARY, want(),
                 test_config::token(), REWARD_QTY, COLLATERAL_QTY, 0, test_config::treasury(),
             ),
@@ -280,12 +280,12 @@ fun flow_ou_member_claims_then_defaults() {
 
     w.clock.set_for_testing(DEADLINE_MS);
     w.scenario.next_tx(OTHER);
-    let agreement = w.scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(p.agreement_id);
+    let agreement = w.scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(p.agreement_id);
     agreement.default(&w.clock, w.scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementDefaulted>(),
         vector[
-            delivery::defaulted_event_for_testing(
+            hauling::defaulted_event_for_testing(
                 p.agreement_id, LISTER, HAULER_1, option::none(), BENEFICIARY,
                 test_config::token(), REWARD_QTY, COLLATERAL_QTY, false,
             ),

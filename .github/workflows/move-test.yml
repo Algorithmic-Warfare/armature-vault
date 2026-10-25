@@ -57,7 +57,7 @@ jobs:
       #          ({primitives,composites,extensions,integration}/<pkg>)
       #   pins:  which shared revs its Move.lock must carry
       #   deps:  the only direct dependencies it may have. This keeps the
-      #          dependency boundaries explicit: delivery_agreements must never
+      #          dependency boundaries explicit: hauling_agreements must never
       #          gain anything beyond multicoin and the agreements primitive,
       #          agreement_roles must never depend on an agreement type, and
       #          only roles, agreement_roles and armature_vault may bring
@@ -75,15 +75,15 @@ jobs:
           - path: primitives/agreements
             pins: multicoin
             deps: multicoin std sui
-          - path: composites/delivery_agreements
+          - path: composites/hauling_agreements
             pins: multicoin
             deps: agreements multicoin std sui
           - path: extensions/agreement_roles
             pins: armature multicoin
             deps: agreements armature roles std sui
-          - path: integration/delivery_claim_tests
+          - path: integration/hauling_claim_tests
             pins: armature multicoin
-            deps: agreement_roles agreements armature delivery_agreements multicoin roles std sui
+            deps: agreement_roles agreements armature hauling_agreements multicoin roles std sui
     defaults:
       run:
         working-directory: packages/${{ matrix.path }}

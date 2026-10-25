@@ -37,16 +37,16 @@ integration tests:
 | [`primitives/roles`](packages/primitives/roles) | armature | The shared `Principal` (player, machine or OU board member) for role-gated packages. `agreement_roles` uses it now; `armature_vault` moves to it at its next fresh publish |
 | [`primitives/agreements`](packages/primitives/agreements) | multicoin | What every agreement type shares: requests and requirements (how extensions gate an action), `Spec` (an exact multicoin amount) and `payout` (sending a balance, or splitting it by bps) |
 | [`composites/armature_vault`](packages/composites/armature_vault) | armature, world, multicoin, warehouse_receipts | The OU-gated receipt vault and keyspace described below |
-| [`composites/delivery_agreements`](packages/composites/delivery_agreements) | agreements, multicoin | Collateralized delivery agreements with optional accept rules and observers ([design](docs/agreements/design.md), [user paths](docs/agreements/user-paths.md)) |
+| [`composites/hauling_agreements`](packages/composites/hauling_agreements) | agreements, multicoin | Collateralized hauling agreements with optional accept rules and observers ([design](docs/agreements/design.md), [user paths](docs/agreements/user-paths.md)) |
 | [`extensions/agreement_roles`](packages/extensions/agreement_roles) | agreements, roles, armature | A claim gate that limits an agreement action to a list of principals: one player (a reservation), machine keys, or an OU's board |
-| [`integration/delivery_claim_tests`](packages/integration/delivery_claim_tests) | agreements, roles, delivery_agreements, agreement_roles, armature, multicoin | Unpublished. End-to-end tests of the claim gate on delivery agreements |
+| [`integration/hauling_claim_tests`](packages/integration/hauling_claim_tests) | agreements, roles, hauling_agreements, agreement_roles, armature, multicoin | Unpublished. End-to-end tests of the claim gate on hauling agreements |
 
 `agreement_roles`' gate takes any `agreements` request, so it gates every
-agreement type without depending on one. A delivery lister attaches it with
-`draft.require_to_accept(claim::requirement(principals))`.
+agreement type without depending on one. The lister of a hauling agreement
+attaches it with `draft.require_to_accept(claim::requirement(principals))`.
 
 CI checks each package's direct dependencies against the `deps` list in its
-`.github/workflows/move-test.yml` matrix entry, so `delivery_agreements` can
+`.github/workflows/move-test.yml` matrix entry, so `hauling_agreements` can
 never gain anything beyond multicoin and `agreements`, and `agreement_roles`
 never an agreement type. Keep that matrix and this table in sync.
 

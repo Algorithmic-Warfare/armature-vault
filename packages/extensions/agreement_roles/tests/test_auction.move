@@ -1,5 +1,5 @@
 /// A stand-in second agreement type built only on `agreements`: a shared
-/// auction whose `Bid` action is gated by requirements, as delivery's accept
+/// auction whose `Bid` action is gated by requirements, as hauling's accept
 /// is. It holds no funds; it records the last bidder so tests can see who got
 /// through the gate.
 #[test_only]

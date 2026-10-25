@@ -1,20 +1,20 @@
 [package]
-name = "delivery_claim_tests"
+name = "hauling_claim_tests"
 version = "0.0.1"
 edition = "2024"
 
 # Unpublished. End-to-end tests of agreement_roles' claim gate on
-# delivery_agreements. Sui's package manager has no dev-dependencies, so a
+# hauling_agreements. Sui's package manager has no dev-dependencies, so a
 # test-only link between an extension and a composite would otherwise be a
 # full, published dependency of the extension. This package has no sources,
 # and nothing depends on it.
 #
 # Pins match the packages under test: armature as in agreement_roles and roles,
-# multicoin as in agreements and delivery_agreements.
+# multicoin as in agreements and hauling_agreements.
 [dependencies]
 agreements = { local = "../../primitives/agreements" }
 roles = { local = "../../primitives/roles" }
-delivery_agreements = { local = "../../composites/delivery_agreements" }
+hauling_agreements = { local = "../../composites/hauling_agreements" }
 agreement_roles = { local = "../../extensions/agreement_roles" }
 armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "ae60685f888ac5dd4d24413fb989002ef5315c74" }
 multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "2772c26d24c02671726d39f167b8f772777875d9" }

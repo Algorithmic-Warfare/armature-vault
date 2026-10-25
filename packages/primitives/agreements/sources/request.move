@@ -6,7 +6,7 @@
 /// and the same module closes it with `complete` against the same agreement.
 ///
 /// An action is a marker type `A` the agreement module defines, such as
-/// delivery's `AcceptAction`. `new` and `complete` take `Permit<A>`, so only
+/// hauling's `AcceptAction`. `new` and `complete` take `Permit<A>`, so only
 /// that module can open or close a request for its actions; a request opened
 /// for any other action or agreement cannot complete there.
 ///

@@ -9,8 +9,8 @@ edition = "2024"
 # is a reservation; an OU follows its board as it changes.
 #
 # It depends on no agreement type: it gates any `agreements` request. Its
-# end-to-end tests with delivery agreements live in
-# packages/integration/delivery_claim_tests.
+# end-to-end tests with hauling agreements live in
+# packages/integration/hauling_claim_tests.
 #
 # armature is pinned to the same revision as armature_vault (testnet_stillness).
 [dependencies]

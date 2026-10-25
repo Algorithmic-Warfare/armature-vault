@@ -1,8 +1,8 @@
 /// Scenario: auctions (`test_auction`, built only on `agreements`) whose bids
 /// are gated on the haulers OU's board, one freelancer and a courier bot. The
 /// officers OU is a second OU that is not listed. A bid stands in for any
-/// gated action; delivery accepts are tested in
-/// packages/integration/delivery_claim_tests.
+/// gated action; hauling-agreement accepts are tested in
+/// packages/integration/hauling_claim_tests.
 #[test_only]
 module agreement_roles::claim_tests;
 

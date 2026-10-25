@@ -1,9 +1,9 @@
 [package]
-name = "delivery_agreements"
+name = "hauling_agreements"
 version = "0.0.1"
 edition = "2024"
 
-# delivery_agreements depends ONLY on multicoin and the `agreements` primitive
+# hauling_agreements depends ONLY on multicoin and the `agreements` primitive
 # (requests, requirements and `Spec`). The multicoin pin matches
 # warehouse-receipts so that `multicoin::Balance` is the same published type in
 # both packages and warehouse receipts can be used as cargo or delivery. Rewards,

@@ -1,9 +1,9 @@
 /// Binds an observer so the flow tests can read each agreement's outcome
 /// record. It charges no fee and keeps nothing.
 #[test_only]
-module delivery_claim_tests::test_ledger;
+module hauling_claim_tests::test_ledger;
 
-use delivery_agreements::delivery::{Self, Draft, OutcomeRecord};
+use hauling_agreements::hauling::{Self, Draft, OutcomeRecord};
 use std::internal;
 use sui::transfer::Receiving;
 
@@ -23,5 +23,5 @@ public fun bind<T>(ledger: &TestLedger, draft: &mut Draft<T>) {
 }
 
 public fun take_record(ledger: &mut TestLedger, ticket: Receiving<OutcomeRecord>): OutcomeRecord {
-    delivery::receive_outcome(internal::permit<TestLedger>(), &mut ledger.id, ticket)
+    hauling::receive_outcome(internal::permit<TestLedger>(), &mut ledger.id, ticket)
 }

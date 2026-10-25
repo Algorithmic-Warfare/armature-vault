@@ -1,17 +1,17 @@
-/// A claim gate attached as a delivery accept requirement: what the posted
-/// agreement records, and that no accept path can skip it. The gate's own
-/// checks are tested in agreement_roles.
+/// A claim gate attached as an accept requirement of a hauling agreement:
+/// what the posted agreement records, and that no accept path can skip it.
+/// The gate's own checks are tested in agreement_roles.
 #[test_only]
-module delivery_claim_tests::accept_gate_tests;
+module hauling_claim_tests::accept_gate_tests;
 
 use agreement_roles::claim;
 use agreement_roles::test_ou;
 use agreements::request::{Self, Request};
 use agreements::spec;
 use armature::ou::OU;
-use delivery_agreements::delivery::{DeliveryAgreement, Draft};
-use delivery_agreements::test_config::{Self, TOKEN};
-use delivery_agreements::terms::{Self, Terms};
+use hauling_agreements::hauling::{HaulingAgreement, Draft};
+use hauling_agreements::test_config::{Self, TOKEN};
+use hauling_agreements::terms::{Self, Terms};
 use multicoin::multicoin;
 use roles::acl::{Self, Principal};
 use std::unit_test::assert_eq;
@@ -80,7 +80,7 @@ fun post(w: &mut World, terms: Terms, principals: vector<Principal>): address {
 
 fun finish_accept(
     w: &mut World,
-    mut agreement: DeliveryAgreement<TOKEN>,
+    mut agreement: HaulingAgreement<TOKEN>,
     req: Request,
     who: address,
 ) {
@@ -92,7 +92,7 @@ fun finish_accept(
 
 fun hauler_of(w: &mut World): Option<address> {
     w.scenario.next_tx(OUTSIDER);
-    let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = w.scenario.take_shared<HaulingAgreement<TOKEN>>();
     let hauler = agreement.hauler();
     ts::return_shared(agreement);
     hauler
@@ -114,14 +114,14 @@ fun gate_reserves_an_agreement_for_one_player() {
     post(&mut w, standard_terms(), vector[acl::player(FREELANCER)]);
 
     w.scenario.next_tx(OUTSIDER);
-    let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = w.scenario.take_shared<HaulingAgreement<TOKEN>>();
     let reqs = agreement.accept_requirements();
     assert_eq!(reqs.length(), 1);
     assert_eq!(claim::principals_of(&reqs[0]), vector[acl::player(FREELANCER)]);
     ts::return_shared(agreement);
 
     w.scenario.next_tx(FREELANCER);
-    let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = w.scenario.take_shared<HaulingAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&w.clock, w.scenario.ctx());
     claim::satisfy_directly(&mut req);
     finish_accept(&mut w, agreement, req, FREELANCER);
@@ -141,14 +141,14 @@ fun gate_keeps_terms_that_pay_the_cap_holder() {
     let cap_address = post(&mut w, terms, vector[acl::ou(haulers)]);
 
     w.scenario.next_tx(OUTSIDER);
-    let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = w.scenario.take_shared<HaulingAgreement<TOKEN>>();
     assert_eq!(agreement.terms(), terms);
     assert_eq!(agreement.beneficiary(), cap_address);
     ts::return_shared(agreement);
 
     w.scenario.next_tx(HAULER_1);
     let org = w.scenario.take_shared_by_id<OU>(haulers);
-    let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = w.scenario.take_shared<HaulingAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&w.clock, w.scenario.ctx());
     claim::satisfy(&mut req, &org);
     finish_accept(&mut w, agreement, req, HAULER_1);
@@ -164,7 +164,7 @@ fun plain_accept_cannot_skip_the_gate() {
     let mut w = world();
     post(&mut w, standard_terms(), vector[acl::player(HAULER_1)]);
     w.scenario.next_tx(HAULER_1);
-    let mut agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let mut agreement = w.scenario.take_shared<HaulingAgreement<TOKEN>>();
     let collateral = test_config::mint(COLLATERAL_QTY, w.scenario.ctx());
     let cargo = agreement.accept(collateral, &w.clock, w.scenario.ctx());
     transfer::public_transfer(cargo, HAULER_1);
@@ -179,7 +179,7 @@ fun finish_accept_cannot_skip_the_gate() {
     let haulers = w.haulers;
     post(&mut w, standard_terms(), vector[acl::ou(haulers)]);
     w.scenario.next_tx(HAULER_1);
-    let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = w.scenario.take_shared<HaulingAgreement<TOKEN>>();
     let req = agreement.begin_accept(&w.clock, w.scenario.ctx());
     finish_accept(&mut w, agreement, req, HAULER_1);
     done(w);

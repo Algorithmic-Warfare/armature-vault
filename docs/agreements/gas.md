@@ -1,4 +1,4 @@
-# Delivery agreements: gas and sponsorship
+# Hauling agreements: gas and sponsorship
 
 A sponsor pays about **0.0087 SUI net per agreement** that runs to delivery (0.0081 SUI if the lister then deletes the spent `ListerCap`, or 0.0082 SUI with terms that pay the cap holder, including `collect`), about 0.0041 SUI for one cancelled before anyone accepted, and about 0.0057 SUI for one that lapses and the config admin closes (0.0051 SUI with terms that pay the cap holder). The claim gate adds almost nothing net. Storage is nearly all of it: computation is at the 1,000-unit minimum for every user transaction.
 

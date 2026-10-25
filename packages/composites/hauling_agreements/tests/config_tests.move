@@ -2,22 +2,22 @@
 /// the delivery fee taken from the reward on `deliver`, the snapshot each
 /// agreement takes of the config, and the admin functions.
 #[test_only]
-module delivery_agreements::config_tests;
+module hauling_agreements::config_tests;
 
 use agreements::spec::{Self, Spec};
-use delivery_agreements::config::{Self, Config, AdminCap, ConfigUpdated, PostFee};
-use delivery_agreements::delivery::{
+use hauling_agreements::config::{Self, Config, AdminCap, ConfigUpdated, PostFee};
+use hauling_agreements::hauling::{
     Self,
-    DeliveryAgreement,
+    HaulingAgreement,
     ListerCap,
     OutcomeRecord,
     AgreementPosted,
     AgreementDelivered,
     AgreementDefaulted
 };
-use delivery_agreements::terms::{Self, Terms};
-use delivery_agreements::test_config::{Self, TOKEN};
-use delivery_agreements::test_extensions::{Self as ext, Ledger};
+use hauling_agreements::terms::{Self, Terms};
+use hauling_agreements::test_config::{Self, TOKEN};
+use hauling_agreements::test_extensions::{Self as ext, Ledger};
 use multicoin::multicoin::{Self, Balance};
 use std::type_name::{Self, TypeName};
 use std::unit_test::assert_eq;
@@ -141,7 +141,7 @@ fun post_in<T, F>(
 ): (ID, ID) {
     let config = scenario.take_shared<Config>();
     let cargo = mint(src(), ITEM, CARGO_QTY, scenario);
-    let cap = delivery::post(
+    let cap = hauling::post(
         cargo, reward, standard_terms(collateral), &config, post_fee, clock, scenario.ctx(),
     );
     ts::return_shared(config);
@@ -184,7 +184,7 @@ fun accept_in<T>(agreement_id: ID, collateral: u64, scenario: &mut Scenario, clo
     clock.set_for_testing(ACCEPT_AT_MS);
     scenario.next_tx(HAULER);
     let collateral = coin<T>(collateral, scenario);
-    let mut agreement = scenario.take_shared_by_id<DeliveryAgreement<T>>(agreement_id);
+    let mut agreement = scenario.take_shared_by_id<HaulingAgreement<T>>(agreement_id);
     let cargo = agreement.accept(collateral, clock, scenario.ctx());
     transfer::public_transfer(cargo, HAULER);
     ts::return_shared(agreement);
@@ -201,7 +201,7 @@ fun deliver_in<T>(agreement_id: ID, scenario: &mut Scenario, clock: &mut Clock) 
     clock.set_for_testing(DEADLINE_MS - 1);
     scenario.next_tx(OTHER);
     let delivered = mint(dst(), ITEM, CARGO_QTY, scenario);
-    let agreement = scenario.take_shared_by_id<DeliveryAgreement<T>>(agreement_id);
+    let agreement = scenario.take_shared_by_id<HaulingAgreement<T>>(agreement_id);
     agreement.deliver(delivered, clock, scenario.ctx());
 }
 
@@ -246,7 +246,7 @@ fun assert_delivered_event(agreement_id: ID, net_reward: u64, fee: u64, treasury
     assert_eq!(
         event::events_by_type<AgreementDelivered>(),
         vector[
-            delivery::delivered_event_for_testing(
+            hauling::delivered_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, want(),
                 currency<TOKEN>(), net_reward, COLLATERAL_QTY, fee, treasury,
             ),
@@ -431,7 +431,7 @@ fun approved_currency_can_be_drafted_in() {
     assert_eq!(
         event::events_by_type<AgreementPosted>(),
         vector[
-            delivery::posted_event_for_testing(
+            hauling::posted_event_for_testing(
                 agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
                 want(), currency<GOLD>(), GOLD_REWARD_QTY, GOLD_COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
                 vector[],
@@ -440,7 +440,7 @@ fun approved_currency_can_be_drafted_in() {
         ],
     );
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared_by_id<DeliveryAgreement<GOLD>>(agreement_id);
+    let agreement = scenario.take_shared_by_id<HaulingAgreement<GOLD>>(agreement_id);
     assert_eq!(agreement.currency(), currency<GOLD>());
     assert_eq!(agreement.reward(), GOLD_REWARD_QTY);
     assert_eq!(agreement.collateral_amount(), GOLD_COLLATERAL_QTY);
@@ -480,7 +480,7 @@ fun revoke_currency_leaves_existing_agreements_to_default() {
 
     clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.default(&clock, scenario.ctx());
     assert_eq!(event::events_by_type<AgreementDefaulted>().length(), 1);
     assert_coins<TOKEN>(&mut scenario, REWARD_QTY + COLLATERAL_QTY, 0, 0, 0);
@@ -497,7 +497,7 @@ fun revoke_currency_leaves_open_agreements_cancellable() {
 
     scenario.next_tx(LISTER);
     let cap = scenario.take_from_sender<ListerCap>();
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
     assert_eq!(reward.value(), REWARD_QTY);
     transfer::public_transfer(cargo, LISTER);
@@ -526,7 +526,7 @@ fun two_currencies_each_pay_out_in_their_own_coin() {
     assert_eq!(
         event::events_by_type<AgreementDelivered>(),
         vector[
-            delivery::delivered_event_for_testing(
+            hauling::delivered_event_for_testing(
                 gold_id, LISTER, HAULER, option::none(), BENEFICIARY, want(), currency<GOLD>(),
                 GOLD_REWARD_QTY - GOLD_FEE_QTY, GOLD_COLLATERAL_QTY, GOLD_FEE_QTY, TREASURY,
             ),
@@ -557,7 +557,7 @@ fun post_fee_paid_exactly_goes_to_treasury() {
     assert_eq!(
         event::events_by_type<AgreementPosted>(),
         vector[
-            delivery::posted_event_for_testing(
+            hauling::posted_event_for_testing(
                 agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
                 want(), currency<TOKEN>(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, vector[],
                 option::none(), option::none(), option::some(post_fee(POST_FEE_QTY)), FEE_BPS, TREASURY,
@@ -566,7 +566,7 @@ fun post_fee_paid_exactly_goes_to_treasury() {
     );
 
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     assert_eq!(agreement.post_fee(), option::some(post_fee(POST_FEE_QTY)));
     assert_eq!(agreement.delivery_fee_bps(), FEE_BPS);
     assert_eq!(agreement.treasury(), TREASURY);
@@ -651,7 +651,7 @@ fun post_accepts_empty_coin_of_any_type_when_no_fee_is_set() {
     assert_eq!(
         event::events_by_type<AgreementPosted>(),
         vector[
-            delivery::posted_event_for_testing(
+            hauling::posted_event_for_testing(
                 agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
                 want(), currency<TOKEN>(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, vector[],
                 option::none(), option::none(), option::none(), FEE_BPS, TREASURY,
@@ -671,7 +671,7 @@ fun clear_post_fee_lets_listers_post_free() {
     admin!(&mut scenario, |cap, config| config::clear_post_fee(cap, config));
     let agreement_id = post_free(&mut scenario, &clock);
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(agreement_id);
+    let agreement = scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(agreement_id);
     assert_eq!(agreement.post_fee(), option::none());
     ts::return_shared(agreement);
     assert_eq!(test_config::coin_count<FEE>(TREASURY), 0);
@@ -687,7 +687,7 @@ fun cancel_does_not_refund_post_fee() {
 
     scenario.next_tx(LISTER);
     let cap = scenario.take_from_sender<ListerCap>();
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
     assert_eq!(spec::of(&cargo), cargo_spec());
     assert_eq!(reward.value(), REWARD_QTY);
@@ -796,7 +796,7 @@ fun outcome_record_keeps_gross_reward() {
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = coin<TOKEN>(REWARD_QTY, &mut scenario);
     let fee = coin::zero<TOKEN>(scenario.ctx());
-    let mut d = delivery::draft(
+    let mut d = hauling::draft(
         cargo, reward, standard_terms(COLLATERAL_QTY), &config, fee, &clock, scenario.ctx(),
     );
     ts::return_shared(config);
@@ -835,12 +835,12 @@ fun default_takes_no_delivery_fee() {
 
     clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.default(&clock, scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementDefaulted>(),
         vector[
-            delivery::defaulted_event_for_testing(
+            hauling::defaulted_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, currency<TOKEN>(),
                 REWARD_QTY, COLLATERAL_QTY, false,
             ),
@@ -858,12 +858,12 @@ fun forfeit_takes_no_delivery_fee() {
     accept(agreement_id, &mut scenario, &mut clock);
 
     scenario.next_tx(HAULER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.forfeit(&clock, scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementDefaulted>(),
         vector[
-            delivery::defaulted_event_for_testing(
+            hauling::defaulted_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, currency<TOKEN>(),
                 REWARD_QTY, COLLATERAL_QTY, true,
             ),
@@ -885,12 +885,12 @@ fun default_with_zero_reward_sends_only_collateral() {
 
     clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(OTHER);
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.default(&clock, scenario.ctx());
     assert_eq!(
         event::events_by_type<AgreementDefaulted>(),
         vector[
-            delivery::defaulted_event_for_testing(
+            hauling::defaulted_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, currency<TOKEN>(), 0,
                 COLLATERAL_QTY, false,
             ),
@@ -920,12 +920,12 @@ fun config_changes_apply_only_to_later_agreements() {
 
     scenario.next_tx(OTHER);
     {
-        let old = scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(old_id);
+        let old = scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(old_id);
         assert_eq!(old.post_fee(), option::none());
         assert_eq!(old.delivery_fee_bps(), FEE_BPS);
         assert_eq!(old.treasury(), TREASURY);
         ts::return_shared(old);
-        let new = scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(new_id);
+        let new = scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(new_id);
         assert_eq!(new.post_fee(), option::some(post_fee(NEW_POST_FEE_QTY)));
         assert_eq!(new.delivery_fee_bps(), NEW_FEE_BPS);
         assert_eq!(new.treasury(), NEW_TREASURY);

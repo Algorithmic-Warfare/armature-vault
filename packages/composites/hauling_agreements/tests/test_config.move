@@ -1,6 +1,6 @@
 /// Config-free drafting for tests that are not about the protocol config:
 /// agreements paid in `TOKEN`, with no protocol fees. `draft_with_terms` and
-/// `post_with_terms` take the same arguments as `delivery`'s minus the config
+/// `post_with_terms` take the same arguments as `hauling`'s minus the config
 /// and posting fee; `draft` and `post` take the terms' fields instead and pay a
 /// beneficiary address. Each call drafts against a fresh config that approves
 /// `TOKEN` and has no posting fee and 0 bps, pays an empty posting fee, and
@@ -9,12 +9,12 @@
 /// Also the coin helpers every test shares: minting `TOKEN` and totalling the
 /// coins an address owns.
 #[test_only]
-module delivery_agreements::test_config;
+module hauling_agreements::test_config;
 
 use agreements::spec::Spec;
-use delivery_agreements::config;
-use delivery_agreements::delivery::{Self, Draft, ListerCap};
-use delivery_agreements::terms::{Self, Terms};
+use hauling_agreements::config;
+use hauling_agreements::hauling::{Self, Draft, ListerCap};
+use hauling_agreements::terms::{Self, Terms};
 use multicoin::multicoin::Balance;
 use std::type_name::{Self, TypeName};
 use sui::clock::Clock;
@@ -53,7 +53,7 @@ public fun coins<T>(scenario: &Scenario, owner: address): u64 {
 /// How many `Coin<T>` objects `owner` holds.
 public fun coin_count<T>(owner: address): u64 { ts::ids_for_address<Coin<T>>(owner).length() }
 
-/// `delivery::draft` in `TOKEN` against a fee-free config.
+/// `hauling::draft` in `TOKEN` against a fee-free config.
 public fun draft_with_terms(
     cargo: Balance,
     reward: Coin<TOKEN>,
@@ -63,12 +63,12 @@ public fun draft_with_terms(
 ): Draft<TOKEN> {
     let mut config = config::new_for_testing(option::none(), 0, NO_FEE_TREASURY, ctx);
     config.approve_for_testing<TOKEN>();
-    let draft = delivery::draft(cargo, reward, terms, &config, coin::zero<TOKEN>(ctx), clock, ctx);
+    let draft = hauling::draft(cargo, reward, terms, &config, coin::zero<TOKEN>(ctx), clock, ctx);
     config.destroy_for_testing();
     draft
 }
 
-/// `delivery::post` in `TOKEN` against a fee-free config.
+/// `hauling::post` in `TOKEN` against a fee-free config.
 public fun post_with_terms(
     cargo: Balance,
     reward: Coin<TOKEN>,

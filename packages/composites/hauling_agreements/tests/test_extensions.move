@@ -2,12 +2,12 @@
 /// identity rule, an observer ledger and a wrapper that drafts for an entity.
 /// Each one shows the shape a real extension package would take.
 #[test_only]
-module delivery_agreements::test_extensions;
+module hauling_agreements::test_extensions;
 
 use agreements::request::{Frame, Request};
 use agreements::requirement::{Self, Requirement};
 use agreements::spec;
-use delivery_agreements::delivery::{Self, Draft, OutcomeRecord};
+use hauling_agreements::hauling::{Self, Draft, OutcomeRecord};
 use multicoin::multicoin::Balance;
 use std::internal;
 use sui::bcs;
@@ -144,7 +144,7 @@ public fun bind_ledger<T>(ledger: &Ledger, draft: &mut Draft<T>, fee: Balance) {
 
 /// Permissionless crank: fold one outcome record into the ledger.
 public fun ingest(ledger: &mut Ledger, ticket: Receiving<OutcomeRecord>) {
-    let record = delivery::receive_outcome(internal::permit<Ledger>(), &mut ledger.id, ticket);
+    let record = hauling::receive_outcome(internal::permit<Ledger>(), &mut ledger.id, ticket);
     let outcome = record.record_outcome();
     if (outcome.outcome_is_delivered()) ledger.delivered = ledger.delivered + 1;
     if (outcome.outcome_is_defaulted()) ledger.defaulted = ledger.defaulted + 1;
@@ -161,7 +161,7 @@ public fun ingest(ledger: &mut Ledger, ticket: Receiving<OutcomeRecord>) {
 
 /// Receive one outcome record without folding it in, so a test can inspect it.
 public fun take_record(ledger: &mut Ledger, ticket: Receiving<OutcomeRecord>): OutcomeRecord {
-    delivery::receive_outcome(internal::permit<Ledger>(), &mut ledger.id, ticket)
+    hauling::receive_outcome(internal::permit<Ledger>(), &mut ledger.id, ticket)
 }
 
 public fun delivered(l: &Ledger): u64 { l.delivered }

@@ -2,7 +2,7 @@
 
 What every agreement type in this repo shares. It depends only on [MultiCoin](https://github.com/Algorithmic-Warfare/multicoin).
 
-- [delivery_agreements](../../composites/delivery_agreements) is built on it now. Auctions and item exchanges will be too.
+- [hauling_agreements](../../composites/hauling_agreements) is built on it now. Auctions and item exchanges will be too.
 - [agreement_roles](../../extensions/agreement_roles) gates any agreement type through it.
 
 ## `agreements::request` and `agreements::requirement`
@@ -10,7 +10,7 @@ What every agreement type in this repo shares. It depends only on [MultiCoin](ht
 How extensions gate an agreement's actions. Adapted from world-contracts `dev` (`core::request`, `core::requirement`).
 
 - **A `Requirement`** is a config type's name plus its BCS encoding. Only the module that defines the config type can satisfy it, because satisfying needs `Permit` of that type.
-- **An action is a marker type** the agreement module defines, such as delivery's `AcceptAction`. `request::new<A>` and `request::complete<A>` take `Permit<A>`, so only that module can open or complete requests for its actions.
+- **An action is a marker type** the agreement module defines, such as hauling's `AcceptAction`. `request::new<A>` and `request::complete<A>` take `Permit<A>`, so only that module can open or complete requests for its actions.
 - **A `Request`** has no abilities. It holds the agreement ID, the action, the actor (always the sender), an optional identity rule and the outstanding requirements. The transaction can't end until the agreement module completes it.
 - **Rules satisfy requirements in declaration order** with `take_next`. A rule can add follow-ups through the returned `Frame`, which resolve next. A frame only goes back onto a request for the same agreement and action. `next()` borrows the requirement `take_next` would pop; `requires()` lists the outstanding ones next-last, the reverse of declaration order.
 - **`complete`** aborts unless the request was opened for this agreement and action, every requirement is satisfied, and the identity rule (if any) recorded an identity.
@@ -60,7 +60,7 @@ A `Spec` is an exact multicoin amount: `{ collection, asset_id, qty }`.
 - Each recipient gets the floor of their share. The units left over go one each to the largest fractional remainders, with ties going to the earlier recipient.
 - Nobody without a share is paid, and nobody gets more than one unit over their exact share.
 
-`pay(balance, to)` sends a whole balance, or destroys it when it is empty, so nobody receives an empty balance. `pay_by_bps` pays its last recipient this way, and delivery uses it to return a lapsed agreement's cargo.
+`pay(balance, to)` sends a whole balance, or destroys it when it is empty, so nobody receives an empty balance. `pay_by_bps` pays its last recipient this way, and `hauling_agreements` uses it to return a lapsed agreement's cargo.
 
 ## Dependency pin
 

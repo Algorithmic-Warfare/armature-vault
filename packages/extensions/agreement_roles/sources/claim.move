@@ -2,7 +2,7 @@
 ///
 /// A `CanClaim` requirement names the principals, from the shared
 /// `roles::acl::Principal`, that may take the action, such as accepting a
-/// delivery. The actor must satisfy any one of them:
+/// hauling agreement. The actor must satisfy any one of them:
 ///
 /// - `Player { addr }` or `Machine { addr }`: that wallet or service key. A
 ///   single `Player` reserves the agreement for one player.
@@ -17,8 +17,9 @@
 ///
 /// The gate does not check the action or the agreement type. `satisfy` and
 /// `satisfy_directly` take any `agreements::request::Request`, so the same
-/// requirement gates a delivery accept or an action of any other agreement
-/// type built on `agreements`. This package depends on no agreement type.
+/// requirement gates accepting a hauling agreement or an action of any other
+/// agreement type built on `agreements`. This package depends on no
+/// agreement type.
 ///
 /// ```move
 /// // Lister: the haulers OU's board and one freelancer may claim.
@@ -69,17 +70,17 @@ public struct CanClaim has drop {
 
 // === Events ===
 
-/// `actor` satisfied a claim gate on `agreement_id` for `action` (for a
-/// delivery accept, `delivery::AcceptAction`) by matching `principal`, the
-/// first listed principal they satisfy. An `Ou` principal means they claimed
-/// as a board member of that OU.
+/// `actor` satisfied a claim gate on `agreement_id` for `action` (for
+/// accepting a hauling agreement, `hauling::AcceptAction`) by matching
+/// `principal`, the first listed principal they satisfy. An `Ou` principal
+/// means they claimed as a board member of that OU.
 ///
 /// Trust it only as far as `action`. Anyone can open a request for an action
 /// type they define, naming any `agreement_id`, gate it on their own
 /// principals and complete it, so a `Claimed` for a real agreement can come
 /// from an unrelated module. Accept one only when `action` is a type, by its
-/// original package ID, whose module you trust: only delivery can open and
-/// complete a request for `delivery::AcceptAction`, so such a claim always
+/// original package ID, whose module you trust: only `hauling` can open and
+/// complete a request for `hauling::AcceptAction`, so such a claim always
 /// shares its transaction with that agreement's `AgreementAccepted`.
 public struct Claimed has copy, drop {
     agreement_id: ID,
@@ -90,8 +91,9 @@ public struct Claimed has copy, drop {
 
 // === Public Functions ===
 
-/// A requirement only `principals` can satisfy. Attach it to a delivery draft
-/// with `require_to_accept`, or to another agreement type's action.
+/// A requirement only `principals` can satisfy. Attach it to a hauling
+/// agreement's draft with `require_to_accept`, or to another agreement
+/// type's action.
 public fun requirement(principals: vector<Principal>): Requirement {
     let len = principals.length();
     assert!(len > 0 && len <= MAX_PRINCIPALS, EInvalidPrincipals);

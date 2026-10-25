@@ -1,10 +1,10 @@
-# Delivery agreements: user paths
+# Hauling agreements: user paths
 
-Every way a player, service or extension author interacts with a delivery agreement, step by step. For the reasoning behind the design, see [design.md](design.md).
+Every way a player, service or extension author interacts with a hauling agreement, step by step. For the reasoning behind the design, see [design.md](design.md).
 
-Code blocks show the commands of one programmable transaction block (PTB), written as Move calls. `delivery` is `delivery_agreements::delivery`, `terms` is `delivery_agreements::terms`, `config` is `delivery_agreements::config`, `spec` is `agreements::spec`, `request` is `agreements::request`, `claim` is `agreement_roles::claim`, `acl` is `roles::acl`, and `coin` is `sui::coin`. Times are milliseconds from the Sui `Clock`.
+Code blocks show the commands of one programmable transaction block (PTB), written as Move calls. `hauling` is `hauling_agreements::hauling`, `terms` is `hauling_agreements::terms`, `config` is `hauling_agreements::config`, `spec` is `agreements::spec`, `request` is `agreements::request`, `claim` is `agreement_roles::claim`, `acl` is `roles::acl`, and `coin` is `sui::coin`. Times are milliseconds from the Sui `Clock`.
 
-`T` is the agreement's currency: the coin type of its reward, collateral and delivery fee, which must be approved in the shared `Config`. `F` is the posting fee's coin type. A PTB passes `T` as a type argument to every call on a `DeliveryAgreement<T>` or `Draft<T>`, and `T` then `F` to `draft` and `post`. Cargo and `want` are multicoin balances; only payments are coins.
+`T` is the agreement's currency: the coin type of its reward, collateral and delivery fee, which must be approved in the shared `Config`. `F` is the posting fee's coin type. A PTB passes `T` as a type argument to every call on a `HaulingAgreement<T>` or `Draft<T>`, and `T` then `F` to `draft` and `post`. Cargo and `want` are multicoin balances; only payments are coins.
 
 ## Who is involved
 
@@ -43,7 +43,7 @@ sequenceDiagram
     actor L as Lister
     actor H as Hauler
     actor X as Anyone
-    participant AG as DeliveryAgreement
+    participant AG as HaulingAgreement
     participant OB as Observer (optional)
     participant T as Treasury
     L->>AG: draft, attach extensions, publish (cargo and reward escrowed)
@@ -81,7 +81,7 @@ let terms = terms::new(
     haul_ms,          // relative: delivery window from acceptance
     beneficiary,      // who receives the delivery
 );
-let cap = delivery::post<T, F>(
+let cap = hauling::post<T, F>(
     cargo,            // Balance: receipts from the source SSU's collection
     reward,           // Coin<T>: what the hauler earns
     terms,
@@ -92,7 +92,7 @@ let cap = delivery::post<T, F>(
 transfer::public_transfer(cap, lister);
 ```
 
-- **Result:** a shared `DeliveryAgreement<T>` and an `AgreementPosted` event. Keep the `ListerCap`: it is the only way to cancel. It has `store`, so a DAO or vault can hold it.
+- **Result:** a shared `HaulingAgreement<T>` and an `AgreementPosted` event. Keep the `ListerCap`: it is the only way to cancel. It has `store`, so a DAO or vault can hold it.
 - **Currency:** `T` must be approved; check with `config.is_approved<T>()` or list them with `config.currencies()`. Revoking `T` later doesn't affect this agreement.
 - **Fees:** `post_fee` goes to the treasury at once and isn't refunded if you cancel. Read the current fee from `config.post_fee()`, which names its coin type and amount; when it is `none`, pass an empty coin of any type, such as `coin::zero<SUI>(ctx)`. The agreement also copies the config's delivery fee rate and treasury, and `AgreementPosted` shows all three.
 - **Fails with:** `terms::EInvalidTerms`, from `terms::new` if `accept_ms` or `haul_ms` is 0 or more than 30 days or the `want` quantity or `collateral` is 0, and from `post` if `want` names the cargo's own collection and asset. `config::ECurrencyNotApproved` if `T` isn't approved. `config::EWrongPostFeeCurrency` or `config::EWrongPostFeeAmount` if `post_fee` isn't exactly the posting fee, and `config::EUnexpectedFee` if no posting fee is set and `post_fee` isn't empty.
@@ -103,7 +103,7 @@ transfer::public_transfer(cap, lister);
 **When:** you want rules on who may accept, or an observer that keeps a track record.
 
 ```move
-let mut draft = delivery::draft<T, F>(cargo, reward, terms, &config, post_fee, &clock, ctx);  // terms as in L1
+let mut draft = hauling::draft<T, F>(cargo, reward, terms, &config, post_fee, &clock, ctx);  // terms as in L1
 
 // Who may accept, in the order an accepting PTB must satisfy them.
 draft.require_to_accept(some_rule::requirement(config));
@@ -127,7 +127,7 @@ let cap = draft.publish();
 **When:** the job is for one player you've already agreed terms with, for your organisation's haulers, or for a mix. Uses [`agreement_roles`](../../packages/extensions/agreement_roles).
 
 ```move
-let mut draft = delivery::draft<T, F>(cargo, reward, terms, &config, post_fee, &clock, ctx);
+let mut draft = hauling::draft<T, F>(cargo, reward, terms, &config, post_fee, &clock, ctx);
 
 // One player only (a reservation).
 draft.require_to_accept(claim::requirement(vector[acl::player(player_address)]));
@@ -165,7 +165,7 @@ let (cargo, reward) = agreement.cancel(cap, &clock, ctx);   // Balance, Coin<T>
 **When:** the agreement ended by `deliver`, `default`, `forfeit` or `close_lapsed`, and you still hold its `ListerCap`. For terms that pay the cap holder, collect instead ([L7](#l7-collect-proceeds)): `delete_cap` aborts with `ECapReceivesProceeds` for such a cap, since deleting it would strand its proceeds.
 
 ```move
-delivery::delete_cap(cap);
+hauling::delete_cap(cap);
 ```
 
 - **Result:** the cap is deleted and its storage rebate goes to the gas payer. Nothing else changes.
@@ -177,7 +177,7 @@ delivery::delete_cap(cap);
 
 ```move
 let terms = terms::new_for_cap_holder(want, collateral, accept_ms, haul_ms);
-let cap = delivery::post<T, F>(cargo, reward, terms, &config, post_fee, &clock, ctx);
+let cap = hauling::post<T, F>(cargo, reward, terms, &config, post_fee, &clock, ctx);
 transfer::public_transfer(cap, custodian);   // or store it in the wrapper's own object
 ```
 
@@ -191,7 +191,7 @@ transfer::public_transfer(cap, custodian);   // or store it in the wrapper's own
 **When:** an agreement on terms that pay the cap holder ended by `deliver`, `default`, `forfeit` or `close_lapsed`, and you hold its cap. Find the `Proceeds<T>` by listing the objects owned by the cap's address.
 
 ```move
-let (items, coins) = delivery::collect<T>(cap, proceeds);   // proceeds: Receiving<Proceeds<T>>
+let (items, coins) = hauling::collect<T>(cap, proceeds);   // proceeds: Receiving<Proceeds<T>>
 // items: Option<Balance>, the delivered want or the returned cargo; none after a default
 // coins: Coin<T>, the reward and collateral after a default, the reward after a lapse,
 //        and empty after a delivery
@@ -228,12 +228,12 @@ some_rule::satisfy(&mut req, &my_profile);    // requirement 2: whatever rule co
 let cargo = agreement.finish_accept(req, collateral, &clock);
 ```
 
-The same transaction with the TypeScript SDK (a sketch). `coinType` is the agreement's `T`, from the object's type `DeliveryAgreement<T>`:
+The same transaction with the TypeScript SDK (a sketch). `coinType` is the agreement's `T`, from the object's type `HaulingAgreement<T>`:
 
 ```ts
 const tx = new Transaction();
 const req = tx.moveCall({
-  target: `${KIT}::delivery::begin_accept`,
+  target: `${KIT}::hauling::begin_accept`,
   typeArguments: [coinType],
   arguments: [tx.object(agreementId), tx.object.clock()],
 });
@@ -243,7 +243,7 @@ tx.moveCall({
 });
 const [collateral] = tx.splitCoins(tx.object(myCoinId), [tx.pure.u64(collateralAmount)]);
 const cargo = tx.moveCall({
-  target: `${KIT}::delivery::finish_accept`,
+  target: `${KIT}::hauling::finish_accept`,
   typeArguments: [coinType],
   arguments: [tx.object(agreementId), req, collateral, tx.object.clock()],
 });
@@ -319,7 +319,7 @@ agreement.default(&clock, ctx);   // anyone; the beneficiary usually has the mot
 ```move
 // In the observer's module:
 public fun ingest(ledger: &mut Ledger, ticket: Receiving<OutcomeRecord>) {
-    let record = delivery::receive_outcome(internal::permit<Ledger>(), &mut ledger.id, ticket);
+    let record = hauling::receive_outcome(internal::permit<Ledger>(), &mut ledger.id, ticket);
     // read record_outcome, record_observer().binding_fee(), record_currency(), record_reward(), ...
     // trust record_hauler_identity only if record_identity_rule is a rule you trust,
     // and record_on_behalf_of only if its entity_kind is a wrapper you trust
@@ -346,7 +346,7 @@ public fun ingest(ledger: &mut Ledger, ticket: Receiving<OutcomeRecord>) {
 | Who an agreement was posted for | `AgreementPosted.on_behalf_of`: the entity and the wrapper type that vouched for it |
 | Proceeds waiting for a cap | `AgreementPosted.pays_cap_holder` with a terminal event; the `Proceeds` objects owned by the cap's address (`beneficiary`) |
 | Who may take a gated job | The claim gate in `AgreementPosted.accept_requirements`, decoded with `claim::principals_of`; for `Ou` principals, the OU's board from armature's board events |
-| Which OU a gated job was taken for | `claim::Claimed.principal` (an `Ou` principal) where `Claimed.action` is `delivery::AcceptAction` under delivery's original package ID, joined to `AgreementAccepted` by `agreement_id`. Drop claims with any other `action`: anyone can emit one naming a real agreement from an action type of their own |
+| Which OU a gated job was taken for | `claim::Claimed.principal` (an `Ou` principal) where `Claimed.action` is `hauling::AcceptAction` under `hauling_agreements`' original package ID, joined to `AgreementAccepted` by `agreement_id`. Drop claims with any other `action`: anyone can emit one naming a real agreement from an action type of their own |
 | Overdue jobs | No event: `AgreementAccepted.deadline_ms` before the latest checkpoint time, with no terminal event |
 
 Terminal events delete the agreement, so index from the package's publish checkpoint.
@@ -373,7 +373,7 @@ public fun satisfy(request: &mut Request, profile: &Profile) {
 ```
 
 - **Only your module can satisfy your requirement,** because only it can create `Permit<MinRank>`.
-- **Check `request.is_action<delivery::AcceptAction>()`** if the rule should only gate delivery accepts, not other agreement types' actions. `claim` doesn't, so one gate works for every action of every agreement type.
+- **Check `request.is_action<hauling::AcceptAction>()`** if the rule should only gate hauling-agreement accepts, not other agreement types' actions. `claim` doesn't, so one gate works for every action of every agreement type.
 - **Follow-ups:** push requirements onto the `Frame` and `enqueue` it. They resolve next, in the order you added them. Enqueue or destroy the frame inside your satisfy function; it only goes back onto a request for the same agreement and action (`EWrongFrame`).
 
 ### E2. Write an identity rule
@@ -409,7 +409,7 @@ public fun post_for_dao<T, F>(dao: &Dao, /* the DAO's authorization, */ cargo: B
     reward: Coin<T>, terms: Terms, config: &Config, post_fee: Coin<F>, clock: &Clock,
     ctx: &mut TxContext): ListerCap {
     // check that the DAO authorized this, then:
-    let mut draft = delivery::draft<T, F>(cargo, reward, terms, config, post_fee, clock, ctx);
+    let mut draft = hauling::draft<T, F>(cargo, reward, terms, config, post_fee, clock, ctx);
     draft.set_on_behalf_of(internal::permit<Desk>(), object::id(dao));
     draft.publish()
 }
@@ -419,7 +419,7 @@ public fun post_for_dao<T, F>(dao: &Dao, /* the DAO's authorization, */ cargo: B
 - **It moves no payout.** Pair it with terms that pay the cap holder ([L6](#l6-post-with-payouts-to-the-cap-holder)) and keep the cap in the wrapper, so a listing the config admin closes still refunds the DAO.
 - **Fails with:** `EAlreadyBound` for a second `set_on_behalf_of`.
 
-The test package's [`test_extensions.move`](../../packages/composites/delivery_agreements/tests/test_extensions.move) has a working version of each of E1–E4.
+The test package's [`test_extensions.move`](../../packages/composites/hauling_agreements/tests/test_extensions.move) has a working version of each of E1–E4.
 
 ---
 

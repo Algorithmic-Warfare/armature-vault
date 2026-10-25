@@ -1,14 +1,14 @@
-# Delivery agreements: design
+# Hauling agreements: design
 
-How delivery agreements work, why they are built this way, and how they are meant to be extended and composed. For step-by-step usage, see [user-paths.md](user-paths.md).
+How hauling agreements work, why they are built this way, and how they are meant to be extended and composed. For step-by-step usage, see [user-paths.md](user-paths.md).
 
 ## What it is
 
-A **delivery agreement** is a collateralized forward swap of items, paid in a coin. Items are [multicoin](https://github.com/Algorithmic-Warfare/multicoin) balances; payments are a Sui `Coin<T>` of one coin type `T`, so the agreement is a `DeliveryAgreement<T>`. The lister escrows `cargo` (a multicoin balance) and a `reward` (a `Coin<T>`) and names a `want`: an exact collection, asset and quantity that counts as delivery. A hauler locks collateral, an agreed amount of `T`, and takes the cargo. Delivering the `want` before the deadline pays the hauler; missing it pays the beneficiary, an address or whoever holds the agreement's `ListerCap`. `T` must be a currency the protocol admin has approved (see [Currencies and protocol fees](#currencies-and-protocol-fees)).
+A **hauling agreement** is a collateralized forward swap of items, paid in a coin. Items are [multicoin](https://github.com/Algorithmic-Warfare/multicoin) balances; payments are a Sui `Coin<T>` of one coin type `T`, so the agreement is a `HaulingAgreement<T>`. The lister escrows `cargo` (a multicoin balance) and a `reward` (a `Coin<T>`) and names a `want`: an exact collection, asset and quantity that counts as delivery. A hauler locks collateral, an agreed amount of `T`, and takes the cargo. Delivering the `want` before the deadline pays the hauler; missing it pays the beneficiary, an address or whoever holds the agreement's `ListerCap`. `T` must be a currency the protocol admin has approved (see [Currencies and protocol fees](#currencies-and-protocol-fees)).
 
 With [warehouse receipts](https://github.com/loash-industries/warehouse-receipts), a collection identifies a storage unit (SSU) and an asset ID an item type. `cargo` in SSU A's collection and `want` in SSU B's describe a haul from A to B.
 
-**Contracts and agreements.** A *contract* settles when it executes, as a Trinary Exchange fill does. An *agreement* has an obligation that outlives the transaction that creates it. The chain can enforce an agreement's stakes but not the parties' conduct in the game, so delivery_agreements enforces stakes and judges performance by an objective test.
+**Contracts and agreements.** A *contract* settles when it executes, as a Trinary Exchange fill does. An *agreement* has an obligation that outlives the transaction that creates it. The chain can enforce an agreement's stakes but not the parties' conduct in the game, so hauling_agreements enforces stakes and judges performance by an objective test.
 
 ## Principles
 
@@ -24,10 +24,10 @@ With [warehouse receipts](https://github.com/loash-industries/warehouse-receipts
 | Path | Contents |
 |---|---|
 | [`packages/primitives/agreements`](../../packages/primitives/agreements) | What every agreement type shares: `request`, `requirement`, `spec` and `payout` |
-| [`packages/composites/delivery_agreements`](../../packages/composites/delivery_agreements) | The core: `delivery`, `terms` for an agreement's terms, and `config` for approved currencies and protocol fees |
-| [`packages/composites/delivery_agreements/tests/test_extensions.move`](../../packages/composites/delivery_agreements/tests/test_extensions.move) | Minimal test extensions: an allowlist, an identity rule, a follow-up rule, a ledger observer and a wrapper that drafts for an entity |
+| [`packages/composites/hauling_agreements`](../../packages/composites/hauling_agreements) | The core: `hauling`, `terms` for an agreement's terms, and `config` for approved currencies and protocol fees |
+| [`packages/composites/hauling_agreements/tests/test_extensions.move`](../../packages/composites/hauling_agreements/tests/test_extensions.move) | Minimal test extensions: an allowlist, an identity rule, a follow-up rule, a ledger observer and a wrapper that drafts for an entity |
 | [`packages/extensions/agreement_roles`](../../packages/extensions/agreement_roles) | A claim gate that limits an agreement action to a list of principals: one player (a reservation), machine keys, or an OU's board. Depends on no agreement type |
-| [`packages/integration/delivery_claim_tests`](../../packages/integration/delivery_claim_tests) | Unpublished end-to-end tests of the claim gate on delivery agreements |
+| [`packages/integration/hauling_claim_tests`](../../packages/integration/hauling_claim_tests) | Unpublished end-to-end tests of the claim gate on hauling agreements |
 | [`packages/primitives/roles`](../../packages/primitives/roles) | The shared `Principal` used by `agreement_roles`; `armature_vault` switches to it at its next fresh publish |
 
 ## The core agreement
@@ -101,15 +101,15 @@ The `config` module creates one shared `Config` at publish. It holds the approve
 - **Terms are fixed at drafting.** Each agreement copies the delivery rate and treasury (and records the posting fee it paid), so later config changes never alter an existing agreement, open or accepted.
 - **Other endings take no fee.** `default`, `forfeit`, `cancel` and `close_lapsed` take none, and don't refund the posting fee.
 - **The `AdminCap`** changes the config with `approve_currency<T>`, `revoke_currency<T>`, `set_post_fee<F>` (a fee must be more than 0), `clear_post_fee`, `set_delivery_fee_bps` (at most 10,000) and `set_treasury`. Each emits `ConfigUpdated` with the whole config, including the currency list. The publisher receives the cap; it has `store`, so a DAO can hold it.
-- **The `AdminCap` also closes lapsed agreements.** `delivery::close_lapsed` deletes an open agreement once `accept_by_ms` has passed, so a listing whose `ListerCap` is lost or burned still ends. It recovers the escrow only for terms with a beneficiary address: for terms that pay the cap holder, the refund goes to the lost cap as `Proceeds`. The cargo and reward go to the agreement's `lister`, the signer of `draft`, or to its cap for terms that pay the cap holder, and never to the admin. With a beneficiary address, a cap holder who isn't the lister can still `cancel` the lapsed listing, and whichever transaction lands first decides who gets the escrow, so the admin should close only listings lapsed long enough that a holder would have cancelled.
+- **The `AdminCap` also closes lapsed agreements.** `hauling::close_lapsed` deletes an open agreement once `accept_by_ms` has passed, so a listing whose `ListerCap` is lost or burned still ends. It recovers the escrow only for terms with a beneficiary address: for terms that pay the cap holder, the refund goes to the lost cap as `Proceeds`. The cargo and reward go to the agreement's `lister`, the signer of `draft`, or to its cap for terms that pay the cap holder, and never to the admin. With a beneficiary address, a cap holder who isn't the lister can still `cancel` the lapsed listing, and whichever transaction lands first decides who gets the escrow, so the admin should close only listings lapsed long enough that a holder would have cancelled.
 
 ## Extensions
 
 ```mermaid
 flowchart TB
-    subgraph core["delivery_agreements (multicoin and agreements only)"]
+    subgraph core["hauling_agreements (multicoin and agreements only)"]
         DR["Draft"] --> PUB["publish"]
-        AG["DeliveryAgreement"]
+        AG["HaulingAgreement"]
         REQ["Request (hot potato)"]
         REC["OutcomeRecord"]
     end
@@ -150,9 +150,9 @@ Adapted from world-contracts `dev` (`core::request`, `core::requirement`, `core:
 
 - **A `Requirement`** is `{ type_name, data }`. `type_name` is the config type's `with_original_ids` name, which is stable across upgrades. `data` is the config encoded as BCS.
 - **A `Request`** is created by `begin_accept` and holds the agreement ID, the action, the actor (the sender), the identity rule and the outstanding requirements. It has no abilities, so the transaction can't end without completing it.
-- **Actions are marker types.** `delivery` defines `AcceptAction`. `request::new` and `request::complete` take `Permit` of the action, so only `delivery` can open or complete its own requests, and an auction or exchange defines its own actions the same way.
+- **Actions are marker types.** `hauling` defines `AcceptAction`. `request::new` and `request::complete` take `Permit` of the action, so only `hauling` can open or complete its own requests, and an auction or exchange defines its own actions the same way.
 - **Ordering.** Requirements resolve in declaration order. A rule calls `take_next(Permit<T>)`, which aborts unless the next requirement's type is `T`.
-- **Follow-ups.** `take_next` returns a `Frame`. A rule can `require` more requirements on it and `enqueue` it, and they resolve next, in the order added. Inventory in world-contracts uses this to add sponsor and online checks. A frame records the agreement and action of its request, and `enqueue` aborts with `EWrongFrame` for any other. It doesn't record the request itself: a rule that returns its frame lets the caller enqueue it later, behind other requirements, or onto another open request for the same agreement and action. Rules should enqueue or destroy their frame before returning. For delivery's `AcceptAction` a moved frame gains nothing, since only one `finish_accept` per agreement can succeed, but an action that can complete several times in one transaction, such as an auction bid, can't rely on follow-ups staying with their request.
+- **Follow-ups.** `take_next` returns a `Frame`. A rule can `require` more requirements on it and `enqueue` it, and they resolve next, in the order added. Inventory in world-contracts uses this to add sponsor and online checks. A frame records the agreement and action of its request, and `enqueue` aborts with `EWrongFrame` for any other. It doesn't record the request itself: a rule that returns its frame lets the caller enqueue it later, behind other requirements, or onto another open request for the same agreement and action. Rules should enqueue or destroy their frame before returning. For hauling's `AcceptAction` a moved frame gains nothing, since only one `finish_accept` per agreement can succeed, but an action that can complete several times in one transaction, such as an auction bid, can't rely on follow-ups staying with their request.
 - **Completion.** `finish_accept` completes the request against **this agreement and this action**, so a request satisfied against a loosely gated agreement, or opened for another action or agreement type, can't be finished here. It re-checks the agreement's state.
 - **No bypass.** `accept` is begin plus finish with no rules satisfied in between, so it aborts when requirements exist.
 - **No lock.** World locks an entity while a request is open. Here a request can't outlive its transaction and finishing re-checks state, so a lock would never be visible.
@@ -226,7 +226,7 @@ Every agreement event that carries a reward, collateral or delivery fee also car
 
 Terminal events delete the agreement and are self-contained: each names everyone who was paid. For terms that pay the cap holder, the beneficiary they name is the cap's address, where a `Proceeds` waits for `collect`. Index from the package's publish checkpoint. Off-chain failure rates need no observer at all: count `AgreementDefaulted` against `AgreementDelivered` per `hauler` or `hauler_identity`.
 
-The events cover discovery on both paths. Open jobs and who may take them come from `AgreementPosted`: a claim gate's principals are in `accept_requirements` (decode with `principals_of` or the same BCS layout). Which OU a gated job was taken for comes from `Claimed`, counted only when its `action` is delivery's `AcceptAction` (see [Recording it](#agreement_roles-who-may-claim)). Who is on an OU's board comes from armature's own board events. Open, lapsed and overdue have no event; derive them from `accept_by_ms` and `deadline_ms` against chain time. `AgreementLapsed` marks the admin closing a lapsed agreement, not the moment it lapsed.
+The events cover discovery on both paths. Open jobs and who may take them come from `AgreementPosted`: a claim gate's principals are in `accept_requirements` (decode with `principals_of` or the same BCS layout). Which OU a gated job was taken for comes from `Claimed`, counted only when its `action` is hauling's `AcceptAction` (see [Recording it](#agreement_roles-who-may-claim)). Who is on an OU's board comes from armature's own board events. Open, lapsed and overdue have no event; derive them from `accept_by_ms` and `deadline_ms` against chain time. `AgreementLapsed` marks the admin closing a lapsed agreement, not the moment it lapsed.
 
 ## Rule packages
 
@@ -237,16 +237,16 @@ One requirement, `CanClaim { principals }`: the actor must satisfy any one of th
 - **`Principal`** comes from the shared [`roles`](../../packages/primitives/roles) package, a copy of `armature_vault`'s, which the vault switches to at its next fresh publish: `Player { addr }`, `Machine { addr }`, or `Ou { ou_id }`, the last meaning any current board member of that OU.
 - **One `Player` is a reservation.** A character reservation would be a separate rule written against a world `AccessCap` and attached as the identity rule.
 - **An `Ou` principal follows the board.** It is read at claim time, so "offer this to our haulers" means the board at accept time, not at posting time. The list itself is fixed when the agreement is published; anything that must change over time belongs in an OU.
-- **Attaching it.** `requirement(principals)` builds it, and `draft.require_to_accept(requirement)` adds it as a delivery accept requirement; another agreement type attaches it to its own action the same way. A list holds 1 to 32 principals, and several gates on one agreement must all pass.
-- **Satisfying it.** `satisfy(request, &org)` checks the actor while acting as a member of `org`; `Player` and `Machine` principals match whatever OU is passed. `satisfy_directly(request)` covers `Player` and `Machine` without an OU. The gate takes any `agreements::request::Request` and does not check the action, so it works for any action of any agreement type built on `agreements`. The package depends on no agreement type; its delivery end-to-end tests live in the unpublished `delivery_claim_tests` package.
+- **Attaching it.** `requirement(principals)` builds it, and `draft.require_to_accept(requirement)` adds it as a hauling agreement's accept requirement; another agreement type attaches it to its own action the same way. A list holds 1 to 32 principals, and several gates on one agreement must all pass.
+- **Satisfying it.** `satisfy(request, &org)` checks the actor while acting as a member of `org`; `Player` and `Machine` principals match whatever OU is passed. `satisfy_directly(request)` covers `Player` and `Machine` without an OU. The gate takes any `agreements::request::Request` and does not check the action, so it works for any action of any agreement type built on `agreements`. The package depends on no agreement type; its end-to-end tests with hauling agreements live in the unpublished `hauling_claim_tests` package.
 - **Reading it.** `principals_of(requirement)` decodes the list, so a client can show who may claim from `AgreementPosted`.
 - **Recording it.** A successful claim emits `Claimed { agreement_id, action, actor, principal }`, where `principal` is the first listed principal the actor matched. An `Ou` principal means they claimed as a board member of that OU.
-- **Trusting the record.** Anyone can open a request for an action type they define, naming any agreement ID, gate it on their own principals and complete it, so a `Claimed` naming a delivery agreement can come from an unrelated module. Count a claim only when its `action` is `delivery::AcceptAction` under delivery's original package ID: only delivery can open and complete that request, so the claim shares its transaction with the agreement's `AgreementAccepted`.
+- **Trusting the record.** Anyone can open a request for an action type they define, naming any agreement ID, gate it on their own principals and complete it, so a `Claimed` naming a hauling agreement can come from an unrelated module. Count a claim only when its `action` is `hauling::AcceptAction` under `hauling_agreements`' original package ID: only `hauling` can open and complete that request, so the claim shares its transaction with the agreement's `AgreementAccepted`.
 
 ## Composition
 
 - **Warehouse receipts.** `deposit_for_receipt` at the destination and `deliver` can share one transaction. Receipts bought on a market are equally valid delivery, because the beneficiary receives the same claim.
-- **Trinary Exchange.** A trade is a contract and its delivery is an agreement. They compose in one transaction because both hold multicoin `Balance`, but only if both packages link the same published multicoin. `delivery_agreements` pins `2772c26`, like warehouse-receipts and `armature_vault`; bump them together.
+- **Trinary Exchange.** A trade is a contract and its delivery is an agreement. They compose in one transaction because both hold multicoin `Balance`, but only if both packages link the same published multicoin. `hauling_agreements` pins `2772c26`, like warehouse-receipts and `armature_vault`; bump them together.
 - **Minehaul.** A logistics network can sit on top of the core:
   - Network membership becomes an accept rule, such as an `agreement_roles` claim gate listing the network's OU.
   - A network-wide reputation ledger becomes the observer.

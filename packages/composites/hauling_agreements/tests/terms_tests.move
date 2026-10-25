@@ -1,13 +1,13 @@
 /// `Terms`: what the constructors keep and check, and posting an agreement's
-/// terms again. The check `delivery::draft` makes (want versus cargo) and the
-/// constructor checks for `new` are in `delivery_tests`.
+/// terms again. The check `hauling::draft` makes (want versus cargo) and the
+/// constructor checks for `new` are in `hauling_tests`.
 #[test_only]
-module delivery_agreements::terms_tests;
+module hauling_agreements::terms_tests;
 
 use agreements::spec::{Self, Spec};
-use delivery_agreements::delivery::{DeliveryAgreement, ListerCap};
-use delivery_agreements::terms;
-use delivery_agreements::test_config::{Self, TOKEN};
+use hauling_agreements::hauling::{HaulingAgreement, ListerCap};
+use hauling_agreements::terms;
+use hauling_agreements::test_config::{Self, TOKEN};
 use multicoin::multicoin;
 use std::unit_test::assert_eq;
 use sui::clock;
@@ -98,7 +98,7 @@ fun lapsed_terms_post_again_with_a_fresh_window() {
     clock.set_for_testing(LAPSED_MS);
     scenario.next_tx(LISTER);
     let cap = scenario.take_from_sender<ListerCap>();
-    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     assert_eq!(agreement.accept_by_ms(), START_MS + ACCEPT_MS);
     let terms = agreement.terms();
     assert_eq!(terms, posted);
@@ -108,7 +108,7 @@ fun lapsed_terms_post_again_with_a_fresh_window() {
     transfer::public_transfer(cap, LISTER);
 
     scenario.next_tx(OTHER);
-    let reposted = scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(reposted_id);
+    let reposted = scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(reposted_id);
     assert_eq!(reposted.terms(), posted);
     assert_eq!(reposted.accept_by_ms(), LAPSED_MS + ACCEPT_MS);
     assert_eq!(reposted.reward(), REWARD_QTY);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the gas cost of every user-facing delivery-agreement feature.
+"""Measure the gas cost of every user-facing hauling-agreement feature.
 
 Runs each feature as a real transaction on a disposable local Sui network and
 records what the gas payer is charged:
@@ -13,7 +13,7 @@ When TriEx sponsors a transaction, the sponsor is the gas payer, so it pays the
 computation and storage and also receives the rebate. Summing `net` over every
 transaction of an agreement's life gives the sponsor's cost per agreement.
 
-Covers `delivery_agreements` (open path, terms that pay the cap holder,
+Covers `hauling_agreements` (open path, terms that pay the cap holder,
 config admin) and the `agreement_roles` claim gate (player, OU and large
 gates). Payments are SUI;
 items are multicoin balances from a local collection. Warehouse-receipt
@@ -93,7 +93,7 @@ ACTORS = ("admin", "lister", "hauler", "member", "other")
 REPO_PACKAGES = (
     "primitives/agreements",
     "primitives/roles",
-    "composites/delivery_agreements",
+    "composites/hauling_agreements",
     "extensions/agreement_roles",
 )
 
@@ -410,7 +410,7 @@ def publish_all():
         pkgs[name] = next(c["packageId"] for c in result["objectChanges"]
                           if c["type"] == "published")
         publishes[name] = gas_of(result)
-        if name == "delivery_agreements":
+        if name == "hauling_agreements":
             # `init` shares the config and gives the publisher the admin cap.
             config = created(result, "::config::Config")[0]
             admin_cap = created(result, "::config::AdminCap")[0]
@@ -531,7 +531,7 @@ class Harness:
         """The standard want and collateral, paying the lister or, with
         `cap_holder`, the agreement's `ListerCap`."""
         self.spec(ptb, "want")
-        t = lambda fun: self.target("delivery_agreements", "terms", fun)  # noqa: E731
+        t = lambda fun: self.target("hauling_agreements", "terms", fun)  # noqa: E731
         if cap_holder:
             return ptb.call(t("new_for_cap_holder"), "want", COLLATERAL, accept_ms, haul_ms,
                             assign=assign)
@@ -543,7 +543,7 @@ class Harness:
     def admin_features(self):
         say("config admin")
         cfg, cap = "@" + self.config, "@" + self.admin_cap
-        c = lambda fun: self.target("delivery_agreements", "config", fun)  # noqa: E731
+        c = lambda fun: self.target("hauling_agreements", "config", fun)  # noqa: E731
         self.measure("admin: approve_currency<SUI>", "admin",
                      Ptb().call(c("approve_currency"), cap, cfg, types=[SUI]), "admin")
         self.measure("admin: set_post_fee<SUI>", "admin",
@@ -556,7 +556,7 @@ class Harness:
     def admin_teardown_features(self):
         say("config admin (revoke / clear)")
         cfg, cap = "@" + self.config, "@" + self.admin_cap
-        c = lambda fun: self.target("delivery_agreements", "config", fun)  # noqa: E731
+        c = lambda fun: self.target("hauling_agreements", "config", fun)  # noqa: E731
         self.measure("admin: clear_post_fee", "admin",
                      Ptb().call(c("clear_post_fee"), cap, cfg), "admin")
         self.measure("admin: revoke_currency<SUI>", "admin",
@@ -569,12 +569,12 @@ class Harness:
         cargo = self.mint(CARGO_QTY, CARGO_ASSET, "lister")
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
         self.terms(ptb, "terms", haul_ms, accept_ms, cap_holder)
-        ptb.call(self.target("delivery_agreements", "delivery", "post"),
+        ptb.call(self.target("hauling_agreements", "hauling", "post"),
                  "@" + cargo, "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
                  types=[SUI, SUI], assign="cap")
         ptb.transfer(["cap"], self.at("lister"))
         res, row = self.measure(label, "lister", ptb, "lister")
-        return self.agreement_of(res), created(res, "::delivery::ListerCap")[0], row
+        return self.agreement_of(res), created(res, "::hauling::ListerCap")[0], row
 
     def principals(self, ptb, specs):
         names = []
@@ -591,35 +591,35 @@ class Harness:
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
         self.terms(ptb, "terms")
         self.principals(ptb, specs)
-        ptb.call(self.target("delivery_agreements", "delivery", "draft"),
+        ptb.call(self.target("hauling_agreements", "hauling", "draft"),
                  "@" + cargo, "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
                  types=[SUI, SUI], assign="draft")
         ptb.call(self.target("agreement_roles", "claim", "requirement"), "principals",
                  assign="gate")
-        ptb.call(self.target("delivery_agreements", "delivery", "require_to_accept"), "draft",
+        ptb.call(self.target("hauling_agreements", "hauling", "require_to_accept"), "draft",
                  "gate", types=[SUI])
-        ptb.call(self.target("delivery_agreements", "delivery", "publish"), "draft",
+        ptb.call(self.target("hauling_agreements", "hauling", "publish"), "draft",
                  types=[SUI], assign="cap")
         ptb.transfer(["cap"], self.at("lister"))
         res, row = self.measure(label, "lister", ptb, "lister (claim gate)")
-        return self.agreement_of(res), created(res, "::delivery::ListerCap")[0], row
+        return self.agreement_of(res), created(res, "::hauling::ListerCap")[0], row
 
     @staticmethod
     def agreement_of(res):
-        return created_containing(res, "::delivery::DeliveryAgreement<")[0]
+        return created_containing(res, "::hauling::HaulingAgreement<")[0]
 
     def cancel(self, agreement, cap):
-        ptb = (Ptb().call(self.target("delivery_agreements", "delivery", "cancel"),
+        ptb = (Ptb().call(self.target("hauling_agreements", "hauling", "cancel"),
                           "@" + agreement, "@" + cap, CLOCK, types=[SUI], assign="out")
                .transfer(["out.0", "out.1"], self.at("lister")))
         return self.measure("cancel", "lister", ptb, "lister")[1]
 
     def delete_cap(self, cap):
-        ptb = Ptb().call(self.target("delivery_agreements", "delivery", "delete_cap"), "@" + cap)
+        ptb = Ptb().call(self.target("hauling_agreements", "hauling", "delete_cap"), "@" + cap)
         return self.measure("delete_cap", "lister", ptb, "lister")[1]
 
     def close_lapsed(self, agreement, label="close_lapsed"):
-        ptb = Ptb().call(self.target("delivery_agreements", "delivery", "close_lapsed"),
+        ptb = Ptb().call(self.target("hauling_agreements", "hauling", "close_lapsed"),
                          "@" + agreement, "@" + self.admin_cap, CLOCK, types=[SUI])
         self.last, row = self.measure(label, "admin", ptb, "admin")
         return row
@@ -627,9 +627,9 @@ class Harness:
     def collect(self, cap, with_coins):
         """Collect the `Proceeds` the last transaction sent to `cap`: keep the
         items, and the coins when there are any (an empty coin is destroyed)."""
-        proceeds = created_containing(self.last, "::delivery::Proceeds<")[0]
+        proceeds = created_containing(self.last, "::hauling::Proceeds<")[0]
         balance = f"{self.p['multicoin']}::multicoin::Balance"
-        ptb = (Ptb().call(self.target("delivery_agreements", "delivery", "collect"),
+        ptb = (Ptb().call(self.target("hauling_agreements", "hauling", "collect"),
                           "@" + cap, "@" + proceeds, types=[SUI], assign="out")
                .call("0x1::option::destroy_some", "out.0", types=[balance], assign="items"))
         if with_coins:
@@ -643,38 +643,38 @@ class Harness:
 
     def accept_open(self, agreement):
         ptb = (Ptb().split_gas([COLLATERAL], "c")
-               .call(self.target("delivery_agreements", "delivery", "accept"),
+               .call(self.target("hauling_agreements", "hauling", "accept"),
                      "@" + agreement, "c.0", CLOCK, types=[SUI], assign="cargo")
                .transfer(["cargo"], self.at("hauler")))
         return self.measure("accept (open)", "hauler", ptb, "hauler")[1]
 
     def accept_gated(self, agreement, actor, via_ou, label):
         ptb = Ptb().split_gas([COLLATERAL], "c")
-        ptb.call(self.target("delivery_agreements", "delivery", "begin_accept"),
+        ptb.call(self.target("hauling_agreements", "hauling", "begin_accept"),
                  "@" + agreement, CLOCK, types=[SUI], assign="req")
         if via_ou:
             ptb.call(self.target("agreement_roles", "claim", "satisfy"), "req", "@" + self.ou)
         else:
             ptb.call(self.target("agreement_roles", "claim", "satisfy_directly"), "req")
-        ptb.call(self.target("delivery_agreements", "delivery", "finish_accept"),
+        ptb.call(self.target("hauling_agreements", "hauling", "finish_accept"),
                  "@" + agreement, "req", "c.0", CLOCK, types=[SUI], assign="cargo")
         ptb.transfer(["cargo"], self.at(actor))
         return self.measure(label, actor, ptb, "hauler (claim gate)")[1]
 
     def deliver(self, agreement, actor="hauler", label="deliver"):
         want = self.mint(CARGO_QTY, WANT_ASSET, actor)
-        ptb = Ptb().call(self.target("delivery_agreements", "delivery", "deliver"),
+        ptb = Ptb().call(self.target("hauling_agreements", "hauling", "deliver"),
                          "@" + agreement, "@" + want, CLOCK, types=[SUI])
         self.last, row = self.measure(label, actor, ptb, "anyone")
         return row
 
     def forfeit(self, agreement):
-        ptb = Ptb().call(self.target("delivery_agreements", "delivery", "forfeit"),
+        ptb = Ptb().call(self.target("hauling_agreements", "hauling", "forfeit"),
                          "@" + agreement, CLOCK, types=[SUI])
         return self.measure("forfeit", "hauler", ptb, "hauler")[1]
 
     def default(self, agreement):
-        ptb = Ptb().call(self.target("delivery_agreements", "delivery", "default"),
+        ptb = Ptb().call(self.target("hauling_agreements", "hauling", "default"),
                          "@" + agreement, CLOCK, types=[SUI])
         return self.measure("default", "other", ptb, "anyone")[1]
 
@@ -793,7 +793,7 @@ def write_report(h, publishes, gas_price):
             seen.add(r["feature"])
             features.append(r)
     lines = [
-        "# Delivery agreements: gas per feature",
+        "# Hauling agreements: gas per feature",
         "",
         f"Local network, reference gas price {gas_price} MIST per gas unit. Computation "
         "scales with the reference gas price; storage and rebate do not. `net` is "
