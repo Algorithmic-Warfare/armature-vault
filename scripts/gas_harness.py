@@ -13,8 +13,9 @@ When TriEx sponsors a transaction, the sponsor is the gas payer, so it pays the
 computation and storage and also receives the rebate. Summing `net` over every
 transaction of an agreement's life gives the sponsor's cost per agreement.
 
-Covers `delivery_agreements` (open path, config admin) and the
-`agreement_roles` claim gate (player, OU and large gates). Payments are SUI;
+Covers `delivery_agreements` (open path, terms that pay the cap holder,
+config admin) and the `agreement_roles` claim gate (player, OU and large
+gates). Payments are SUI;
 items are multicoin balances from a local collection. Warehouse-receipt
 deposits and redemptions are game-side and are not measured here.
 
@@ -410,6 +411,7 @@ class Harness:
         self.collection_cap = None
         self.ou = None
         self.rows = []          # one per measured transaction
+        self.last = None        # result of the last deliver or close_lapsed
         self.lifecycles = []    # one per agreement life
 
     # --- helpers ---
@@ -452,6 +454,18 @@ class Harness:
         return ptb.call(self.target("agreements", "spec", "new"), "@" + self.collection,
                         WANT_ASSET, CARGO_QTY, assign=assign)
 
+    def terms(self, ptb, assign, haul_ms=HAUL_MS, accept_ms=ACCEPT_WINDOW_MS,
+              cap_holder=False):
+        """The standard want and collateral, paying the lister or, with
+        `cap_holder`, the agreement's `ListerCap`."""
+        self.spec(ptb, "want")
+        t = lambda fun: self.target("delivery_agreements", "terms", fun)  # noqa: E731
+        if cap_holder:
+            return ptb.call(t("new_for_cap_holder"), "want", COLLATERAL, accept_ms, haul_ms,
+                            assign=assign)
+        return ptb.call(t("new"), "want", COLLATERAL, accept_ms, haul_ms, self.at("lister"),
+                        assign=assign)
+
     # --- config admin ---
 
     def admin_features(self):
@@ -478,13 +492,13 @@ class Harness:
 
     # --- listing ---
 
-    def post_open(self, haul_ms=HAUL_MS, label="post (open)", accept_ms=ACCEPT_WINDOW_MS):
+    def post_open(self, haul_ms=HAUL_MS, label="post (open)", accept_ms=ACCEPT_WINDOW_MS,
+                  cap_holder=False):
         cargo = self.mint(CARGO_QTY, CARGO_ASSET, "lister")
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
-        self.spec(ptb, "want")
+        self.terms(ptb, "terms", haul_ms, accept_ms, cap_holder)
         ptb.call(self.target("delivery_agreements", "delivery", "post"),
-                 "@" + cargo, "coins.0", "want", COLLATERAL, now_ms() + accept_ms,
-                 haul_ms, self.at("lister"), "@" + self.config, "coins.1", CLOCK,
+                 "@" + cargo, "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
                  types=[SUI, SUI], assign="cap")
         ptb.transfer(["cap"], self.at("lister"))
         res, row = self.measure(label, "lister", ptb, "lister")
@@ -501,11 +515,10 @@ class Harness:
     def post_for(self, specs, label):
         cargo = self.mint(CARGO_QTY, CARGO_ASSET, "lister")
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
-        self.spec(ptb, "want")
+        self.terms(ptb, "terms")
         self.principals(ptb, specs)
         ptb.call(self.target("agreement_roles", "claim", "post_for"),
-                 "@" + cargo, "coins.0", "want", COLLATERAL, now_ms() + ACCEPT_WINDOW_MS,
-                 HAUL_MS, self.at("lister"), "principals", "@" + self.config, "coins.1",
+                 "@" + cargo, "coins.0", "terms", "principals", "@" + self.config, "coins.1",
                  CLOCK, types=[SUI, SUI], assign="cap")
         ptb.transfer(["cap"], self.at("lister"))
         res, row = self.measure(label, "lister", ptb, "lister (claim gate)")
@@ -514,11 +527,10 @@ class Harness:
     def draft_gate_publish(self, specs, label):
         cargo = self.mint(CARGO_QTY, CARGO_ASSET, "lister")
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
-        self.spec(ptb, "want")
+        self.terms(ptb, "terms")
         self.principals(ptb, specs)
         ptb.call(self.target("delivery_agreements", "delivery", "draft"),
-                 "@" + cargo, "coins.0", "want", COLLATERAL, now_ms() + ACCEPT_WINDOW_MS,
-                 HAUL_MS, self.at("lister"), "@" + self.config, "coins.1", CLOCK,
+                 "@" + cargo, "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
                  types=[SUI, SUI], assign="draft")
         ptb.call(self.target("agreement_roles", "claim", "require_to_claim"), "draft",
                  "principals", types=[SUI])
@@ -542,10 +554,26 @@ class Harness:
         ptb = Ptb().call(self.target("delivery_agreements", "delivery", "delete_cap"), "@" + cap)
         return self.measure("delete_cap", "lister", ptb, "lister")[1]
 
-    def close_lapsed(self, agreement):
+    def close_lapsed(self, agreement, label="close_lapsed"):
         ptb = Ptb().call(self.target("delivery_agreements", "delivery", "close_lapsed"),
                          "@" + agreement, "@" + self.admin_cap, CLOCK, types=[SUI])
-        return self.measure("close_lapsed", "admin", ptb, "admin")[1]
+        self.last, row = self.measure(label, "admin", ptb, "admin")
+        return row
+
+    def collect(self, cap, with_coins):
+        """Collect the `Proceeds` the last transaction sent to `cap`: keep the
+        items, and the coins when there are any (an empty coin is destroyed)."""
+        proceeds = created_containing(self.last, "::delivery::Proceeds<")[0]
+        balance = f"{self.p['multicoin']}::multicoin::Balance"
+        ptb = (Ptb().call(self.target("delivery_agreements", "delivery", "collect"),
+                          "@" + cap, "@" + proceeds, types=[SUI], assign="out")
+               .call("0x1::option::destroy_some", "out.0", types=[balance], assign="items"))
+        if with_coins:
+            ptb.transfer(["items", "out.1"], self.at("lister"))
+        else:
+            ptb.call("0x2::coin::destroy_zero", "out.1", types=[SUI])
+            ptb.transfer(["items"], self.at("lister"))
+        return self.measure("collect", "lister", ptb, "lister")[1]
 
     # --- hauling ---
 
@@ -569,11 +597,12 @@ class Harness:
         ptb.transfer(["cargo"], self.at(actor))
         return self.measure(label, actor, ptb, "hauler (claim gate)")[1]
 
-    def deliver(self, agreement, actor="hauler"):
+    def deliver(self, agreement, actor="hauler", label="deliver"):
         want = self.mint(CARGO_QTY, WANT_ASSET, actor)
         ptb = Ptb().call(self.target("delivery_agreements", "delivery", "deliver"),
                          "@" + agreement, "@" + want, CLOCK, types=[SUI])
-        return self.measure("deliver", actor, ptb, "anyone")[1]
+        self.last, row = self.measure(label, actor, ptb, "anyone")
+        return row
 
     def forfeit(self, agreement):
         ptb = Ptb().call(self.target("delivery_agreements", "delivery", "forfeit"),
@@ -623,6 +652,20 @@ class Harness:
         ag, cap, post = self.post_open(accept_ms=SHORT_ACCEPT_MS)
         self.wait_past(SHORT_ACCEPT_MS)
         self.life("open: post, lapse, close_lapsed (admin)", [post, self.close_lapsed(ag)])
+
+        say("terms that pay the cap holder")
+        ag, cap, post = self.post_open(label="post (cap holder)", cap_holder=True)
+        acc = self.accept_open(ag)
+        dlv = self.deliver(ag, label="deliver (to cap)")
+        self.life("cap holder: post, accept, deliver, collect",
+                  [post, acc, dlv, self.collect(cap, with_coins=False)])
+
+        ag, cap, post = self.post_open(label="post (cap holder)", accept_ms=SHORT_ACCEPT_MS,
+                                       cap_holder=True)
+        self.wait_past(SHORT_ACCEPT_MS)
+        lapse = self.close_lapsed(ag, label="close_lapsed (to cap)")
+        self.life("cap holder: post, lapse, close_lapsed (admin), collect",
+                  [post, lapse, self.collect(cap, with_coins=True)])
 
         say("claim gate (agreement_roles)")
         ag, cap, post = self.post_for([("player", self.at("hauler"))],

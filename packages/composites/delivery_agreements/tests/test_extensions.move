@@ -1,6 +1,6 @@
 /// Minimal third-party extensions used by `extension_tests`: accept rules, an
-/// identity rule and an observer ledger. Each one shows the shape a real
-/// extension package would take.
+/// identity rule, an observer ledger and a wrapper that drafts for an entity.
+/// Each one shows the shape a real extension package would take.
 #[test_only]
 module delivery_agreements::test_extensions;
 
@@ -189,4 +189,15 @@ public struct Imposter has drop {}
 
 public fun bind_imposter_observer<T>(draft: &mut Draft<T>, instance: ID) {
     draft.bind_observer(internal::permit<Imposter>(), instance, option::none());
+}
+
+// === Wrapper ===
+
+/// Stands in for a wrapper that drafts for an entity, such as a DAO's
+/// governance handler: it checks that the signer speaks for the entity, then
+/// vouches for it with its own `Permit`.
+public struct Desk has drop {}
+
+public fun draft_for_desk<T>(draft: &mut Draft<T>, entity_id: ID) {
+    draft.set_on_behalf_of(internal::permit<Desk>(), entity_id);
 }

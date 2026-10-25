@@ -15,6 +15,7 @@ use delivery_agreements::delivery::{
     AgreementDelivered,
     AgreementDefaulted
 };
+use delivery_agreements::terms::{Self, Terms};
 use delivery_agreements::test_config::{Self, TOKEN};
 use delivery_agreements::test_extensions::{Self as ext, Ledger};
 use multicoin::multicoin::{Self, Balance};
@@ -64,6 +65,7 @@ const MAX_BPS: u16 = 10_000;
 
 const START_MS: u64 = 1_000;
 const ACCEPT_BY_MS: u64 = 5_000;
+const ACCEPT_MS: u64 = 4_000; // ACCEPT_BY_MS - START_MS, posting at START_MS
 const HAUL_MS: u64 = 10_000;
 const ACCEPT_AT_MS: u64 = 2_000;
 const DEADLINE_MS: u64 = 12_000; // ACCEPT_AT_MS + HAUL_MS
@@ -81,6 +83,11 @@ fun mint(collection: ID, asset_id: u64, qty: u64, scenario: &mut Scenario): Bala
 fun want(): Spec { spec::new(dst(), ITEM, CARGO_QTY) }
 
 fun cargo_spec(): Spec { spec::new(src(), ITEM, CARGO_QTY) }
+
+/// The standard want and windows, paying BENEFICIARY, with `collateral`.
+fun standard_terms(collateral: u64): Terms {
+    terms::new(want(), collateral, ACCEPT_MS, HAUL_MS, BENEFICIARY)
+}
 
 fun currency<T>(): TypeName { type_name::with_original_ids<T>() }
 
@@ -135,8 +142,7 @@ fun post_in<T, F>(
     let config = scenario.take_shared<Config>();
     let cargo = mint(src(), ITEM, CARGO_QTY, scenario);
     let cap = delivery::post(
-        cargo, reward, want(), collateral, ACCEPT_BY_MS, HAUL_MS, BENEFICIARY, &config, post_fee,
-        clock, scenario.ctx(),
+        cargo, reward, standard_terms(collateral), &config, post_fee, clock, scenario.ctx(),
     );
     ts::return_shared(config);
     let (agreement_id, cap_id) = (cap.cap_agreement_id(), object::id(&cap));
@@ -426,8 +432,9 @@ fun approved_currency_can_be_drafted_in() {
         event::events_by_type<AgreementPosted>(),
         vector[
             delivery::posted_event_for_testing(
-                agreement_id, LISTER, cap_id, BENEFICIARY, cargo_spec(), want(), currency<GOLD>(),
-                GOLD_REWARD_QTY, GOLD_COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, vector[],
+                agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
+                want(), currency<GOLD>(), GOLD_REWARD_QTY, GOLD_COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
+                vector[],
                 option::none(), option::none(), option::none(), FEE_BPS, TREASURY,
             ),
         ],
@@ -551,9 +558,9 @@ fun post_fee_paid_exactly_goes_to_treasury() {
         event::events_by_type<AgreementPosted>(),
         vector[
             delivery::posted_event_for_testing(
-                agreement_id, LISTER, cap_id, BENEFICIARY, cargo_spec(), want(), currency<TOKEN>(),
-                REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, vector[], option::none(),
-                option::none(), option::some(post_fee(POST_FEE_QTY)), FEE_BPS, TREASURY,
+                agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
+                want(), currency<TOKEN>(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, vector[],
+                option::none(), option::none(), option::some(post_fee(POST_FEE_QTY)), FEE_BPS, TREASURY,
             ),
         ],
     );
@@ -645,9 +652,9 @@ fun post_accepts_empty_coin_of_any_type_when_no_fee_is_set() {
         event::events_by_type<AgreementPosted>(),
         vector[
             delivery::posted_event_for_testing(
-                agreement_id, LISTER, cap_id, BENEFICIARY, cargo_spec(), want(), currency<TOKEN>(),
-                REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, vector[], option::none(),
-                option::none(), option::none(), FEE_BPS, TREASURY,
+                agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
+                want(), currency<TOKEN>(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, vector[],
+                option::none(), option::none(), option::none(), FEE_BPS, TREASURY,
             ),
         ],
     );
@@ -790,15 +797,14 @@ fun outcome_record_keeps_gross_reward() {
     let reward = coin<TOKEN>(REWARD_QTY, &mut scenario);
     let fee = coin::zero<TOKEN>(scenario.ctx());
     let mut d = delivery::draft(
-        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, BENEFICIARY, &config, fee,
-        &clock, scenario.ctx(),
+        cargo, reward, standard_terms(COLLATERAL_QTY), &config, fee, &clock, scenario.ctx(),
     );
     ts::return_shared(config);
     let ledger = scenario.take_shared_by_id<Ledger>(ledger_id);
     let observer_fee = mint(object::id_from_address(@0x70), 0, OBSERVER_FEE_QTY, &mut scenario);
     ext::bind_ledger(&ledger, &mut d, observer_fee);
     ts::return_shared(ledger);
-    let cap = d.publish(scenario.ctx());
+    let cap = d.publish();
     let agreement_id = cap.cap_agreement_id();
     transfer::public_transfer(cap, LISTER);
 

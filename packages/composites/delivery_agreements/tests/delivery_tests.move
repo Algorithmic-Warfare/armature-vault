@@ -14,6 +14,7 @@ use delivery_agreements::delivery::{
     AgreementCancelled,
     AgreementLapsed
 };
+use delivery_agreements::terms;
 use delivery_agreements::test_config::{Self, TOKEN};
 use multicoin::multicoin::{Self, Balance};
 use std::unit_test::assert_eq;
@@ -37,6 +38,7 @@ const COLLATERAL_QTY: u64 = 500;
 
 const START_MS: u64 = 1_000;
 const ACCEPT_BY_MS: u64 = 5_000;
+const ACCEPT_MS: u64 = 4_000; // ACCEPT_BY_MS - START_MS, posting at START_MS
 const HAUL_MS: u64 = 10_000;
 const ACCEPT_AT_MS: u64 = 2_000;
 const DEADLINE_MS: u64 = 12_000; // ACCEPT_AT_MS + HAUL_MS
@@ -68,7 +70,7 @@ fun post(scenario: &mut Scenario, clock: &Clock): (ID, ID) {
     let cargo = mint(src(), ITEM, CARGO_QTY, scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, BENEFICIARY, clock,
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, clock,
         scenario.ctx(),
     );
     let (agreement_id, cap_id) = (cap.cap_agreement_id(), object::id(&cap));
@@ -119,9 +121,9 @@ fun post_then_accept_releases_cargo_and_locks_collateral() {
         event::events_by_type<AgreementPosted>(),
         vector[
             delivery::posted_event_for_testing(
-                agreement_id, LISTER, cap_id, BENEFICIARY, cargo_spec(), want(),
-                test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, vector[],
-                option::none(), option::none(), option::none(), 0, test_config::treasury(),
+                agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
+                want(), test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
+                vector[], option::none(), option::none(), option::none(), 0, test_config::treasury(),
             ),
         ],
     );
@@ -288,7 +290,8 @@ fun close_lapsed_returns_cargo_and_reward_to_lister() {
         event::events_by_type<AgreementLapsed>(),
         vector[
             delivery::lapsed_event_for_testing(
-                agreement_id, LISTER, ADMIN, cargo_spec(), test_config::token(), REWARD_QTY,
+                agreement_id, LISTER, LISTER, ADMIN, cargo_spec(), test_config::token(),
+                REWARD_QTY,
             ),
         ],
     );
@@ -326,7 +329,7 @@ fun close_lapsed_sends_nothing_for_empty_cargo_and_reward() {
     let cargo = mint(src(), ITEM, 0, &mut scenario);
     let reward = test_config::mint(0, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, BENEFICIARY, &clock,
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, &clock,
         scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
@@ -346,52 +349,52 @@ fun close_lapsed_sends_nothing_for_empty_cargo_and_reward() {
 
 // === Posting ===
 
-#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
-fun post_rejects_past_accept_by() {
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
+fun post_rejects_zero_accept_window() {
     let (mut scenario, clock) = setup();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, want(), COLLATERAL_QTY, START_MS, HAUL_MS, BENEFICIARY, &clock,
+        cargo, reward, want(), COLLATERAL_QTY, 0, HAUL_MS, BENEFICIARY, &clock,
         scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_zero_haul_window() {
     let (mut scenario, clock) = setup();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_BY_MS, 0, BENEFICIARY, &clock,
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, 0, BENEFICIARY, &clock,
         scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_zero_want() {
     let (mut scenario, clock) = setup();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, spec::new(dst(), ITEM, 0), COLLATERAL_QTY, ACCEPT_BY_MS,
+        cargo, reward, spec::new(dst(), ITEM, 0), COLLATERAL_QTY, ACCEPT_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_zero_collateral() {
     let (mut scenario, clock) = setup();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, want(), 0, ACCEPT_BY_MS,
+        cargo, reward, want(), 0, ACCEPT_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
@@ -399,26 +402,26 @@ fun post_rejects_zero_collateral() {
 }
 
 // Handing the cargo straight back must never count as delivery.
-#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_want_the_cargo_already_satisfies() {
     let (mut scenario, clock) = setup();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, cargo_spec(), COLLATERAL_QTY, ACCEPT_BY_MS,
+        cargo, reward, cargo_spec(), COLLATERAL_QTY, ACCEPT_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_want_of_part_of_the_cargo() {
     let (mut scenario, clock) = setup();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, spec::new(src(), ITEM, 1), COLLATERAL_QTY, ACCEPT_BY_MS,
+        cargo, reward, spec::new(src(), ITEM, 1), COLLATERAL_QTY, ACCEPT_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
@@ -431,7 +434,7 @@ fun post_allows_another_asset_in_the_cargo_collection() {
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, spec::new(src(), ITEM + 1, CARGO_QTY), COLLATERAL_QTY, ACCEPT_BY_MS,
+        cargo, reward, spec::new(src(), ITEM + 1, CARGO_QTY), COLLATERAL_QTY, ACCEPT_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
@@ -441,37 +444,37 @@ fun post_allows_another_asset_in_the_cargo_collection() {
 #[test]
 fun post_allows_windows_of_max_duration() {
     let (mut scenario, clock) = setup();
-    let max = delivery::max_duration_ms();
+    let max = terms::max_duration_ms();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, want(), COLLATERAL_QTY, START_MS + max, max, BENEFICIARY, &clock,
+        cargo, reward, want(), COLLATERAL_QTY, max, max, BENEFICIARY, &clock,
         scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_accept_window_over_max() {
     let (mut scenario, clock) = setup();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, want(), COLLATERAL_QTY, START_MS + delivery::max_duration_ms() + 1,
+        cargo, reward, want(), COLLATERAL_QTY, terms::max_duration_ms() + 1,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
     finish(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = delivery::EInvalidTerms)]
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_haul_window_over_max() {
     let (mut scenario, clock) = setup();
     let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_BY_MS, delivery::max_duration_ms() + 1,
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, terms::max_duration_ms() + 1,
         BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);

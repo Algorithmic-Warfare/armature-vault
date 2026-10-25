@@ -14,7 +14,7 @@ use delivery_agreements::delivery::{
     AgreementPosted,
     AgreementAccepted
 };
-use delivery_agreements::test_extensions::{Self as ext, Ledger, Character};
+use delivery_agreements::test_extensions::{Self as ext, Ledger, Character, Desk};
 use delivery_agreements::test_config::{Self, TOKEN};
 use multicoin::multicoin::{Self, Balance};
 use std::type_name;
@@ -40,6 +40,7 @@ const FEE_QTY: u64 = 3;
 
 const START_MS: u64 = 1_000;
 const ACCEPT_BY_MS: u64 = 5_000;
+const ACCEPT_MS: u64 = 4_000; // ACCEPT_BY_MS - START_MS, posting at START_MS
 const HAUL_MS: u64 = 10_000;
 const ACCEPT_AT_MS: u64 = 2_000;
 const DEADLINE_MS: u64 = 12_000; // ACCEPT_AT_MS + HAUL_MS
@@ -53,6 +54,9 @@ fun dst(): ID { object::id_from_address(@0xD5) }
 fun fee_collection(): ID { object::id_from_address(@0x70) }
 
 fun character_id(): ID { object::id_from_address(@0xC4A) }
+
+/// The entity the `Desk` wrapper drafts for, such as a DAO.
+fun entity_id(): ID { object::id_from_address(@0xDA0) }
 
 fun mint(collection: ID, asset_id: u64, qty: u64, scenario: &mut Scenario): Balance {
     multicoin::create_balance_for_testing(collection, asset_id, qty, scenario.ctx())
@@ -87,14 +91,14 @@ fun new_draft(scenario: &mut Scenario, clock: &Clock): Draft<TOKEN> {
     let cargo = mint(src(), ITEM, CARGO_QTY, scenario);
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     test_config::draft(
-        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, BENEFICIARY, clock,
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, clock,
         scenario.ctx(),
     )
 }
 
 /// Publish in the current transaction; LISTER keeps the cap.
-fun publish(draft: Draft<TOKEN>, scenario: &mut Scenario): (ID, ID) {
-    let cap = draft.publish(scenario.ctx());
+fun publish(draft: Draft<TOKEN>): (ID, ID) {
+    let cap = draft.publish();
     let (agreement_id, cap_id) = (cap.cap_agreement_id(), object::id(&cap));
     transfer::public_transfer(cap, LISTER);
     (agreement_id, cap_id)
@@ -172,14 +176,14 @@ fun posted_event_lists_every_extension() {
     d.require_to_accept(ext::allowlist(vector[HAULER]));
     d.require_identity_to_accept(ext::character());
     bind_ledger(&mut d, ledger_id, &mut scenario);
-    let (agreement_id, cap_id) = publish(d, &mut scenario);
+    let (agreement_id, cap_id) = publish(d);
 
     assert_eq!(
         event::events_by_type<AgreementPosted>(),
         vector[
             delivery::posted_event_for_testing(
-                agreement_id, LISTER, cap_id, BENEFICIARY, cargo_spec(), want(),
-                test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
+                agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
+                want(), test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
                 vector[ext::allowlist(vector[HAULER]), ext::character()],
                 option::some(type_name::with_original_ids<Character>()),
                 option::some(delivery::new_binding_for_testing<Ledger>(
@@ -201,7 +205,7 @@ fun draft_rejects_second_identity_rule() {
     let mut d = new_draft(&mut scenario, &clock);
     d.require_identity_to_accept(ext::character());
     d.require_identity_to_accept(ext::allowlist(vector[HAULER]));
-    publish(d, &mut scenario);
+    publish(d);
     finish(scenario, clock);
 }
 
@@ -214,7 +218,67 @@ fun draft_rejects_second_observer() {
     ext::bind_ledger(&ledger, &mut d, mint(fee_collection(), FEE_ASSET, FEE_QTY, &mut scenario));
     ext::bind_ledger(&ledger, &mut d, mint(fee_collection(), FEE_ASSET, FEE_QTY, &mut scenario));
     ts::return_shared(ledger);
-    publish(d, &mut scenario);
+    publish(d);
+    finish(scenario, clock);
+}
+
+// === On behalf of ===
+
+/// A wrapper's entity is shown in `AgreementPosted` and every outcome record,
+/// while the signer stays the lister.
+#[test]
+fun on_behalf_of_credits_the_entity_in_the_event_and_record() {
+    let (mut scenario, clock) = setup();
+    let ledger_id = create_ledger(&mut scenario);
+    let mut d = new_draft(&mut scenario, &clock);
+    ext::draft_for_desk(&mut d, entity_id());
+    bind_ledger(&mut d, ledger_id, &mut scenario);
+    let entity = delivery::new_entity_for_testing<Desk>(entity_id());
+    assert_eq!(entity.entity_kind(), type_name::with_original_ids<Desk>());
+    assert_eq!(entity.entity_id(), entity_id());
+    assert_eq!(d.draft_agreement().on_behalf_of(), option::some(entity));
+    let (agreement_id, cap_id) = publish(d);
+    assert_eq!(
+        event::events_by_type<AgreementPosted>(),
+        vector[
+            delivery::posted_event_for_testing(
+                agreement_id, LISTER, option::some(entity), cap_id, BENEFICIARY, false,
+                cargo_spec(), want(), test_config::token(), REWARD_QTY, COLLATERAL_QTY,
+                ACCEPT_BY_MS, HAUL_MS, vector[], option::none(),
+                option::some(delivery::new_binding_for_testing<Ledger>(
+                    ledger_id, option::some(fee_spec()),
+                )),
+                option::none(), 0, test_config::treasury(),
+            ),
+        ],
+    );
+
+    scenario.next_tx(LISTER);
+    let cap = scenario.take_from_sender<ListerCap>();
+    let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    assert_eq!(agreement.on_behalf_of(), option::some(entity));
+    let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
+    transfer::public_transfer(cargo, LISTER);
+    transfer::public_transfer(reward, LISTER);
+
+    scenario.next_tx(OTHER);
+    let mut ledger = scenario.take_shared_by_id<Ledger>(ledger_id);
+    let ticket = ts::most_recent_receiving_ticket<OutcomeRecord>(&ledger_id);
+    let record = ext::take_record(&mut ledger, ticket);
+    assert_eq!(record.record_on_behalf_of(), option::some(entity));
+    assert_eq!(record.record_lister(), LISTER);
+    record.delete_outcome();
+    ts::return_shared(ledger);
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = delivery::EAlreadyBound)]
+fun draft_rejects_second_on_behalf_of() {
+    let (mut scenario, clock) = setup();
+    let mut d = new_draft(&mut scenario, &clock);
+    ext::draft_for_desk(&mut d, entity_id());
+    ext::draft_for_desk(&mut d, object::id_from_address(@0xDA1));
+    publish(d);
     finish(scenario, clock);
 }
 
@@ -226,7 +290,7 @@ fun accept_resolves_rules_in_order_and_records_identity() {
     let mut d = new_draft(&mut scenario, &clock);
     d.require_to_accept(ext::allowlist(vector[HAULER]));
     d.require_identity_to_accept(ext::character());
-    let (agreement_id, _) = publish(d, &mut scenario);
+    let (agreement_id, _) = publish(d);
 
     clock.set_for_testing(ACCEPT_AT_MS);
     scenario.next_tx(HAULER);
@@ -260,7 +324,7 @@ fun plain_accept_cannot_skip_requirements() {
     let (mut scenario, mut clock) = setup();
     let mut d = new_draft(&mut scenario, &clock);
     d.require_to_accept(ext::allowlist(vector[HAULER]));
-    publish(d, &mut scenario);
+    publish(d);
     accept_plain(&mut scenario, &mut clock);
     finish(scenario, clock);
 }
@@ -270,7 +334,7 @@ fun allowlist_rejects_other_hauler() {
     let (mut scenario, clock) = setup();
     let mut d = new_draft(&mut scenario, &clock);
     d.require_to_accept(ext::allowlist(vector[HAULER]));
-    publish(d, &mut scenario);
+    publish(d);
     scenario.next_tx(OTHER);
     let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&clock, scenario.ctx());
@@ -286,7 +350,7 @@ fun accept_rules_must_resolve_in_declaration_order() {
     let mut d = new_draft(&mut scenario, &clock);
     d.require_to_accept(ext::allowlist(vector[HAULER]));
     d.require_identity_to_accept(ext::character());
-    publish(d, &mut scenario);
+    publish(d);
     scenario.next_tx(HAULER);
     let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&clock, scenario.ctx());
@@ -301,7 +365,7 @@ fun identity_rule_must_record_identity() {
     let (mut scenario, clock) = setup();
     let mut d = new_draft(&mut scenario, &clock);
     d.require_identity_to_accept(ext::character());
-    publish(d, &mut scenario);
+    publish(d);
     scenario.next_tx(HAULER);
     let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&clock, scenario.ctx());
@@ -319,7 +383,7 @@ fun only_the_identity_rule_may_record_identity() {
     let mut d = new_draft(&mut scenario, &clock);
     d.require_to_accept(ext::allowlist(vector[HAULER]));
     d.require_identity_to_accept(ext::character());
-    publish(d, &mut scenario);
+    publish(d);
     scenario.next_tx(HAULER);
     let agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&clock, scenario.ctx());
@@ -334,7 +398,7 @@ fun follow_up_requirements_resolve_next() {
     let (mut scenario, clock) = setup();
     let mut d = new_draft(&mut scenario, &clock);
     d.require_to_accept(ext::chain(vector[HAULER]));
-    publish(d, &mut scenario);
+    publish(d);
     scenario.next_tx(HAULER);
     let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&clock, scenario.ctx());
@@ -353,7 +417,7 @@ fun follow_up_requirements_cannot_be_skipped() {
     let (mut scenario, clock) = setup();
     let mut d = new_draft(&mut scenario, &clock);
     d.require_to_accept(ext::chain(vector[HAULER]));
-    publish(d, &mut scenario);
+    publish(d);
     scenario.next_tx(HAULER);
     let mut agreement = scenario.take_shared<DeliveryAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&clock, scenario.ctx());
@@ -369,10 +433,10 @@ fun follow_up_requirements_cannot_be_skipped() {
 fun request_cannot_finish_a_different_agreement() {
     let (mut scenario, clock) = setup();
     // An ungated agreement and one only HAULER may accept.
-    let (open_id, _) = publish(new_draft(&mut scenario, &clock), &mut scenario);
+    let (open_id, _) = publish(new_draft(&mut scenario, &clock));
     let mut gated = new_draft(&mut scenario, &clock);
     gated.require_to_accept(ext::allowlist(vector[HAULER]));
-    let (gated_id, _) = publish(gated, &mut scenario);
+    let (gated_id, _) = publish(gated);
 
     scenario.next_tx(OTHER);
     let open = scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(open_id);
@@ -395,7 +459,7 @@ fun observer_records_delivery_with_identity_and_fee() {
     let mut d = new_draft(&mut scenario, &clock);
     d.require_identity_to_accept(ext::character());
     bind_ledger(&mut d, ledger_id, &mut scenario);
-    let (agreement_id, _) = publish(d, &mut scenario);
+    let (agreement_id, _) = publish(d);
     accept_as_character(&mut scenario, &mut clock);
     deliver(&mut scenario, &mut clock);
 
@@ -418,7 +482,7 @@ fun observer_records_forfeit_even_though_the_hauler_closes_it() {
     let ledger_id = create_ledger(&mut scenario);
     let mut d = new_draft(&mut scenario, &clock);
     bind_ledger(&mut d, ledger_id, &mut scenario);
-    publish(d, &mut scenario);
+    publish(d);
     accept_plain(&mut scenario, &mut clock);
 
     scenario.next_tx(HAULER);
@@ -443,7 +507,7 @@ fun observer_records_default_and_cancel() {
     // One agreement cancelled while open...
     let mut d = new_draft(&mut scenario, &clock);
     bind_ledger(&mut d, ledger_id, &mut scenario);
-    let (cancelled_id, _) = publish(d, &mut scenario);
+    let (cancelled_id, _) = publish(d);
     scenario.next_tx(LISTER);
     let cap = scenario.take_from_sender<ListerCap>();
     let agreement = scenario.take_shared_by_id<DeliveryAgreement<TOKEN>>(cancelled_id);
@@ -455,7 +519,7 @@ fun observer_records_default_and_cancel() {
     // ...and one defaulted after the deadline.
     let mut d = new_draft(&mut scenario, &clock);
     bind_ledger(&mut d, ledger_id, &mut scenario);
-    publish(d, &mut scenario);
+    publish(d);
     accept_plain(&mut scenario, &mut clock);
     clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(BENEFICIARY);
@@ -479,7 +543,7 @@ fun observer_records_a_lapsed_agreement_the_admin_closed() {
     let ledger_id = create_ledger(&mut scenario);
     let mut d = new_draft(&mut scenario, &clock);
     bind_ledger(&mut d, ledger_id, &mut scenario);
-    let (agreement_id, _) = publish(d, &mut scenario);
+    let (agreement_id, _) = publish(d);
 
     clock.set_for_testing(ACCEPT_BY_MS);
     scenario.next_tx(OTHER);
@@ -510,7 +574,7 @@ fun ledger_counts_a_lapsed_agreement() {
     let ledger_id = create_ledger(&mut scenario);
     let mut d = new_draft(&mut scenario, &clock);
     bind_ledger(&mut d, ledger_id, &mut scenario);
-    publish(d, &mut scenario);
+    publish(d);
 
     clock.set_for_testing(ACCEPT_BY_MS);
     scenario.next_tx(OTHER);
@@ -536,7 +600,7 @@ fun observer_rejects_records_from_an_imposter_binding() {
     // A different extension type points its records at the real ledger.
     let mut d = new_draft(&mut scenario, &clock);
     ext::bind_imposter_observer(&mut d, ledger_id);
-    publish(d, &mut scenario);
+    publish(d);
     accept_plain(&mut scenario, &mut clock);
     deliver(&mut scenario, &mut clock);
     ingest(ledger_id, &mut scenario);

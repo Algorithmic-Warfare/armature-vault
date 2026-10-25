@@ -12,6 +12,7 @@ use agreements::spec;
 use armature::ou::OU;
 use delivery_agreements::delivery::{Self, DeliveryAgreement, Draft};
 use delivery_agreements::config;
+use delivery_agreements::terms::{Self, Terms};
 use multicoin::multicoin::{Self, Balance};
 use roles::acl::{Self, Principal};
 use std::unit_test::assert_eq;
@@ -36,7 +37,7 @@ const COLLATERAL_QTY: u64 = 500;
 const POST_FEE_QTY: u64 = 7;
 const DELIVERY_FEE_BPS: u16 = 250;
 const START_MS: u64 = 1_000;
-const ACCEPT_BY_MS: u64 = 5_000;
+const ACCEPT_MS: u64 = 4_000;
 const HAUL_MS: u64 = 10_000;
 
 public struct World {
@@ -77,6 +78,11 @@ fun gate(w: &World): vector<Principal> {
     vector[acl::ou(w.haulers), acl::player(FREELANCER), acl::machine(BOT)]
 }
 
+/// The standard want and windows, paying BENEFICIARY.
+fun standard_terms(): Terms {
+    terms::new(spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY)
+}
+
 /// Start a LISTER transaction drafting the standard agreement.
 fun new_draft(w: &mut World): Draft<TOKEN> {
     w.scenario.next_tx(LISTER);
@@ -84,15 +90,15 @@ fun new_draft(w: &mut World): Draft<TOKEN> {
     let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
     let config = test_config::no_fees(w.scenario.ctx());
     let draft = delivery::draft(
-        cargo, reward, spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
-        BENEFICIARY, &config, test_config::empty(w.scenario.ctx()), &w.clock, w.scenario.ctx(),
+        cargo, reward, standard_terms(), &config, test_config::empty(w.scenario.ctx()), &w.clock,
+        w.scenario.ctx(),
     );
     config.destroy_for_testing();
     draft
 }
 
-fun publish(w: &mut World, draft: Draft<TOKEN>) {
-    let cap = draft.publish(w.scenario.ctx());
+fun publish(draft: Draft<TOKEN>) {
+    let cap = draft.publish();
     transfer::public_transfer(cap, LISTER);
 }
 
@@ -100,7 +106,7 @@ fun publish(w: &mut World, draft: Draft<TOKEN>) {
 fun post(w: &mut World, principals: vector<Principal>) {
     let mut draft = new_draft(w);
     claim::require_to_claim(&mut draft, principals);
-    publish(w, draft);
+    publish(draft);
 }
 
 /// `who` claims, acting as a member of `org_id`.
@@ -159,8 +165,7 @@ fun post_for_reserves_for_one_player() {
     let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
     let config = test_config::no_fees(w.scenario.ctx());
     let cap = claim::post_for(
-        cargo, reward, spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
-        BENEFICIARY, vector[acl::player(FREELANCER)], &config,
+        cargo, reward, standard_terms(), vector[acl::player(FREELANCER)], &config,
         test_config::empty(w.scenario.ctx()), &w.clock, w.scenario.ctx(),
     );
     config.destroy_for_testing();
@@ -192,8 +197,7 @@ fun post_for_charges_the_posting_fee() {
     );
     config.approve_for_testing<TOKEN>();
     let cap = claim::post_for(
-        cargo, reward, spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
-        BENEFICIARY, vector[acl::player(FREELANCER)], &config,
+        cargo, reward, standard_terms(), vector[acl::player(FREELANCER)], &config,
         coin::mint_for_testing<FEE>(POST_FEE_QTY, w.scenario.ctx()), &w.clock, w.scenario.ctx(),
     );
     config.destroy_for_testing();
@@ -220,8 +224,7 @@ fun post_for_rejects_unapproved_currency() {
     let reward = coin::mint_for_testing<FEE>(REWARD_QTY, w.scenario.ctx());
     let config = test_config::no_fees(w.scenario.ctx());
     let cap = claim::post_for(
-        cargo, reward, spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
-        BENEFICIARY, vector[acl::player(FREELANCER)], &config,
+        cargo, reward, standard_terms(), vector[acl::player(FREELANCER)], &config,
         test_config::empty(w.scenario.ctx()), &w.clock, w.scenario.ctx(),
     );
     config.destroy_for_testing();
@@ -348,12 +351,42 @@ fun post_for_ou_lets_a_board_member_claim() {
     let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
     let config = test_config::no_fees(w.scenario.ctx());
     let cap = claim::post_for(
-        cargo, reward, spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
-        BENEFICIARY, vector[acl::ou(w.haulers)], &config, test_config::empty(w.scenario.ctx()),
+        cargo, reward, standard_terms(), vector[acl::ou(w.haulers)], &config, test_config::empty(w.scenario.ctx()),
         &w.clock, w.scenario.ctx(),
     );
     config.destroy_for_testing();
     transfer::public_transfer(cap, LISTER);
+    let haulers = w.haulers;
+    claim_as_member(&mut w, HAULER_1, haulers);
+    assert_eq!(hauler_of(&mut w), option::some(HAULER_1));
+    done(w);
+}
+
+/// `post_for` keeps the terms it is given, so a wrapper can gate an agreement
+/// to an OU's board and have its payouts go to the cap it holds.
+#[test]
+fun post_for_keeps_terms_that_pay_the_cap_holder() {
+    let mut w = world();
+    w.scenario.next_tx(LISTER);
+    let cargo = mint(src(), ITEM, QTY, &mut w.scenario);
+    let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
+    let config = test_config::no_fees(w.scenario.ctx());
+    let terms = terms::new_for_cap_holder(
+        spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS,
+    );
+    let cap = claim::post_for(
+        cargo, reward, terms, vector[acl::ou(w.haulers)], &config,
+        test_config::empty(w.scenario.ctx()), &w.clock, w.scenario.ctx(),
+    );
+    config.destroy_for_testing();
+    let cap_address = object::id(&cap).to_address();
+    transfer::public_transfer(cap, LISTER);
+
+    w.scenario.next_tx(OUTSIDER);
+    let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
+    assert_eq!(agreement.terms(), terms);
+    assert_eq!(agreement.beneficiary(), cap_address);
+    ts::return_shared(agreement);
     let haulers = w.haulers;
     claim_as_member(&mut w, HAULER_1, haulers);
     assert_eq!(hauler_of(&mut w), option::some(HAULER_1));
@@ -429,7 +462,7 @@ fun gates_compose_as_and() {
     let mut draft = new_draft(&mut w);
     claim::require_to_claim(&mut draft, vector[acl::ou(w.haulers)]);
     claim::require_to_claim(&mut draft, vector[acl::player(HAULER_1)]);
-    publish(&mut w, draft);
+    publish(draft);
     w.scenario.next_tx(HAULER_1);
     let org = w.scenario.take_shared_by_id<OU>(w.haulers);
     let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
@@ -448,7 +481,7 @@ fun second_gate_rejects_unnamed_board_member() {
     let mut draft = new_draft(&mut w);
     claim::require_to_claim(&mut draft, vector[acl::ou(w.haulers)]);
     claim::require_to_claim(&mut draft, vector[acl::player(HAULER_1)]);
-    publish(&mut w, draft);
+    publish(draft);
     w.scenario.next_tx(HAULER_2);
     let org = w.scenario.take_shared_by_id<OU>(w.haulers);
     let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
@@ -502,7 +535,7 @@ fun satisfy_rejects_another_rules_requirement() {
     let mut w = world();
     let mut draft = new_draft(&mut w);
     draft.require_to_accept(requirement::from_config(NotAGate {}));
-    publish(&mut w, draft);
+    publish(draft);
     w.scenario.next_tx(FREELANCER);
     let agreement = w.scenario.take_shared<DeliveryAgreement<TOKEN>>();
     let mut req = agreement.begin_accept(&w.clock, w.scenario.ctx());

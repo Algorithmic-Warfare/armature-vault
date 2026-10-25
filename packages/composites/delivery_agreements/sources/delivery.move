@@ -36,11 +36,15 @@
 /// take no fee, and the posting fee is not refunded.
 ///
 /// The lister and the hauler are the addresses that signed `draft` and the
-/// accept. Payouts follow those addresses, not the `ListerCap` or a wrapper
-/// object that funded the agreement.
+/// accept. The agreement's `Terms` (see `terms`) choose where the lister's side
+/// of the payouts goes: a beneficiary address, or the agreement's `ListerCap`.
+/// With the cap, every payout to the lister's side arrives as one `Proceeds`
+/// sent to the cap, which its holder opens with `collect`, so payouts follow
+/// the cap to a wallet, a DAO or any other wrapper that holds it. The hauler is
+/// always paid at the address that signed the accept.
 ///
 /// Extensions. An agreement is built as a `Draft` and frozen by `publish`.
-/// Before publishing, the lister may attach two optional extensions, both
+/// Before publishing, the lister may attach three optional extensions, all
 /// fixed for the agreement's life:
 ///
 /// - **Accept requirements** decide who may accept. Rule modules satisfy them
@@ -49,16 +53,22 @@
 /// - **An observer** receives an `OutcomeRecord` for every terminal transition.
 ///   Records are transferred to the observer's object, so closing an agreement
 ///   never runs observer code and no party can suppress a record.
+/// - **An entity** the lister drafts for, such as a DAO, recorded by a wrapper
+///   with `set_on_behalf_of`, so events and outcome records credit the entity
+///   rather than the signer.
 ///
 /// Observers bind with their own `Permit`, so only their module can bind them;
-/// they collect any fee in the same call and declare it here.
+/// they collect any fee in the same call and declare it here. A wrapper
+/// records an entity with its own `Permit` the same way.
 ///
 /// Lifecycle: draft -> published (open) -> accepted -> deleted by `deliver`,
 /// `forfeit` or `default`. An open agreement is deleted by `cancel`, or, once
 /// `accept_by_ms` passes with nobody accepting, by the config admin's
-/// `close_lapsed`, which sends the cargo and reward back to the lister. Only
-/// `cancel` consumes the `ListerCap`; after any other ending its holder can
-/// reclaim the cap's storage with `delete_cap`.
+/// `close_lapsed`, which sends the cargo and reward back to the lister, or to
+/// the cap when the terms pay the cap holder. `cancel` consumes the
+/// `ListerCap`, and so does `collect` for terms that pay the cap holder. After
+/// any other ending, the holder of a cap for a beneficiary address can reclaim
+/// its storage with `delete_cap`.
 module delivery_agreements::delivery;
 
 use agreements::payout;
@@ -66,7 +76,8 @@ use agreements::request::{Self, Request};
 use agreements::requirement::Requirement;
 use agreements::spec::{Self, Spec};
 use delivery_agreements::config::{Self, AdminCap, Config, PostFee};
-use multicoin::multicoin::Balance;
+use delivery_agreements::terms::Terms;
+use multicoin::multicoin::{Self, Balance};
 use std::internal::{Self, Permit};
 use std::type_name::{Self, TypeName};
 use sui::balance;
@@ -77,8 +88,7 @@ use sui::transfer::Receiving;
 
 // === Errors ===
 
-#[error(code = 0)]
-const EInvalidTerms: vector<u8> = b"Agreement terms are invalid";
+// Code 0 (invalid terms) is now `terms`'.
 #[error(code = 1)]
 const ENotOpen: vector<u8> = b"Agreement has already been accepted";
 #[error(code = 2)]
@@ -103,12 +113,9 @@ const EWrongCollateral: vector<u8> = b"Collateral is not exactly the agreed amou
 const EWrongObserver: vector<u8> = b"Record is bound to a different observer";
 #[error(code = 21)]
 const ENotLapsed: vector<u8> = b"Accept window has not closed";
-
-// === Constants ===
-
-/// Longest accept window (`accept_by_ms` from drafting) and haul window: 30
-/// days. Also keeps every derived timestamp from overflowing.
-const MAX_DURATION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+#[error(code = 22)]
+const ECapReceivesProceeds: vector<u8> =
+    b"Cap receives its agreement's proceeds; collect them instead of deleting it";
 
 // === Structs ===
 
@@ -126,25 +133,35 @@ public struct Binding has store, copy, drop {
     fee: Option<Spec>,
 }
 
+/// The entity a wrapper module drafts for, such as an armature OU. `kind` is
+/// the wrapper's marker type: only its module can create `Permit` of it, and
+/// that module vouches that the signer of `draft` speaks for `id`.
+public struct Entity has store, copy, drop {
+    kind: TypeName,
+    id: ID,
+}
+
 /// An agreement paid in coin type `T`.
 public struct DeliveryAgreement<phantom T> has key {
     id: UID,
     /// Sender of `draft`. Cancelling needs the cap, not this address.
     lister: address,
-    /// Receives the delivery, or reward and collateral on default.
+    /// Who `lister` drafts for, as a wrapper vouched with `set_on_behalf_of`.
+    on_behalf_of: Option<Entity>,
+    /// Want, collateral, windows and who receives the lister's side.
+    terms: Terms,
+    /// Drafting time plus the terms' `accept_ms`; exclusive.
+    accept_by_ms: u64,
+    /// Receives the delivery, or reward and collateral on default: the terms'
+    /// beneficiary, or the `ListerCap`'s address when they pay the cap holder.
     beneficiary: address,
     /// Released to the hauler on accept.
     cargo: Option<Balance>,
     /// What `cargo` held when drafted; kept after accept for outcome records.
     cargo_spec: Spec,
     reward: balance::Balance<T>,
-    want: Spec,
-    /// What the hauler must lock, in `T`.
-    collateral_amount: u64,
     /// Empty until accepted.
     collateral: balance::Balance<T>,
-    accept_by_ms: u64,
-    haul_ms: u64,
     posted_at_ms: u64,
     /// Resolved in declaration order by `begin_accept`'s request.
     accept_requirements: vector<Requirement>,
@@ -166,16 +183,36 @@ public struct DeliveryAgreement<phantom T> has key {
 }
 
 /// An agreement being built. Has no abilities, so the transaction that drafts
-/// it must `publish` it; extensions can only be attached in between.
+/// it must `publish` it; extensions can only be attached in between. The cap
+/// is made with the draft, so terms that pay the cap holder know its address.
 public struct Draft<phantom T> {
     agreement: DeliveryAgreement<T>,
+    cap: ListerCap,
 }
 
-/// Right to cancel an open agreement. Has `store` so a DAO or other wrapper
-/// can custody it. `cancel` consumes it; otherwise `delete_cap` does.
+/// Right to cancel an open agreement and, when its terms pay the cap holder,
+/// to collect its proceeds. Has `store` so a DAO or other wrapper can custody
+/// it. `cancel` consumes it, and so does `collect`; otherwise `delete_cap`.
 public struct ListerCap has key, store {
     id: UID,
     agreement_id: ID,
+    /// The agreement's payouts come here as `Proceeds`.
+    receives_proceeds: bool,
+}
+
+/// The lister's side of an agreement whose terms pay the cap holder, sent to
+/// its `ListerCap` when the agreement ends by `deliver`, `default`, `forfeit`
+/// or `close_lapsed`. Only this module creates one, and only `collect` with
+/// that cap opens it.
+public struct Proceeds<phantom T> has key {
+    id: UID,
+    agreement_id: ID,
+    /// The delivered `want`, or the cargo when the listing lapsed. `none` on
+    /// default or forfeit, and for a lapsed listing with empty cargo.
+    items: Option<Balance>,
+    /// Reward and collateral on default or forfeit, the reward when the listing
+    /// lapsed, and nothing on delivery.
+    coins: balance::Balance<T>,
 }
 
 /// How an agreement ended. `Lapsed` is the config admin's `close_lapsed`.
@@ -195,6 +232,9 @@ public struct OutcomeRecord has key {
     observer: Binding,
     outcome: Outcome,
     lister: address,
+    /// Who `lister` drafted for. The wrapper that set it chose it, so an
+    /// observer must ignore entities from wrappers it does not trust.
+    on_behalf_of: Option<Entity>,
     beneficiary: address,
     hauler: Option<address>,
     hauler_identity: Option<ID>,
@@ -219,16 +259,22 @@ public struct OutcomeRecord has key {
 // === Events ===
 // Terminal events delete the agreement, so each one records who received
 // what; indexers need not join back to `AgreementPosted` to notify parties.
-// `currency` is the coin type of every reward, collateral and delivery fee
-// amount in the event.
+// When the terms pay the cap holder, the beneficiary is the cap's address and
+// the lister's side arrives there as one `Proceeds`. `currency` is the coin
+// type of every reward, collateral and delivery fee amount in the event.
 
 public struct AgreementPosted has copy, drop {
     agreement_id: ID,
     /// Sender of `draft`; may differ from `beneficiary` (e.g. a DAO listing
     /// for its treasury).
     lister: address,
+    /// Who `lister` drafts for, as the wrapper in `kind` vouches, if any.
+    on_behalf_of: Option<Entity>,
     cap_id: ID,
     beneficiary: address,
+    /// `beneficiary` is the cap's address, and the lister's side of the
+    /// payouts arrives there as `Proceeds`.
+    pays_cap_holder: bool,
     cargo: Spec,
     want: Spec,
     currency: TypeName,
@@ -298,11 +344,13 @@ public struct AgreementCancelled has copy, drop {
 }
 
 /// Nobody accepted before `accept_by_ms`, and the config admin closed the
-/// agreement: `cargo` and `reward` went back to `lister`. `closed_by` sent the
-/// transaction.
+/// agreement: `cargo` and `reward` went to `refunded_to`, which is `lister`,
+/// or the cap's address when the terms pay the cap holder. `closed_by` sent
+/// the transaction.
 public struct AgreementLapsed has copy, drop {
     agreement_id: ID,
     lister: address,
+    refunded_to: address,
     closed_by: address,
     cargo: Spec,
     currency: TypeName,
@@ -312,11 +360,10 @@ public struct AgreementLapsed has copy, drop {
 // === Drafting ===
 
 /// Start an agreement escrowing `cargo` and `reward`, paid in coin type `T`,
-/// which `config` must approve. `collateral` is the amount of `T` a hauler must
-/// lock. `accept_by_ms` is an absolute timestamp; `haul_ms` is the delivery
-/// window measured from accept. Both windows are at most `max_duration_ms`.
-/// `want` must name a different collection or asset than `cargo`, so handing
-/// the cargo back can never count as delivery.
+/// which `config` must approve, on `terms` (see `terms`). The accept window
+/// starts now: someone must accept before `now + terms.accept_ms()`. `want`
+/// must name a different collection or asset than `cargo`, so handing the
+/// cargo back can never count as delivery.
 /// `post_fee` must be exactly `config`'s posting fee in its coin type `F` (an
 /// empty coin of any type when there is none); it goes to the treasury now and
 /// is not refunded. The agreement fixes `config`'s delivery rate and treasury.
@@ -324,40 +371,36 @@ public struct AgreementLapsed has copy, drop {
 public fun draft<T, F>(
     cargo: Balance,
     reward: Coin<T>,
-    want: Spec,
-    collateral: u64,
-    accept_by_ms: u64,
-    haul_ms: u64,
-    beneficiary: address,
+    terms: Terms,
     config: &Config,
     post_fee: Coin<F>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): Draft<T> {
     let now = clock.timestamp_ms();
-    assert!(accept_by_ms > now && accept_by_ms - now <= MAX_DURATION_MS, EInvalidTerms);
-    assert!(haul_ms > 0 && haul_ms <= MAX_DURATION_MS, EInvalidTerms);
-    assert!(want.qty() > 0 && collateral > 0, EInvalidTerms);
     let cargo_spec = spec::of(&cargo);
-    assert!(
-        want.collection() != cargo_spec.collection() || want.asset_id() != cargo_spec.asset_id(),
-        EInvalidTerms,
-    );
+    terms.assert_fits(&cargo_spec);
     config.assert_approved<T>();
     config.collect_post_fee(post_fee);
+    let id = object::new(ctx);
+    let cap = ListerCap {
+        id: object::new(ctx),
+        agreement_id: id.to_inner(),
+        receives_proceeds: terms.pays_cap_holder(),
+    };
+    let beneficiary = terms.beneficiary().destroy_with_default(object::id(&cap).to_address());
     Draft {
         agreement: DeliveryAgreement {
-            id: object::new(ctx),
+            id,
             lister: ctx.sender(),
+            on_behalf_of: option::none(),
+            terms,
+            accept_by_ms: now + terms.accept_ms(),
             beneficiary,
             cargo_spec,
             cargo: option::some(cargo),
             reward: reward.into_balance(),
-            want,
-            collateral_amount: collateral,
             collateral: balance::zero(),
-            accept_by_ms,
-            haul_ms,
             posted_at_ms: now,
             accept_requirements: vector[],
             identity_rule: option::none(),
@@ -369,6 +412,7 @@ public fun draft<T, F>(
             delivery_fee_bps: config.delivery_fee_bps(),
             treasury: config.treasury(),
         },
+        cap,
     }
 }
 
@@ -399,23 +443,38 @@ public fun bind_observer<T, O>(
     draft.agreement.observer.fill(new_binding<O>(instance, fee));
 }
 
-/// Share the agreement. Its terms and extensions are fixed from here.
-public fun publish<T>(draft: Draft<T>, ctx: &mut TxContext): ListerCap {
-    let Draft { agreement } = draft;
-    let agreement_id = object::id(&agreement);
-    let cap = ListerCap { id: object::new(ctx), agreement_id };
+/// Record that the lister drafts for `entity_id`, as wrapper `W` vouches. Only
+/// `W`'s module can call this, and it must check that the signer of `draft`
+/// speaks for `entity_id`, for example that a governance ticket came from that
+/// DAO. `AgreementPosted` and outcome records show it, so indexers and
+/// observers can credit the entity rather than the signer. It moves no
+/// payout: terms that pay the cap holder do that.
+public fun set_on_behalf_of<T, W>(draft: &mut Draft<T>, _: Permit<W>, entity_id: ID) {
+    assert!(draft.agreement.on_behalf_of.is_none(), EAlreadyBound);
+    draft.agreement.on_behalf_of.fill(Entity {
+        kind: type_name::with_original_ids<W>(),
+        id: entity_id,
+    });
+}
+
+/// Share the agreement and return its cap. Its terms and extensions are fixed
+/// from here.
+public fun publish<T>(draft: Draft<T>): ListerCap {
+    let Draft { agreement, cap } = draft;
     event::emit(AgreementPosted {
-        agreement_id,
+        agreement_id: object::id(&agreement),
         lister: agreement.lister,
+        on_behalf_of: agreement.on_behalf_of,
         cap_id: object::id(&cap),
         beneficiary: agreement.beneficiary,
+        pays_cap_holder: agreement.terms.pays_cap_holder(),
         cargo: agreement.cargo_spec,
-        want: agreement.want,
+        want: agreement.terms.want(),
         currency: type_name::with_original_ids<T>(),
         reward: agreement.reward.value(),
-        collateral: agreement.collateral_amount,
+        collateral: agreement.terms.collateral(),
         accept_by_ms: agreement.accept_by_ms,
-        haul_ms: agreement.haul_ms,
+        haul_ms: agreement.terms.haul_ms(),
         accept_requirements: agreement.accept_requirements,
         identity_rule: agreement.identity_rule,
         observer: agreement.observer,
@@ -431,20 +490,13 @@ public fun publish<T>(draft: Draft<T>, ctx: &mut TxContext): ListerCap {
 public fun post<T, F>(
     cargo: Balance,
     reward: Coin<T>,
-    want: Spec,
-    collateral: u64,
-    accept_by_ms: u64,
-    haul_ms: u64,
-    beneficiary: address,
+    terms: Terms,
     config: &Config,
     post_fee: Coin<F>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ListerCap {
-    draft(
-        cargo, reward, want, collateral, accept_by_ms, haul_ms, beneficiary, config, post_fee,
-        clock, ctx,
-    ).publish(ctx)
+    draft(cargo, reward, terms, config, post_fee, clock, ctx).publish()
 }
 
 // === Accepting ===
@@ -483,11 +535,11 @@ public fun finish_accept<T>(
     assert!(self.hauler.is_none(), ENotOpen);
     let now = clock.timestamp_ms();
     assert!(now < self.accept_by_ms, ETooLate);
-    assert!(collateral.value() == self.collateral_amount, EWrongCollateral);
+    assert!(collateral.value() == self.terms.collateral(), EWrongCollateral);
     self.collateral.join(collateral.into_balance());
     self.hauler.fill(hauler);
     self.hauler_identity = hauler_identity;
-    self.deadline_ms = now + self.haul_ms;
+    self.deadline_ms = now + self.terms.haul_ms();
     event::emit(AgreementAccepted {
         agreement_id: object::id(self),
         hauler,
@@ -513,9 +565,10 @@ public fun accept<T>(
 // === Delivering and defaulting ===
 
 /// Hand in exactly the wanted balance before the deadline. Permissionless:
-/// recipients are fixed, so it does not matter who submits. The delivery fee,
-/// `reward * delivery_fee_bps / 10,000` rounded down, goes to the treasury and
-/// the rest of the reward to the hauler.
+/// recipients are fixed, so it does not matter who submits. The wanted balance
+/// goes to the beneficiary, or as `Proceeds` to the cap when the terms pay the
+/// cap holder. The delivery fee, `reward * delivery_fee_bps / 10,000` rounded
+/// down, goes to the treasury and the rest of the reward to the hauler.
 public fun deliver<T>(
     self: DeliveryAgreement<T>,
     delivered: Balance,
@@ -524,11 +577,13 @@ public fun deliver<T>(
 ) {
     assert!(self.hauler.is_some(), ENotAccepted);
     assert!(clock.timestamp_ms() < self.deadline_ms, ETooLate);
-    self.want.assert_matches(&delivered);
+    let want = self.terms.want();
+    want.assert_matches(&delivered);
     self.record(Outcome::Delivered, clock, ctx);
     let (agreement_id, lister) = (object::id(&self), self.lister);
     let hauler_identity = self.hauler_identity;
     let (fee_bps, treasury) = (self.delivery_fee_bps, self.treasury);
+    let to_cap = self.terms.pays_cap_holder();
     let (beneficiary, hauler, mut reward, collateral) = close(self);
     let delivery_fee = config::delivery_fee_on(reward.value(), fee_bps);
     pay(reward.split(delivery_fee), treasury, ctx);
@@ -545,14 +600,17 @@ public fun deliver<T>(
         delivery_fee,
         treasury,
     });
-    transfer::public_transfer(delivered, beneficiary);
+    if (to_cap) {
+        send_proceeds<T>(agreement_id, option::some(delivered), balance::zero(), beneficiary, ctx)
+    } else transfer::public_transfer(delivered, beneficiary);
     pay(reward, hauler, ctx);
     pay(collateral, hauler, ctx);
 }
 
-/// After the deadline, send reward and collateral to the beneficiary.
-/// Permissionless, so funds never wait on a party who has walked away. The
-/// hauler keeps whatever cargo they still hold.
+/// After the deadline, send reward and collateral to the beneficiary, or as
+/// `Proceeds` to the cap when the terms pay the cap holder. Permissionless, so
+/// funds never wait on a party who has walked away. The hauler keeps whatever
+/// cargo they still hold.
 public fun default<T>(self: DeliveryAgreement<T>, clock: &Clock, ctx: &mut TxContext) {
     assert!(self.hauler.is_some(), ENotAccepted);
     assert!(clock.timestamp_ms() >= self.deadline_ms, ETooEarly);
@@ -569,14 +627,14 @@ public fun forfeit<T>(self: DeliveryAgreement<T>, clock: &Clock, ctx: &mut TxCon
 }
 
 /// Delete an open agreement, returning `(cargo, reward)` to the cap holder.
-/// Allowed before or after `accept_by_ms`.
+/// Allowed before or after `accept_by_ms`, whoever the terms pay.
 public fun cancel<T>(
     self: DeliveryAgreement<T>,
     cap: ListerCap,
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Balance, Coin<T>) {
-    let ListerCap { id: cap_id, agreement_id } = cap;
+    let ListerCap { id: cap_id, agreement_id, .. } = cap;
     cap_id.delete();
     assert!(agreement_id == object::id(&self), EWrongCap);
     assert!(self.hauler.is_none(), ENotOpen);
@@ -593,11 +651,13 @@ public fun cancel<T>(
 }
 
 /// Delete an open agreement nobody accepted before `accept_by_ms`, sending the
-/// cargo and reward to the lister, the address that signed `draft`. Only the
-/// config's `AdminCap` holder can call it, so a listing whose `ListerCap` was
-/// lost or burned still ends. The escrow goes to the lister even when someone
-/// else holds the cap, and never to the caller, so a wrapper holding the cap of
-/// a listing drafted by another signer should `cancel` instead.
+/// cargo and reward to the lister, the address that signed `draft`, or as
+/// `Proceeds` to the cap when the terms pay the cap holder. Only the config's
+/// `AdminCap` holder can call it, so a listing whose `ListerCap` was lost or
+/// burned still ends. The escrow never goes to the caller. With a beneficiary
+/// address it goes to the lister even when someone else holds the cap, so a
+/// wrapper that drafts through another signer should use terms that pay the
+/// cap holder.
 public fun close_lapsed<T>(
     self: DeliveryAgreement<T>,
     _: &AdminCap,
@@ -608,25 +668,49 @@ public fun close_lapsed<T>(
     assert!(clock.timestamp_ms() >= self.accept_by_ms, ENotLapsed);
     self.record(Outcome::Lapsed, clock, ctx);
     let (agreement_id, lister) = (object::id(&self), self.lister);
+    let to_cap = self.terms.pays_cap_holder();
+    let refunded_to = if (to_cap) self.beneficiary else lister;
     let (cargo, reward) = close_open(self);
     event::emit(AgreementLapsed {
         agreement_id,
         lister,
+        refunded_to,
         closed_by: ctx.sender(),
         cargo: spec::of(&cargo),
         currency: type_name::with_original_ids<T>(),
         reward: reward.value(),
     });
-    payout::pay(cargo, lister);
-    pay(reward, lister, ctx);
+    if (to_cap) send_proceeds(agreement_id, non_empty(cargo), reward, refunded_to, ctx)
+    else {
+        payout::pay(cargo, lister);
+        pay(reward, lister, ctx);
+    }
+}
+
+/// Open the `Proceeds` sent to `cap` and delete both, returning the items, if
+/// any, and the coins. Only an agreement whose terms pay the cap holder sends
+/// proceeds, exactly once, when it ends by `deliver`, `default`, `forfeit` or
+/// `close_lapsed`; `cancel` returns its escrow directly instead.
+public fun collect<T>(
+    mut cap: ListerCap,
+    proceeds: Receiving<Proceeds<T>>,
+    ctx: &mut TxContext,
+): (Option<Balance>, Coin<T>) {
+    let Proceeds { id, items, coins, .. } = transfer::receive(&mut cap.id, proceeds);
+    id.delete();
+    let ListerCap { id, .. } = cap;
+    id.delete();
+    (items, coin::from_balance(coins, ctx))
 }
 
 /// Delete a `ListerCap`, reclaiming its storage. Meant for after the agreement
 /// ended by `deliver`, `default`, `forfeit` or `close_lapsed`. Deleting it
 /// while the agreement is still open gives up the right to cancel, leaving
-/// `close_lapsed` as the only way to end it.
+/// `close_lapsed` as the only way to end it. Aborts for a cap that receives
+/// its agreement's proceeds, which must be collected with it instead.
 public fun delete_cap(cap: ListerCap) {
-    let ListerCap { id, .. } = cap;
+    let ListerCap { id, receives_proceeds, .. } = cap;
+    assert!(!receives_proceeds, ECapReceivesProceeds);
     id.delete();
 }
 
@@ -656,12 +740,23 @@ public fun delete_outcome(record: OutcomeRecord) {
 
 // === Views ===
 
-/// The longest accept or haul window an agreement may have: 30 days.
-public fun max_duration_ms(): u64 { MAX_DURATION_MS }
-
 public fun lister<T>(self: &DeliveryAgreement<T>): address { self.lister }
 
+/// Who the lister drafted for, as a wrapper vouched with `set_on_behalf_of`.
+public fun on_behalf_of<T>(self: &DeliveryAgreement<T>): Option<Entity> { self.on_behalf_of }
+
+/// The terms the agreement was drafted on. Their windows are relative, so they
+/// can be posted again, with a fresh accept window, after a cancel.
+public fun terms<T>(self: &DeliveryAgreement<T>): Terms { self.terms }
+
+/// Receives the lister's side of the payouts: the terms' beneficiary, or the
+/// `ListerCap`'s address when they pay the cap holder.
 public fun beneficiary<T>(self: &DeliveryAgreement<T>): address { self.beneficiary }
+
+/// The lister's side of the payouts goes to the `ListerCap` as `Proceeds`.
+public fun pays_cap_holder<T>(self: &DeliveryAgreement<T>): bool {
+    self.terms.pays_cap_holder()
+}
 
 public fun cargo<T>(self: &DeliveryAgreement<T>): &Option<Balance> { &self.cargo }
 
@@ -674,17 +769,18 @@ public fun currency<T>(_: &DeliveryAgreement<T>): TypeName { type_name::with_ori
 /// The escrowed reward, before any delivery fee.
 public fun reward<T>(self: &DeliveryAgreement<T>): u64 { self.reward.value() }
 
-public fun want<T>(self: &DeliveryAgreement<T>): Spec { self.want }
+public fun want<T>(self: &DeliveryAgreement<T>): Spec { self.terms.want() }
 
 /// The collateral a hauler must lock.
-public fun collateral_amount<T>(self: &DeliveryAgreement<T>): u64 { self.collateral_amount }
+public fun collateral_amount<T>(self: &DeliveryAgreement<T>): u64 { self.terms.collateral() }
 
 /// The collateral locked: 0 while open.
 public fun collateral_locked<T>(self: &DeliveryAgreement<T>): u64 { self.collateral.value() }
 
+/// The end of the accept window, exclusive: drafting time plus `accept_ms`.
 public fun accept_by_ms<T>(self: &DeliveryAgreement<T>): u64 { self.accept_by_ms }
 
-public fun haul_ms<T>(self: &DeliveryAgreement<T>): u64 { self.haul_ms }
+public fun haul_ms<T>(self: &DeliveryAgreement<T>): u64 { self.terms.haul_ms() }
 
 public fun posted_at_ms<T>(self: &DeliveryAgreement<T>): u64 { self.posted_at_ms }
 
@@ -714,7 +810,15 @@ public fun is_open<T>(self: &DeliveryAgreement<T>): bool { self.hauler.is_none()
 
 public fun cap_agreement_id(cap: &ListerCap): ID { cap.agreement_id }
 
+/// The agreement's payouts come to this cap as `Proceeds`.
+public fun cap_receives_proceeds(cap: &ListerCap): bool { cap.receives_proceeds }
+
 public fun draft_agreement<T>(draft: &Draft<T>): &DeliveryAgreement<T> { &draft.agreement }
+
+/// The wrapper's marker type, whose module vouched for the entity.
+public fun entity_kind(self: &Entity): TypeName { self.kind }
+
+public fun entity_id(self: &Entity): ID { self.id }
 
 public fun binding_kind(self: &Binding): TypeName { self.kind }
 
@@ -750,6 +854,9 @@ public fun record_observer(self: &OutcomeRecord): Binding { self.observer }
 public fun record_outcome(self: &OutcomeRecord): Outcome { self.outcome }
 
 public fun record_lister(self: &OutcomeRecord): address { self.lister }
+
+/// Who the lister drafted for. Check `entity_kind` before trusting it.
+public fun record_on_behalf_of(self: &OutcomeRecord): Option<Entity> { self.on_behalf_of }
 
 public fun record_beneficiary(self: &OutcomeRecord): address { self.beneficiary }
 
@@ -794,12 +901,13 @@ fun record<T>(self: &DeliveryAgreement<T>, outcome: Outcome, clock: &Clock, ctx:
         observer,
         outcome,
         lister: self.lister,
+        on_behalf_of: self.on_behalf_of,
         beneficiary: self.beneficiary,
         hauler: self.hauler,
         hauler_identity: self.hauler_identity,
         identity_rule: self.identity_rule,
         cargo: self.cargo_spec,
-        want: self.want,
+        want: self.terms.want(),
         currency: type_name::with_original_ids<T>(),
         reward: self.reward.value(),
         collateral: if (self.hauler.is_some()) option::some(self.collateral.value())
@@ -820,7 +928,8 @@ fun pay_default<T>(
     self.record(Outcome::Defaulted { forfeited }, clock, ctx);
     let (agreement_id, lister) = (object::id(&self), self.lister);
     let hauler_identity = self.hauler_identity;
-    let (beneficiary, hauler, reward, collateral) = close(self);
+    let to_cap = self.terms.pays_cap_holder();
+    let (beneficiary, hauler, mut reward, collateral) = close(self);
     event::emit(AgreementDefaulted {
         agreement_id,
         lister,
@@ -832,8 +941,13 @@ fun pay_default<T>(
         collateral: collateral.value(),
         forfeited,
     });
-    pay(reward, beneficiary, ctx);
-    pay(collateral, beneficiary, ctx);
+    if (to_cap) {
+        reward.join(collateral);
+        send_proceeds(agreement_id, option::none(), reward, beneficiary, ctx)
+    } else {
+        pay(reward, beneficiary, ctx);
+        pay(collateral, beneficiary, ctx);
+    }
 }
 
 fun close<T>(
@@ -863,20 +977,41 @@ fun pay<T>(funds: balance::Balance<T>, to: address, ctx: &mut TxContext) {
     else transfer::public_transfer(coin::from_balance(funds, ctx), to);
 }
 
+/// Send the lister's side to the agreement's cap at `cap` as one `Proceeds`,
+/// even an empty one: the cap holder needs it to `collect` and close the cap.
+fun send_proceeds<T>(
+    agreement_id: ID,
+    items: Option<Balance>,
+    coins: balance::Balance<T>,
+    cap: address,
+    ctx: &mut TxContext,
+) {
+    transfer::transfer(Proceeds { id: object::new(ctx), agreement_id, items, coins }, cap);
+}
+
+/// `some(balance)`, or `none` once an empty `balance` is destroyed.
+fun non_empty(balance: Balance): Option<Balance> {
+    if (multicoin::value(&balance) == 0) {
+        multicoin::destroy_zero(balance);
+        option::none()
+    } else option::some(balance)
+}
+
 // === Test helpers ===
 
 #[test_only]
 public fun posted_event_for_testing(
-    agreement_id: ID, lister: address, cap_id: ID, beneficiary: address, cargo: Spec,
-    want: Spec, currency: TypeName, reward: u64, collateral: u64, accept_by_ms: u64,
-    haul_ms: u64, accept_requirements: vector<Requirement>, identity_rule: Option<TypeName>,
+    agreement_id: ID, lister: address, on_behalf_of: Option<Entity>, cap_id: ID,
+    beneficiary: address, pays_cap_holder: bool, cargo: Spec, want: Spec, currency: TypeName,
+    reward: u64, collateral: u64, accept_by_ms: u64, haul_ms: u64,
+    accept_requirements: vector<Requirement>, identity_rule: Option<TypeName>,
     observer: Option<Binding>, post_fee: Option<PostFee>, delivery_fee_bps: u16,
     treasury: address,
 ): AgreementPosted {
     AgreementPosted {
-        agreement_id, lister, cap_id, beneficiary, cargo, want, currency, reward, collateral,
-        accept_by_ms, haul_ms, accept_requirements, identity_rule, observer, post_fee,
-        delivery_fee_bps, treasury,
+        agreement_id, lister, on_behalf_of, cap_id, beneficiary, pays_cap_holder, cargo, want,
+        currency, reward, collateral, accept_by_ms, haul_ms, accept_requirements, identity_rule,
+        observer, post_fee, delivery_fee_bps, treasury,
     }
 }
 
@@ -920,13 +1055,18 @@ public fun cancelled_event_for_testing(
 
 #[test_only]
 public fun lapsed_event_for_testing(
-    agreement_id: ID, lister: address, closed_by: address, cargo: Spec, currency: TypeName,
-    reward: u64,
+    agreement_id: ID, lister: address, refunded_to: address, closed_by: address, cargo: Spec,
+    currency: TypeName, reward: u64,
 ): AgreementLapsed {
-    AgreementLapsed { agreement_id, lister, closed_by, cargo, currency, reward }
+    AgreementLapsed { agreement_id, lister, refunded_to, closed_by, cargo, currency, reward }
 }
 
 #[test_only]
 public fun new_binding_for_testing<O>(instance: ID, fee: Option<Spec>): Binding {
     new_binding<O>(instance, fee)
+}
+
+#[test_only]
+public fun new_entity_for_testing<W>(id: ID): Entity {
+    Entity { kind: type_name::with_original_ids<W>(), id }
 }

@@ -39,10 +39,10 @@ module agreement_roles::claim;
 
 use agreements::request::Request;
 use agreements::requirement::{Self, Requirement};
-use agreements::spec::Spec;
 use armature::ou::OU;
 use delivery_agreements::config::Config;
 use delivery_agreements::delivery::{Self, Draft, ListerCap};
+use delivery_agreements::terms::Terms;
 use multicoin::multicoin::Balance;
 use roles::acl::{Self, Principal};
 use std::internal;
@@ -102,28 +102,21 @@ public fun require_to_claim<T>(draft: &mut Draft<T>, principals: vector<Principa
     draft.require_to_accept(requirement(principals));
 }
 
-/// Post an agreement only `principals` can accept: `draft`,
+/// Post an agreement on `terms` that only `principals` can accept: `draft`,
 /// `require_to_claim`, `publish`.
 public fun post_for<T, F>(
     cargo: Balance,
     reward: Coin<T>,
-    want: Spec,
-    collateral: u64,
-    accept_by_ms: u64,
-    haul_ms: u64,
-    beneficiary: address,
+    terms: Terms,
     principals: vector<Principal>,
     config: &Config,
     post_fee: Coin<F>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ListerCap {
-    let mut draft = delivery::draft(
-        cargo, reward, want, collateral, accept_by_ms, haul_ms, beneficiary, config, post_fee,
-        clock, ctx,
-    );
+    let mut draft = delivery::draft(cargo, reward, terms, config, post_fee, clock, ctx);
     require_to_claim(&mut draft, principals);
-    draft.publish(ctx)
+    draft.publish()
 }
 
 /// Satisfy the request's next requirement, a claim gate, acting as a member of

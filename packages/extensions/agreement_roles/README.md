@@ -17,18 +17,19 @@ An agreement with no gate is open to anyone.
 
 ```move
 // One call: draft, gate and publish.
-let cap = claim::post_for<T, F>(cargo, reward, want, collateral, accept_by_ms, haul_ms,
-    beneficiary, vector[acl::ou(haulers_id), acl::player(freelancer)], &config, post_fee,
-    &clock, ctx);
+let terms = terms::new(want, collateral, accept_ms, haul_ms, beneficiary);
+let cap = claim::post_for<T, F>(cargo, reward, terms,
+    vector[acl::ou(haulers_id), acl::player(freelancer)], &config, post_fee, &clock, ctx);
 
 // Or gate a draft that also gets other extensions.
 claim::require_to_claim(&mut draft, vector[acl::ou(haulers_id), acl::player(freelancer)]);
 ```
 
-- `post_for<T, F>` takes `delivery::draft`'s arguments with `principals` after `beneficiary`: the cargo `Balance`, a `Coin<T>` reward, the `want`, the collateral amount of `T`, the times and the beneficiary, then the shared `delivery_agreements::config::Config` and a `post_fee` coin of exactly the posting fee (an empty coin of any type when none is set). `T` must be an approved currency. See [config](../../composites/delivery_agreements/README.md#delivery_agreementsconfig).
+- `post_for<T, F>` takes `delivery::draft`'s arguments with `principals` after `terms`: the cargo `Balance`, a `Coin<T>` reward and the agreement's `delivery_agreements::terms::Terms`, then the shared `delivery_agreements::config::Config` and a `post_fee` coin of exactly the posting fee (an empty coin of any type when none is set). `T` must be an approved currency. See [terms](../../composites/delivery_agreements/README.md#delivery_agreementsterms) and [config](../../composites/delivery_agreements/README.md#delivery_agreementsconfig).
+- **For a DAO that keeps the cap,** pass terms from `terms::new_for_cap_holder` with an `ou` gate: only the OU's board can claim, and every payout to the lister's side goes to the cap the DAO holds.
 - `require_to_claim<T>` gates a `Draft<T>` in any currency.
 - A gate lists 1 to 32 principals (`EInvalidPrincipals` otherwise).
-- **The list is fixed when the agreement is published.** To change it, cancel and post again.
+- **The list is fixed when the agreement is published.** To change it, cancel and post again with the same `agreement.terms()`.
 - **OU membership is not fixed.** An `ou` principal is checked at claim time, so board changes after posting apply to open agreements. Anything that must change while an agreement is open belongs in an OU.
 - An agreement can carry several gates. Each must pass, in the order they were added.
 
@@ -63,7 +64,7 @@ The gate doesn't check which action it guards, or which agreement type. `require
 |---|---|
 | agreements (local) | `Request`, `Requirement` and `Spec`. The gate works on any agreement type's request. |
 | roles (local) | `Principal`. |
-| delivery_agreements (local) | `Draft`, `ListerCap` and `Config`, for the delivery shortcuts `require_to_claim` and `post_for`, and the end-to-end tests. |
+| delivery_agreements (local) | `Draft`, `ListerCap`, `Terms` and `Config`, for the delivery shortcuts `require_to_claim` and `post_for`, and the end-to-end tests. |
 | armature `ae60685` | `armature::ou::OU`. The same revision as roles and armature_vault. |
 | multicoin `2772c26` | `Balance`, for `post_for`'s cargo. The same revision as delivery_agreements. |
 

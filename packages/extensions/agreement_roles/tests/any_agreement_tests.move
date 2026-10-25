@@ -13,6 +13,7 @@ use agreements::request;
 use agreements::spec;
 use armature::ou::OU;
 use delivery_agreements::delivery::{Self, DeliveryAgreement};
+use delivery_agreements::terms;
 use multicoin::multicoin;
 use roles::acl::{Self, Principal};
 use std::type_name;
@@ -183,11 +184,7 @@ fun delivery_request_cannot_complete_a_bid() {
     let mut draft = delivery::draft(
         multicoin::create_balance_for_testing(src, 0, 1, sc.ctx()),
         test_config::mint(1, sc.ctx()),
-        spec::new(dst, 0, 1),
-        1,
-        5_000,
-        10_000,
-        SELLER,
+        terms::new(spec::new(dst, 0, 1), 1, 4_000, 10_000, SELLER),
         &config,
         test_config::empty(sc.ctx()),
         &clk,
@@ -195,7 +192,7 @@ fun delivery_request_cannot_complete_a_bid() {
     );
     config.destroy_for_testing();
     claim::require_to_claim(&mut draft, vector[acl::ou(bidders)]);
-    transfer::public_transfer(draft.publish(sc.ctx()), SELLER);
+    transfer::public_transfer(draft.publish(), SELLER);
 
     sc.next_tx(MEMBER_1);
     let org = sc.take_shared_by_id<OU>(bidders);

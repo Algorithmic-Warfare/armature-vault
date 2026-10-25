@@ -21,6 +21,7 @@ use delivery_agreements::delivery::{
     AgreementDelivered,
     AgreementDefaulted
 };
+use delivery_agreements::terms;
 use multicoin::multicoin::{Self, Balance};
 use roles::acl::{Self, Principal};
 use std::type_name;
@@ -46,6 +47,7 @@ const COLLATERAL_QTY: u64 = 500;
 
 const START_MS: u64 = 1_000;
 const ACCEPT_BY_MS: u64 = 5_000;
+const ACCEPT_MS: u64 = 4_000; // ACCEPT_BY_MS - START_MS, posting at START_MS
 const HAUL_MS: u64 = 10_000;
 const ACCEPT_AT_MS: u64 = 2_000;
 const DEADLINE_MS: u64 = 12_000; // ACCEPT_AT_MS + HAUL_MS
@@ -101,24 +103,25 @@ fun post(w: &mut World, gate: vector<Principal>): Posted {
     let cargo = mint(src(), ITEM, QTY, &mut w.scenario);
     let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
     let config = test_config::no_fees(w.scenario.ctx());
+    let terms = terms::new(want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY);
     let mut draft = delivery::draft(
-        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS, BENEFICIARY, &config,
-        test_config::empty(w.scenario.ctx()), &w.clock, w.scenario.ctx(),
+        cargo, reward, terms, &config, test_config::empty(w.scenario.ctx()), &w.clock,
+        w.scenario.ctx(),
     );
     config.destroy_for_testing();
     let ledger = w.scenario.take_shared_by_id<TestLedger>(w.ledger);
     test_ledger::bind(&ledger, &mut draft);
     ts::return_shared(ledger);
     claim::require_to_claim(&mut draft, gate);
-    let cap = draft.publish(w.scenario.ctx());
+    let cap = draft.publish();
     let (agreement_id, cap_id) = (cap.cap_agreement_id(), object::id(&cap));
     transfer::public_transfer(cap, LISTER);
     assert_eq!(
         event::events_by_type<AgreementPosted>(),
         vector[
             delivery::posted_event_for_testing(
-                agreement_id, LISTER, cap_id, BENEFICIARY, cargo_spec(), want(),
-                test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
+                agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
+                want(), test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
                 vector[claim::requirement(gate)], option::none(), option::some(observer(w)),
                 option::none(), 0, test_config::treasury(),
             ),
