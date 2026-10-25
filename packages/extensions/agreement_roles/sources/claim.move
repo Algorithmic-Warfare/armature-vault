@@ -36,123 +36,123 @@
 /// claim::satisfy_directly(&mut req);
 /// let cargo = agreement.finish_accept(req, collateral, &clock);
 /// ```
-module agreement_roles::claim;
+module agreement_roles::claim {
+    use agreements::{request::Request, requirement::{Self, Requirement}};
+    use armature::ou::OU;
+    use roles::acl::{Self, Principal};
+    use std::{internal, type_name::TypeName};
+    use sui::{bcs, event};
 
-use agreements::request::Request;
-use agreements::requirement::{Self, Requirement};
-use armature::ou::OU;
-use roles::acl::{Self, Principal};
-use std::internal;
-use std::type_name::TypeName;
-use sui::bcs;
-use sui::event;
+    // === Errors ===
 
-// === Errors ===
+    #[error(code = 0)]
+    const ENotAuthorized: vector<u8> = b"Sender does not satisfy any principal allowed to claim";
+    #[error(code = 1)]
+    const EInvalidPrincipals: vector<u8> = b"A claim gate needs between 1 and 32 principals";
+    #[error(code = 2)]
+    const ENotClaimGate: vector<u8> = b"Requirement is not a claim gate";
 
-#[error(code = 0)]
-const ENotAuthorized: vector<u8> = b"Sender does not satisfy any principal allowed to claim";
-#[error(code = 1)]
-const EInvalidPrincipals: vector<u8> = b"A claim gate needs between 1 and 32 principals";
-#[error(code = 2)]
-const ENotClaimGate: vector<u8> = b"Requirement is not a claim gate";
+    // === Constants ===
 
-// === Constants ===
+    /// Most principals one gate may list. Satisfying checks them one by one.
+    const MAX_PRINCIPALS: u64 = 32;
 
-/// Most principals one gate may list. Satisfying checks them one by one.
-const MAX_PRINCIPALS: u64 = 32;
+    // === Structs ===
 
-// === Structs ===
+    /// Requirement config: the actor must satisfy one of `principals`.
+    public struct CanClaim has drop {
+        principals: vector<Principal>,
+    }
 
-/// Requirement config: the actor must satisfy one of `principals`.
-public struct CanClaim has drop {
-    principals: vector<Principal>,
-}
+    // === Events ===
 
-// === Events ===
+    /// `actor` satisfied a claim gate on `agreement_id` for `action` (for
+    /// accepting a hauling agreement, `hauling::AcceptAction`) by matching
+    /// `principal`, the first listed principal they satisfy. An `Ou` principal
+    /// means they claimed as a board member of that OU.
+    ///
+    /// Trust it only as far as `action`. Anyone can open a request for an action
+    /// type they define, naming any `agreement_id`, gate it on their own
+    /// principals and complete it, so a `Claimed` for a real agreement can come
+    /// from an unrelated module. Accept one only when `action` is a type, by its
+    /// original package ID, whose module you trust: only `hauling` can open and
+    /// complete a request for `hauling::AcceptAction`, so such a claim always
+    /// shares its transaction with that agreement's `AgreementAccepted`.
+    public struct Claimed has copy, drop {
+        agreement_id: ID,
+        action: TypeName,
+        actor: address,
+        principal: Principal,
+    }
 
-/// `actor` satisfied a claim gate on `agreement_id` for `action` (for
-/// accepting a hauling agreement, `hauling::AcceptAction`) by matching
-/// `principal`, the first listed principal they satisfy. An `Ou` principal
-/// means they claimed as a board member of that OU.
-///
-/// Trust it only as far as `action`. Anyone can open a request for an action
-/// type they define, naming any `agreement_id`, gate it on their own
-/// principals and complete it, so a `Claimed` for a real agreement can come
-/// from an unrelated module. Accept one only when `action` is a type, by its
-/// original package ID, whose module you trust: only `hauling` can open and
-/// complete a request for `hauling::AcceptAction`, so such a claim always
-/// shares its transaction with that agreement's `AgreementAccepted`.
-public struct Claimed has copy, drop {
-    agreement_id: ID,
-    action: TypeName,
-    actor: address,
-    principal: Principal,
-}
+    // === Public Functions ===
 
-// === Public Functions ===
+    /// A requirement only `principals` can satisfy. Attach it to a hauling
+    /// agreement's draft with `require_to_accept`, or to another agreement
+    /// type's action.
+    public fun requirement(principals: vector<Principal>): Requirement {
+        let len = principals.length();
+        assert!(len > 0 && len <= MAX_PRINCIPALS, EInvalidPrincipals);
+        requirement::from_config(CanClaim { principals })
+    }
 
-/// A requirement only `principals` can satisfy. Attach it to a hauling
-/// agreement's draft with `require_to_accept`, or to another agreement
-/// type's action.
-public fun requirement(principals: vector<Principal>): Requirement {
-    let len = principals.length();
-    assert!(len > 0 && len <= MAX_PRINCIPALS, EInvalidPrincipals);
-    requirement::from_config(CanClaim { principals })
-}
+    /// Satisfy the request's next requirement, a claim gate, acting as a member of
+    /// `org`. `Player` and `Machine` principals match whatever `org` is passed.
+    public fun satisfy(request: &mut Request, org: &OU) {
+        let principals = take_gate(request);
+        let actor = request.actor();
+        let matched = principals.find_index!(|p| p.satisfies(org, actor));
+        emit_claimed(request, principals, matched);
+    }
 
-/// Satisfy the request's next requirement, a claim gate, acting as a member of
-/// `org`. `Player` and `Machine` principals match whatever `org` is passed.
-public fun satisfy(request: &mut Request, org: &OU) {
-    let principals = take_gate(request);
-    let actor = request.actor();
-    let matched = principals.find_index!(|p| p.satisfies(org, actor));
-    emit_claimed(request, principals, matched);
-}
+    /// Satisfy the request's next requirement, a claim gate, as a listed `Player`
+    /// or `Machine`. No OU is needed.
+    public fun satisfy_directly(request: &mut Request) {
+        let principals = take_gate(request);
+        let actor = request.actor();
+        let matched = principals.find_index!(|p| p.satisfies_directly(actor));
+        emit_claimed(request, principals, matched);
+    }
 
-/// Satisfy the request's next requirement, a claim gate, as a listed `Player`
-/// or `Machine`. No OU is needed.
-public fun satisfy_directly(request: &mut Request) {
-    let principals = take_gate(request);
-    let actor = request.actor();
-    let matched = principals.find_index!(|p| p.satisfies_directly(actor));
-    emit_claimed(request, principals, matched);
-}
+    /// The principals a claim gate lists. Aborts for other requirements.
+    public fun principals_of(req: &Requirement): vector<Principal> {
+        assert!(req.is<CanClaim>(), ENotClaimGate);
+        let mut config = bcs::new(req.data());
+        let len = config.peel_vec_length();
+        vector::tabulate!(len, |_| acl::peel_principal(&mut config))
+    }
 
-/// The principals a claim gate lists. Aborts for other requirements.
-public fun principals_of(req: &Requirement): vector<Principal> {
-    assert!(req.is<CanClaim>(), ENotClaimGate);
-    let mut config = bcs::new(req.data());
-    let len = config.peel_vec_length();
-    vector::tabulate!(len, |_| acl::peel_principal(&mut config))
-}
+    public fun max_principals(): u64 { MAX_PRINCIPALS }
 
-public fun max_principals(): u64 { MAX_PRINCIPALS }
+    // === Internal ===
 
-// === Internal ===
+    /// Pop the next requirement as a claim gate and return its principals.
+    fun take_gate(request: &mut Request): vector<Principal> {
+        let (req, frame) = request.take_next(internal::permit<CanClaim>());
+        frame.destroy_empty_frame();
+        principals_of(&req)
+    }
 
-/// Pop the next requirement as a claim gate and return its principals.
-fun take_gate(request: &mut Request): vector<Principal> {
-    let (req, frame) = request.take_next(internal::permit<CanClaim>());
-    frame.destroy_empty_frame();
-    principals_of(&req)
-}
+    /// Abort unless a principal matched, then record which one.
+    fun emit_claimed(request: &Request, principals: vector<Principal>, matched: Option<u64>) {
+        assert!(matched.is_some(), ENotAuthorized);
+        event::emit(Claimed {
+            agreement_id: request.agreement_id(),
+            action: request.action(),
+            actor: request.actor(),
+            principal: principals[matched.destroy_some()],
+        });
+    }
 
-/// Abort unless a principal matched, then record which one.
-fun emit_claimed(request: &Request, principals: vector<Principal>, matched: Option<u64>) {
-    assert!(matched.is_some(), ENotAuthorized);
-    event::emit(Claimed {
-        agreement_id: request.agreement_id(),
-        action: request.action(),
-        actor: request.actor(),
-        principal: principals[matched.destroy_some()],
-    });
-}
+    // === Test helpers ===
 
-// === Test helpers ===
-
-#[test_only]
-public fun claimed_event_for_testing(
-    agreement_id: ID, action: TypeName, actor: address, principal: Principal,
-): Claimed {
-    Claimed { agreement_id, action, actor, principal }
+    #[test_only]
+    public fun claimed_event_for_testing(
+        agreement_id: ID,
+        action: TypeName,
+        actor: address,
+        principal: Principal,
+    ): Claimed {
+        Claimed { agreement_id, action, actor, principal }
+    }
 }

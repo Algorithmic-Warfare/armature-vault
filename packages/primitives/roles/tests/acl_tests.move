@@ -2,10 +2,8 @@
 module roles::acl_tests {
     use armature::{governance, ou::{Self, OU}, proposal, remove_member::RemoveMember};
     use roles::acl;
-    use std::string;
-    use std::unit_test::assert_eq;
-    use sui::bcs;
-    use sui::test_scenario::{Self as ts, Scenario};
+    use std::{string, unit_test::assert_eq};
+    use sui::{bcs, test_scenario::{Self as ts, Scenario}};
 
     const MEMBER: address = @0xA1;
     const OTHER_MEMBER: address = @0xB1;
