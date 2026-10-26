@@ -6,6 +6,7 @@
 #[test_only]
 module hauling_claim_tests::flow_tests {
     use agreement_roles::{claim, test_ou};
+    use agreements::payout;
     use agreements::spec::{Self, Spec};
     use armature::ou::OU;
     use hauling_agreements::{
@@ -67,9 +68,9 @@ module hauling_claim_tests::flow_tests {
 
     fun dst(): ID { object::id_from_address(@0xD5) }
 
-    fun cargo_spec(): Spec { spec::new(src(), ITEM, QTY) }
+    fun cargo_spec(): vector<Spec> { vector[spec::new(src(), ITEM, QTY)] }
 
-    fun want(): Spec { spec::new(dst(), ITEM, QTY) }
+    fun want(): vector<Spec> { vector[spec::new(dst(), ITEM, QTY)] }
 
     fun mint(collection: ID, asset_id: u64, qty: u64, scenario: &mut Scenario): Balance {
         multicoin::create_balance_for_testing(collection, asset_id, qty, scenario.ctx())
@@ -96,7 +97,7 @@ module hauling_claim_tests::flow_tests {
     /// event carries the gate as its only accept requirement.
     fun post(w: &mut World, gate: vector<Principal>): Posted {
         w.scenario.next_tx(LISTER);
-        let cargo = mint(src(), ITEM, QTY, &mut w.scenario);
+        let cargo = vector[mint(src(), ITEM, QTY, &mut w.scenario)];
         let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
         let terms = terms::new(want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY);
         let mut draft = test_config::draft_with_terms(
@@ -165,8 +166,8 @@ module hauling_claim_tests::flow_tests {
         };
         let collateral = test_config::mint(COLLATERAL_QTY, w.scenario.ctx());
         let cargo = agreement.finish_accept(req, collateral, &w.clock);
-        assert_eq!(cargo.value(), QTY);
-        transfer::public_transfer(cargo, who);
+        assert_eq!(spec::of_each(&cargo), cargo_spec());
+        payout::pay_all(cargo, who);
         let principal = if (org_id.is_some()) acl::ou(*org_id.borrow()) else acl::player(who);
         assert_eq!(
             event::events_by_type<claim::Claimed>(),
@@ -202,7 +203,8 @@ module hauling_claim_tests::flow_tests {
         w.clock.set_for_testing(DEADLINE_MS - 1);
         w.scenario.next_tx(OTHER);
         let agreement = w.scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(p.agreement_id);
-        agreement.deliver(mint(dst(), ITEM, QTY, &mut w.scenario), &w.clock, w.scenario.ctx());
+        let delivered = vector[mint(dst(), ITEM, QTY, &mut w.scenario)];
+        agreement.deliver(delivered, &w.clock, w.scenario.ctx());
         assert_eq!(
             event::events_by_type<AgreementDelivered>(),
             vector[

@@ -1,6 +1,7 @@
 #[test_only]
 module hauling_agreements::hauling_tests;
 
+use agreements::payout;
 use agreements::spec::{Self, Spec};
 use hauling_agreements::config;
 use hauling_agreements::hauling::{
@@ -52,7 +53,7 @@ fun mint(collection: ID, asset_id: u64, qty: u64, scenario: &mut Scenario): Bala
     multicoin::create_balance_for_testing(collection, asset_id, qty, scenario.ctx())
 }
 
-fun want(): Spec { spec::new(dst(), ITEM, CARGO_QTY) }
+fun want(): vector<Spec> { vector[spec::new(dst(), ITEM, CARGO_QTY)] }
 
 fun setup(): (Scenario, Clock) {
     let mut scenario = ts::begin(LISTER);
@@ -61,14 +62,14 @@ fun setup(): (Scenario, Clock) {
     (scenario, clock)
 }
 
-fun cargo_spec(): Spec { spec::new(src(), ITEM, CARGO_QTY) }
+fun cargo_spec(): vector<Spec> { vector[spec::new(src(), ITEM, CARGO_QTY)] }
 
 /// LISTER posts the standard agreement and keeps the cap. Returns
 /// `(agreement_id, cap_id)`; the posting transaction is still current, so its
 /// events remain visible to the caller.
 fun post(scenario: &mut Scenario, clock: &Clock): (ID, ID) {
     scenario.next_tx(LISTER);
-    let cargo = mint(src(), ITEM, CARGO_QTY, scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, clock,
@@ -86,7 +87,7 @@ fun accept(scenario: &mut Scenario, clock: &mut Clock) {
     let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
     let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, clock, scenario.ctx());
-    transfer::public_transfer(cargo, HAULER);
+    payout::pay_all(cargo, HAULER);
     ts::return_shared(agreement);
 }
 
@@ -139,7 +140,8 @@ fun post_then_accept_releases_cargo_and_locks_collateral() {
         assert_eq!(agreement.currency(), test_config::token());
         assert_eq!(agreement.collateral_amount(), COLLATERAL_QTY);
         assert_eq!(agreement.collateral_locked(), 0);
-        assert_eq!(multicoin::value(agreement.cargo().borrow()), CARGO_QTY);
+        assert_eq!(agreement.cargo_spec(), cargo_spec());
+        assert_eq!(spec::of_each(agreement.cargo().borrow()), cargo_spec());
         assert_eq!(agreement.reward(), REWARD_QTY);
         assert_eq!(agreement.deadline_ms(), 0);
         ts::return_shared(agreement);
@@ -178,7 +180,7 @@ fun deliver_pays_beneficiary_and_returns_reward_and_collateral() {
     // Anyone may submit the delivery; payouts are fixed.
     clock.set_for_testing(DEADLINE_MS - 1);
     scenario.next_tx(OTHER);
-    let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
+    let delivered = vector[mint(dst(), ITEM, CARGO_QTY, &mut scenario)];
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     assert_eq!(
@@ -247,8 +249,7 @@ fun cancel_returns_cargo_and_reward_to_cap_holder() {
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     assert_eq!(object::id(&agreement), agreement_id);
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
-    assert_eq!(multicoin::collection_id(&cargo), src());
-    assert_eq!(multicoin::value(&cargo), CARGO_QTY);
+    assert_eq!(spec::of_each(&cargo), cargo_spec());
     assert_eq!(reward.value(), REWARD_QTY);
     assert_eq!(
         event::events_by_type<AgreementCancelled>(),
@@ -258,7 +259,7 @@ fun cancel_returns_cargo_and_reward_to_cap_holder() {
             ),
         ],
     );
-    transfer::public_transfer(cargo, LISTER);
+    payout::pay_all(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
     finish(scenario, clock);
 }
@@ -273,7 +274,7 @@ fun cancel_after_accept_window_lapses() {
     let cap = scenario.take_from_sender<ListerCap>();
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
-    transfer::public_transfer(cargo, LISTER);
+    payout::pay_all(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
     finish(scenario, clock);
 }
@@ -314,7 +315,7 @@ fun delete_cap_after_delivery_reclaims_the_cap() {
     let (agreement_id, cap_id) = post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     scenario.next_tx(OTHER);
-    let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
+    let delivered = vector[mint(dst(), ITEM, CARGO_QTY, &mut scenario)];
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
 
@@ -329,11 +330,12 @@ fun delete_cap_after_delivery_reclaims_the_cap() {
     finish(scenario, clock);
 }
 
+/// An agreement may carry no cargo at all, only paying for delivery.
 #[test]
-fun close_lapsed_sends_nothing_for_empty_cargo_and_reward() {
+fun close_lapsed_sends_nothing_for_no_cargo_and_empty_reward() {
     let (mut scenario, mut clock) = setup();
     scenario.next_tx(LISTER);
-    let cargo = mint(src(), ITEM, 0, &mut scenario);
+    let cargo = vector[];
     let reward = test_config::mint(0, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, &clock,
@@ -354,12 +356,302 @@ fun close_lapsed_sends_nothing_for_empty_cargo_and_reward() {
     finish(scenario, clock);
 }
 
+// === Several items ===
+
+// A second and third item type, hauled alongside ITEM.
+const ORE: u64 = 8;
+const ORE_QTY: u64 = 3;
+const FUEL: u64 = 9;
+const FUEL_QTY: u64 = 25;
+
+fun mixed_cargo(scenario: &mut Scenario): vector<Balance> {
+    vector[
+        mint(src(), ITEM, CARGO_QTY, scenario),
+        mint(src(), ORE, ORE_QTY, scenario),
+        mint(src(), FUEL, FUEL_QTY, scenario),
+    ]
+}
+
+fun mixed_cargo_spec(): vector<Spec> {
+    vector[
+        spec::new(src(), ITEM, CARGO_QTY),
+        spec::new(src(), ORE, ORE_QTY),
+        spec::new(src(), FUEL, FUEL_QTY),
+    ]
+}
+
+fun mixed_want(): vector<Spec> {
+    vector[
+        spec::new(dst(), ITEM, CARGO_QTY),
+        spec::new(dst(), ORE, ORE_QTY),
+        spec::new(dst(), FUEL, FUEL_QTY),
+    ]
+}
+
+/// The mixed delivery, in `mixed_want`'s order unless `swap` swaps the first
+/// two items.
+fun mixed_delivery(swap: bool, scenario: &mut Scenario): vector<Balance> {
+    let mut delivered = vector[
+        mint(dst(), ITEM, CARGO_QTY, scenario),
+        mint(dst(), ORE, ORE_QTY, scenario),
+        mint(dst(), FUEL, FUEL_QTY, scenario),
+    ];
+    if (swap) delivered.swap(0, 1);
+    delivered
+}
+
+/// LISTER posts the three-item agreement. Returns `(agreement_id, cap_id)`.
+fun post_mixed(scenario: &mut Scenario, clock: &Clock): (ID, ID) {
+    scenario.next_tx(LISTER);
+    let cargo = mixed_cargo(scenario);
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, mixed_want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, clock,
+        scenario.ctx(),
+    );
+    let (agreement_id, cap_id) = (cap.cap_agreement_id(), object::id(&cap));
+    transfer::public_transfer(cap, LISTER);
+    (agreement_id, cap_id)
+}
+
+/// One hauler takes the whole mixed cargo under one reward and one collateral,
+/// and delivers every item to the beneficiary.
+#[test]
+fun mixed_cargo_is_hauled_as_one_job() {
+    let (mut scenario, mut clock) = setup();
+    let (agreement_id, cap_id) = post_mixed(&mut scenario, &clock);
+    assert_eq!(
+        event::events_by_type<AgreementPosted>(),
+        vector[
+            hauling::posted_event_for_testing(
+                agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false,
+                mixed_cargo_spec(), mixed_want(), test_config::token(), REWARD_QTY,
+                COLLATERAL_QTY, START_MS, ACCEPT_BY_MS, HAUL_MS, vector[], option::none(),
+                option::none(), option::none(), 0, test_config::treasury(),
+            ),
+        ],
+    );
+
+    clock.set_for_testing(ACCEPT_AT_MS);
+    scenario.next_tx(HAULER);
+    let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
+    let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
+    let cargo = agreement.accept(collateral, &clock, scenario.ctx());
+    // Released in the order it was escrowed.
+    assert_eq!(spec::of_each(&cargo), mixed_cargo_spec());
+    assert_eq!(agreement.cargo_spec(), mixed_cargo_spec());
+    assert!(agreement.cargo().is_none());
+    payout::pay_all(cargo, HAULER);
+    ts::return_shared(agreement);
+
+    scenario.next_tx(HAULER);
+    let delivered = mixed_delivery(false, &mut scenario);
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
+    agreement.deliver(delivered, &clock, scenario.ctx());
+    assert_eq!(
+        event::events_by_type<AgreementDelivered>(),
+        vector[
+            hauling::delivered_event_for_testing(
+                agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, mixed_want(),
+                test_config::token(), REWARD_QTY, COLLATERAL_QTY, 0, test_config::treasury(),
+                option::none(),
+            ),
+        ],
+    );
+
+    scenario.next_tx(OTHER);
+    assert_eq!(ts::ids_for_address<Balance>(BENEFICIARY).length(), 3);
+    assert_eq!(coins(&scenario, HAULER), REWARD_QTY + COLLATERAL_QTY);
+    // Owned objects can be taken once per transaction: one query per item.
+    mixed_want().do!(|item| {
+        scenario.next_tx(OTHER);
+        assert_eq!(owned(&scenario, BENEFICIARY, dst(), item.asset_id()), item.qty());
+    });
+    scenario.next_tx(OTHER);
+    assert_eq!(owned(&scenario, HAULER, src(), ORE), ORE_QTY);
+    finish(scenario, clock);
+}
+
+#[test]
+fun cancel_returns_every_cargo_item_in_order() {
+    let (mut scenario, clock) = setup();
+    let (agreement_id, _) = post_mixed(&mut scenario, &clock);
+    scenario.next_tx(LISTER);
+    let cap = scenario.take_from_sender<ListerCap>();
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
+    let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
+    assert_eq!(spec::of_each(&cargo), mixed_cargo_spec());
+    assert_eq!(
+        event::events_by_type<AgreementCancelled>(),
+        vector[
+            hauling::cancelled_event_for_testing(
+                agreement_id, LISTER, mixed_cargo_spec(), test_config::token(), REWARD_QTY,
+            ),
+        ],
+    );
+    payout::pay_all(cargo, LISTER);
+    transfer::public_transfer(reward, LISTER);
+    finish(scenario, clock);
+}
+
+#[test]
+fun close_lapsed_returns_every_cargo_item_to_lister() {
+    let (mut scenario, mut clock) = setup();
+    post_mixed(&mut scenario, &clock);
+    clock.set_for_testing(ACCEPT_BY_MS);
+    scenario.next_tx(ADMIN);
+    let admin_cap = config::new_admin_cap_for_testing(scenario.ctx());
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
+    agreement.close_lapsed(&admin_cap, &clock, scenario.ctx());
+    transfer::public_transfer(admin_cap, ADMIN);
+
+    mixed_cargo_spec().do!(|item| {
+        scenario.next_tx(OTHER);
+        assert_eq!(owned(&scenario, LISTER, src(), item.asset_id()), item.qty());
+    });
+    finish(scenario, clock);
+}
+
+/// A delivery hands in its balances in `want`'s order.
+#[test, expected_failure(abort_code = spec::EWrongAsset)]
+fun deliver_rejects_items_out_of_order() {
+    let (mut scenario, mut clock) = setup();
+    post_mixed(&mut scenario, &clock);
+    accept(&mut scenario, &mut clock);
+    scenario.next_tx(HAULER);
+    let delivered = mixed_delivery(true, &mut scenario);
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
+    agreement.deliver(delivered, &clock, scenario.ctx());
+    finish(scenario, clock);
+}
+
+/// Every item must arrive: a partial delivery pays nothing.
+#[test, expected_failure(abort_code = spec::EWrongCount)]
+fun deliver_rejects_a_missing_item() {
+    let (mut scenario, mut clock) = setup();
+    post_mixed(&mut scenario, &clock);
+    accept(&mut scenario, &mut clock);
+    scenario.next_tx(HAULER);
+    let mut delivered = mixed_delivery(false, &mut scenario);
+    payout::pay_all(vector[delivered.pop_back()], HAULER);
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
+    agreement.deliver(delivered, &clock, scenario.ctx());
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = spec::EWrongAmount)]
+fun deliver_rejects_one_short_item() {
+    let (mut scenario, mut clock) = setup();
+    post_mixed(&mut scenario, &clock);
+    accept(&mut scenario, &mut clock);
+    scenario.next_tx(HAULER);
+    let delivered = vector[
+        mint(dst(), ITEM, CARGO_QTY, &mut scenario),
+        mint(dst(), ORE, ORE_QTY - 1, &mut scenario),
+        mint(dst(), FUEL, FUEL_QTY, &mut scenario),
+    ];
+    let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
+    agreement.deliver(delivered, &clock, scenario.ctx());
+    finish(scenario, clock);
+}
+
+/// Want may list items the cargo doesn't, and leave out ones it does.
+#[test]
+fun post_allows_want_unlike_the_cargo() {
+    let (mut scenario, clock) = setup();
+    let cargo = mixed_cargo(&mut scenario);
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, vector[spec::new(dst(), ITEM + 100, 1)], COLLATERAL_QTY, ACCEPT_MS,
+        HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
+/// No entry of want may name an item the cargo holds, wherever it sits in
+/// either list.
+#[test, expected_failure(abort_code = terms::EInvalidTerms)]
+fun post_rejects_want_sharing_any_cargo_item() {
+    let (mut scenario, clock) = setup();
+    let cargo = mixed_cargo(&mut scenario);
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, vector[spec::new(dst(), ITEM, CARGO_QTY), spec::new(src(), FUEL, 1)],
+        COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = hauling::EInvalidCargo)]
+fun post_rejects_an_empty_cargo_balance() {
+    let (mut scenario, clock) = setup();
+    let cargo = vector[
+        mint(src(), ITEM, CARGO_QTY, &mut scenario),
+        mint(src(), ORE, 0, &mut scenario),
+    ];
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, &clock,
+        scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
+/// The same item twice belongs in one balance: join them before posting.
+#[test, expected_failure(abort_code = hauling::EInvalidCargo)]
+fun post_rejects_a_repeated_cargo_item() {
+    let (mut scenario, clock) = setup();
+    let cargo = vector[
+        mint(src(), ITEM, CARGO_QTY, &mut scenario),
+        mint(src(), ITEM, 1, &mut scenario),
+    ];
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, &clock,
+        scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = hauling::EInvalidCargo)]
+fun post_rejects_cargo_over_max_items() {
+    let (mut scenario, clock) = setup();
+    let cargo = vector::tabulate!(
+        terms::max_items() + 1,
+        |i| mint(src(), 1_000 + i, 1, &mut scenario),
+    );
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, &clock,
+        scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
+#[test]
+fun post_allows_cargo_of_max_items() {
+    let (mut scenario, clock) = setup();
+    let cargo = vector::tabulate!(terms::max_items(), |i| mint(src(), 1_000 + i, 1, &mut scenario));
+    let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+    let cap = test_config::post(
+        cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY, &clock,
+        scenario.ctx(),
+    );
+    transfer::public_transfer(cap, LISTER);
+    finish(scenario, clock);
+}
+
 // === Posting ===
 
 #[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_zero_accept_window() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), COLLATERAL_QTY, 0, HAUL_MS, BENEFICIARY, &clock,
@@ -372,7 +664,7 @@ fun post_rejects_zero_accept_window() {
 #[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_zero_haul_window() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, 0, BENEFICIARY, &clock,
@@ -385,10 +677,10 @@ fun post_rejects_zero_haul_window() {
 #[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_zero_want() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, spec::new(dst(), ITEM, 0), COLLATERAL_QTY, ACCEPT_MS,
+        cargo, reward, vector[spec::new(dst(), ITEM, 0)], COLLATERAL_QTY, ACCEPT_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
@@ -398,7 +690,7 @@ fun post_rejects_zero_want() {
 #[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_zero_collateral() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), 0, ACCEPT_MS,
@@ -412,7 +704,7 @@ fun post_rejects_zero_collateral() {
 #[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_want_the_cargo_already_satisfies() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, cargo_spec(), COLLATERAL_QTY, ACCEPT_MS,
@@ -425,10 +717,10 @@ fun post_rejects_want_the_cargo_already_satisfies() {
 #[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_want_of_part_of_the_cargo() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, spec::new(src(), ITEM, 1), COLLATERAL_QTY, ACCEPT_MS,
+        cargo, reward, vector[spec::new(src(), ITEM, 1)], COLLATERAL_QTY, ACCEPT_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
@@ -438,10 +730,10 @@ fun post_rejects_want_of_part_of_the_cargo() {
 #[test]
 fun post_allows_another_asset_in_the_cargo_collection() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
-        cargo, reward, spec::new(src(), ITEM + 1, CARGO_QTY), COLLATERAL_QTY, ACCEPT_MS,
+        cargo, reward, vector[spec::new(src(), ITEM + 1, CARGO_QTY)], COLLATERAL_QTY, ACCEPT_MS,
         HAUL_MS, BENEFICIARY, &clock, scenario.ctx(),
     );
     transfer::public_transfer(cap, LISTER);
@@ -452,7 +744,7 @@ fun post_allows_another_asset_in_the_cargo_collection() {
 fun post_allows_windows_of_max_duration() {
     let (mut scenario, clock) = setup();
     let max = terms::max_duration_ms();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), COLLATERAL_QTY, max, max, BENEFICIARY, &clock,
@@ -465,7 +757,7 @@ fun post_allows_windows_of_max_duration() {
 #[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_accept_window_over_max() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), COLLATERAL_QTY, terms::max_duration_ms() + 1,
@@ -478,7 +770,7 @@ fun post_rejects_accept_window_over_max() {
 #[test, expected_failure(abort_code = terms::EInvalidTerms)]
 fun post_rejects_haul_window_over_max() {
     let (mut scenario, clock) = setup();
-    let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+    let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
     let reward = test_config::mint(REWARD_QTY, scenario.ctx());
     let cap = test_config::post(
         cargo, reward, want(), COLLATERAL_QTY, ACCEPT_MS, terms::max_duration_ms() + 1,
@@ -499,7 +791,7 @@ fun accept_rejects_at_accept_by() {
     let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
     let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
-    transfer::public_transfer(cargo, HAULER);
+    payout::pay_all(cargo, HAULER);
     ts::return_shared(agreement);
     finish(scenario, clock);
 }
@@ -516,7 +808,7 @@ fun accept_allowed_just_before_accept_by() {
     let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
     assert_eq!(agreement.deadline_ms(), ACCEPT_BY_MS - 1 + HAUL_MS);
-    transfer::public_transfer(cargo, HAULER);
+    payout::pay_all(cargo, HAULER);
     ts::return_shared(agreement);
     finish(scenario, clock);
 }
@@ -530,7 +822,7 @@ fun accept_rejects_second_hauler() {
     let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
     let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
-    transfer::public_transfer(cargo, OTHER);
+    payout::pay_all(cargo, OTHER);
     ts::return_shared(agreement);
     finish(scenario, clock);
 }
@@ -545,7 +837,7 @@ fun accept_rejects_short_collateral() {
     let collateral = test_config::mint(COLLATERAL_QTY - 1, scenario.ctx());
     let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
-    transfer::public_transfer(cargo, HAULER);
+    payout::pay_all(cargo, HAULER);
     ts::return_shared(agreement);
     finish(scenario, clock);
 }
@@ -559,7 +851,7 @@ fun accept_rejects_excess_collateral() {
     let collateral = test_config::mint(COLLATERAL_QTY + 1, scenario.ctx());
     let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
-    transfer::public_transfer(cargo, HAULER);
+    payout::pay_all(cargo, HAULER);
     ts::return_shared(agreement);
     finish(scenario, clock);
 }
@@ -572,7 +864,7 @@ fun accept_rejects_empty_collateral() {
     let collateral = test_config::mint(0, scenario.ctx());
     let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let cargo = agreement.accept(collateral, &clock, scenario.ctx());
-    transfer::public_transfer(cargo, HAULER);
+    payout::pay_all(cargo, HAULER);
     ts::return_shared(agreement);
     finish(scenario, clock);
 }
@@ -584,7 +876,7 @@ fun deliver_rejects_open_agreement() {
     let (mut scenario, clock) = setup();
     post(&mut scenario, &clock);
     scenario.next_tx(HAULER);
-    let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
+    let delivered = vector[mint(dst(), ITEM, CARGO_QTY, &mut scenario)];
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
@@ -597,7 +889,7 @@ fun deliver_rejects_at_deadline() {
     accept(&mut scenario, &mut clock);
     clock.set_for_testing(DEADLINE_MS);
     scenario.next_tx(HAULER);
-    let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
+    let delivered = vector[mint(dst(), ITEM, CARGO_QTY, &mut scenario)];
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
@@ -612,7 +904,7 @@ fun deliver_rejects_source_collection() {
     scenario.next_tx(HAULER);
     let cargo = scenario.take_from_sender<Balance>();
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
-    agreement.deliver(cargo, &clock, scenario.ctx());
+    agreement.deliver(vector[cargo], &clock, scenario.ctx());
     finish(scenario, clock);
 }
 
@@ -622,7 +914,7 @@ fun deliver_rejects_partial_quantity() {
     post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     scenario.next_tx(HAULER);
-    let delivered = mint(dst(), ITEM, CARGO_QTY - 1, &mut scenario);
+    let delivered = vector[mint(dst(), ITEM, CARGO_QTY - 1, &mut scenario)];
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
@@ -635,7 +927,7 @@ fun deliver_rejects_excess_quantity() {
     post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     scenario.next_tx(HAULER);
-    let delivered = mint(dst(), ITEM, CARGO_QTY + 1, &mut scenario);
+    let delivered = vector[mint(dst(), ITEM, CARGO_QTY + 1, &mut scenario)];
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
@@ -647,7 +939,7 @@ fun deliver_rejects_wrong_item_type() {
     post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     scenario.next_tx(HAULER);
-    let delivered = mint(dst(), ITEM + 1, CARGO_QTY, &mut scenario);
+    let delivered = vector[mint(dst(), ITEM + 1, CARGO_QTY, &mut scenario)];
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     agreement.deliver(delivered, &clock, scenario.ctx());
     finish(scenario, clock);
@@ -741,7 +1033,7 @@ fun cancel_rejects_accepted_agreement() {
     let cap = scenario.take_from_sender<ListerCap>();
     let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
     let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
-    transfer::public_transfer(cargo, LISTER);
+    payout::pay_all(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
     finish(scenario, clock);
 }
@@ -760,7 +1052,7 @@ fun cancel_rejects_other_agreements_cap() {
     let second_cap = scenario.take_from_sender<ListerCap>();
     let first = scenario.take_shared_by_id<HaulingAgreement<TOKEN>>(first_id);
     let (cargo, reward) = first.cancel(second_cap, &clock, scenario.ctx());
-    transfer::public_transfer(cargo, LISTER);
+    payout::pay_all(cargo, LISTER);
     transfer::public_transfer(reward, LISTER);
     finish(scenario, clock);
 }
