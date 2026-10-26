@@ -165,10 +165,10 @@ let (cargo, reward) = agreement.cancel(cap, &clock, ctx);   // Balance, Coin<T>
 **When:** the agreement ended by `deliver`, `default`, `forfeit` or `close_lapsed`, and you still hold its `ListerCap`. For terms that pay the cap holder, collect instead ([L7](#l7-collect-proceeds)): `delete_cap` aborts with `ECapReceivesProceeds` for such a cap, since deleting it would strand its proceeds.
 
 ```move
-hauling::delete_cap(cap);
+hauling::delete_cap(cap, ctx);
 ```
 
-- **Result:** the cap is deleted and its storage rebate goes to the gas payer. Nothing else changes.
+- **Result:** the cap is deleted, its storage rebate goes to the gas payer, and `ListerCapDeleted` is emitted. Nothing else changes.
 - **Deleting it while the agreement is open gives up the right to cancel.** Only the config admin's `close_lapsed` can end the listing then.
 
 ### L6. Post with payouts to the cap holder
@@ -188,7 +188,7 @@ transfer::public_transfer(cap, custodian);   // or store it in the wrapper's own
 
 ### L7. Collect proceeds
 
-**When:** an agreement on terms that pay the cap holder ended by `deliver`, `default`, `forfeit` or `close_lapsed`, and you hold its cap. Find the `Proceeds<T>` by listing the objects owned by the cap's address.
+**When:** an agreement on terms that pay the cap holder ended by `deliver`, `default`, `forfeit` or `close_lapsed`, and you hold its cap. The ending's event (`AgreementDelivered`, `AgreementDefaulted` or `AgreementLapsed`) names the `Proceeds<T>` in `proceeds_id`; listing the objects owned by the cap's address finds it too.
 
 ```move
 let (items, coins) = hauling::collect<T>(cap, proceeds);   // proceeds: Receiving<Proceeds<T>>
@@ -197,7 +197,7 @@ let (items, coins) = hauling::collect<T>(cap, proceeds);   // proceeds: Receivin
 //        and empty after a delivery
 ```
 
-- **Result:** the proceeds and the cap are deleted, and their storage rebate goes to the gas payer. The results compose in the same PTB, for example straight into a vault deposit.
+- **Result:** the proceeds and the cap are deleted, their storage rebate goes to the gas payer, and `ProceedsCollected` is emitted with what they held. The results compose in the same PTB, for example straight into a vault deposit.
 - **Fails with:** `sui::transfer::EUnableToReceiveObject` for proceeds sent to another cap.
 
 ---
@@ -344,7 +344,9 @@ public fun ingest(ledger: &mut Ledger, ticket: Receiving<OutcomeRecord>) {
 | Approved currencies | `config::ConfigUpdated.currencies`, the whole list after each change |
 | Which rules an agreement uses | `AgreementPosted.accept_requirements`, `.identity_rule`, `.observer` |
 | Who an agreement was posted for | `AgreementPosted.on_behalf_of`: the entity and the wrapper type that vouched for it |
-| Proceeds waiting for a cap | `AgreementPosted.pays_cap_holder` with a terminal event; the `Proceeds` objects owned by the cap's address (`beneficiary`) |
+| Proceeds waiting for a cap | `proceeds_id` in `AgreementDelivered`, `AgreementDefaulted` or `AgreementLapsed`, until a `ProceedsCollected` names it |
+| Caps still alive | `AgreementPosted.cap_id`, until `AgreementCancelled`, `ProceedsCollected` or `ListerCapDeleted` for that agreement. Transfers have no event: read who holds a cap from its object's owner |
+| When a job was posted or accepted | `AgreementPosted.posted_at_ms`; accepted at `AgreementAccepted.deadline_ms` minus `AgreementPosted.haul_ms` |
 | Who may take a gated job | The claim gate in `AgreementPosted.accept_requirements`, decoded with `claim::principals_of`; for `Ou` principals, the OU's board from armature's board events |
 | Which OU a gated job was taken for | `claim::Claimed.principal` (an `Ou` principal) where `Claimed.action` is `hauling::AcceptAction` under `hauling_agreements`' original package ID, joined to `AgreementAccepted` by `agreement_id`. Drop claims with any other `action`: anyone can emit one naming a real agreement from an action type of their own |
 | Overdue jobs | No event: `AgreementAccepted.deadline_ms` before the latest checkpoint time, with no terminal event |

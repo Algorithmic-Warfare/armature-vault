@@ -14,7 +14,8 @@ module hauling_agreements::proceeds_tests {
             AgreementPosted,
             AgreementDelivered,
             AgreementDefaulted,
-            AgreementLapsed
+            AgreementLapsed,
+            ProceedsCollected
         },
         terms::{Self, Terms},
         test_config::{Self, TOKEN}
@@ -132,7 +133,14 @@ module hauling_agreements::proceeds_tests {
         transfer::public_transfer(admin_cap, ADMIN);
     }
 
-    /// In a new transaction, `holder` collects the proceeds sent to cap `cap_id`.
+    /// The `Proceeds` waiting at cap `cap_id`. Call it once the transaction that
+    /// sent them has finished.
+    fun proceeds_at(cap_id: ID): ID {
+        ts::most_recent_id_for_address<Proceeds<TOKEN>>(cap_id.to_address()).destroy_some()
+    }
+
+    /// In a new transaction, `holder` collects the proceeds sent to cap `cap_id`,
+    /// and `ProceedsCollected` reports what came out.
     fun collect(
         holder: address,
         cap_id: ID,
@@ -140,8 +148,25 @@ module hauling_agreements::proceeds_tests {
     ): (Option<Balance>, Coin<TOKEN>) {
         scenario.next_tx(holder);
         let cap = scenario.take_from_sender_by_id<ListerCap>(cap_id);
+        let agreement_id = cap.cap_agreement_id();
+        let proceeds_id = proceeds_at(cap_id);
         let ticket = ts::most_recent_receiving_ticket<Proceeds<TOKEN>>(&cap_id);
-        cap.collect(ticket, scenario.ctx())
+        let (items, coins) = cap.collect(ticket, scenario.ctx());
+        assert_eq!(
+            event::events_by_type<ProceedsCollected>(),
+            vector[
+                hauling::collected_event_for_testing(
+                    agreement_id,
+                    cap_id,
+                    proceeds_id,
+                    holder,
+                    items.map_ref!(|balance| spec::of(balance)),
+                    test_config::token(),
+                    coins.value(),
+                ),
+            ],
+        );
+        (items, coins)
     }
 
     /// Nothing reached LISTER's own address, and LISTER no longer holds a cap.
@@ -173,6 +198,7 @@ module hauling_agreements::proceeds_tests {
                     test_config::token(),
                     REWARD_QTY,
                     COLLATERAL_QTY,
+                    START_MS,
                     ACCEPT_BY_MS,
                     HAUL_MS,
                     vector[],
@@ -205,8 +231,10 @@ module hauling_agreements::proceeds_tests {
         let (agreement_id, cap_id) = post(&mut scenario, &clock);
         accept(&mut scenario, &mut clock);
         deliver(&mut scenario, &mut clock);
+        let delivered = event::events_by_type<AgreementDelivered>();
+        scenario.next_tx(OTHER);
         assert_eq!(
-            event::events_by_type<AgreementDelivered>(),
+            delivered,
             vector[
                 hauling::delivered_event_for_testing(
                     agreement_id,
@@ -220,11 +248,11 @@ module hauling_agreements::proceeds_tests {
                     COLLATERAL_QTY,
                     0,
                     test_config::treasury(),
+                    option::some(proceeds_at(cap_id)),
                 ),
             ],
         );
         // The hauler is paid at their own address as usual.
-        scenario.next_tx(OTHER);
         assert_eq!(test_config::coins<TOKEN>(&scenario, HAULER), REWARD_QTY + COLLATERAL_QTY);
 
         let (items, coins) = collect(LISTER, cap_id, &mut scenario);
@@ -246,8 +274,10 @@ module hauling_agreements::proceeds_tests {
         scenario.next_tx(OTHER);
         let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         agreement.default(&clock, scenario.ctx());
+        let defaulted = event::events_by_type<AgreementDefaulted>();
+        scenario.next_tx(OTHER);
         assert_eq!(
-            event::events_by_type<AgreementDefaulted>(),
+            defaulted,
             vector[
                 hauling::defaulted_event_for_testing(
                     agreement_id,
@@ -259,6 +289,7 @@ module hauling_agreements::proceeds_tests {
                     REWARD_QTY,
                     COLLATERAL_QTY,
                     false,
+                    option::some(proceeds_at(cap_id)),
                 ),
             ],
         );
@@ -281,8 +312,10 @@ module hauling_agreements::proceeds_tests {
         scenario.next_tx(HAULER);
         let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         agreement.forfeit(&clock, scenario.ctx());
+        let defaulted = event::events_by_type<AgreementDefaulted>();
+        scenario.next_tx(OTHER);
         assert_eq!(
-            event::events_by_type<AgreementDefaulted>(),
+            defaulted,
             vector[
                 hauling::defaulted_event_for_testing(
                     agreement_id,
@@ -294,6 +327,7 @@ module hauling_agreements::proceeds_tests {
                     REWARD_QTY,
                     COLLATERAL_QTY,
                     true,
+                    option::some(proceeds_at(cap_id)),
                 ),
             ],
         );
@@ -313,8 +347,10 @@ module hauling_agreements::proceeds_tests {
         let (mut scenario, mut clock) = setup();
         let (agreement_id, cap_id) = post(&mut scenario, &clock);
         close_lapsed(agreement_id, &mut scenario, &mut clock);
+        let lapsed = event::events_by_type<AgreementLapsed>();
+        scenario.next_tx(OTHER);
         assert_eq!(
-            event::events_by_type<AgreementLapsed>(),
+            lapsed,
             vector[
                 hauling::lapsed_event_for_testing(
                     agreement_id,
@@ -324,6 +360,7 @@ module hauling_agreements::proceeds_tests {
                     cargo_spec(),
                     test_config::token(),
                     REWARD_QTY,
+                    option::some(proceeds_at(cap_id)),
                 ),
             ],
         );
@@ -402,7 +439,7 @@ module hauling_agreements::proceeds_tests {
         accept(&mut scenario, &mut clock);
         deliver(&mut scenario, &mut clock);
         scenario.next_tx(LISTER);
-        hauling::delete_cap(scenario.take_from_sender<ListerCap>());
+        hauling::delete_cap(scenario.take_from_sender<ListerCap>(), scenario.ctx());
         finish(scenario, clock);
     }
 

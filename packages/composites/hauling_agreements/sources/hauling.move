@@ -263,8 +263,13 @@ public struct OutcomeRecord has key {
 // Terminal events delete the agreement, so each one records who received
 // what; indexers need not join back to `AgreementPosted` to notify parties.
 // When the terms pay the cap holder, the beneficiary is the cap's address and
-// the lister's side arrives there as one `Proceeds`. `currency` is the coin
-// type of every reward, collateral and delivery fee amount in the event.
+// the lister's side arrives there as one `Proceeds`, named by the terminal
+// event's `proceeds_id`. `currency` is the coin type of every reward,
+// collateral, delivery fee and proceeds amount in the event.
+//
+// Every way a `ListerCap` ends has an event: `AgreementCancelled` for
+// `cancel`, `ProceedsCollected` for `collect` and `ListerCapDeleted` for
+// `delete_cap`. Only transfers of the cap have none.
 
 public struct AgreementPosted has copy, drop {
     agreement_id: ID,
@@ -283,6 +288,8 @@ public struct AgreementPosted has copy, drop {
     currency: TypeName,
     reward: u64,
     collateral: u64,
+    /// Drafting time, from the `Clock`.
+    posted_at_ms: u64,
     accept_by_ms: u64,
     haul_ms: u64,
     /// In the order an accepting transaction must satisfy them.
@@ -320,6 +327,8 @@ public struct AgreementDelivered has copy, drop {
     collateral: u64,
     delivery_fee: u64,
     treasury: address,
+    /// The `Proceeds` holding `delivered`, when the terms pay the cap holder.
+    proceeds_id: Option<ID>,
 }
 
 /// `reward` and `collateral` went to `beneficiary`; `hauler` kept the cargo.
@@ -335,6 +344,9 @@ public struct AgreementDefaulted has copy, drop {
     reward: u64,
     collateral: u64,
     forfeited: bool,
+    /// The `Proceeds` holding reward and collateral, when the terms pay the
+    /// cap holder.
+    proceeds_id: Option<ID>,
 }
 
 /// `cargo` and `reward` were returned to the caller holding the cap.
@@ -358,6 +370,31 @@ public struct AgreementLapsed has copy, drop {
     cargo: Spec,
     currency: TypeName,
     reward: u64,
+    /// The `Proceeds` holding cargo and reward, when the terms pay the cap
+    /// holder.
+    proceeds_id: Option<ID>,
+}
+
+/// The holder of `cap_id` opened `proceeds_id` with `collect`, deleting both.
+/// `items` is what the proceeds held, `none` after a default or forfeit or for
+/// a lapsed listing with empty cargo, and `coins` its amount of `currency`.
+/// `collected_by` sent the transaction, which received them.
+public struct ProceedsCollected has copy, drop {
+    agreement_id: ID,
+    cap_id: ID,
+    proceeds_id: ID,
+    collected_by: address,
+    items: Option<Spec>,
+    currency: TypeName,
+    coins: u64,
+}
+
+/// `delete_cap` deleted `cap_id`, a spent cap for a beneficiary address.
+/// `deleted_by` sent the transaction.
+public struct ListerCapDeleted has copy, drop {
+    agreement_id: ID,
+    cap_id: ID,
+    deleted_by: address,
 }
 
 // === Drafting ===
@@ -478,6 +515,7 @@ public fun publish<T>(draft: Draft<T>): ListerCap {
         currency: type_name::with_original_ids<T>(),
         reward: agreement.reward.value(),
         collateral: agreement.terms.collateral(),
+        posted_at_ms: agreement.posted_at_ms,
         accept_by_ms: agreement.accept_by_ms,
         haul_ms: agreement.terms.haul_ms(),
         accept_requirements: agreement.accept_requirements,
@@ -588,22 +626,28 @@ public fun deliver<T>(
     let (beneficiary, hauler, mut reward, collateral) = close(self);
     let delivery_fee = config::delivery_fee_on(reward.value(), fee_bps);
     pay(reward.split(delivery_fee), treasury, ctx);
+    let delivered_spec = spec::of(&delivered);
+    let proceeds_id = if (to_cap) {
+        let items = option::some(delivered);
+        option::some(send_proceeds<T>(agreement_id, items, balance::zero(), beneficiary, ctx))
+    } else {
+        transfer::public_transfer(delivered, beneficiary);
+        option::none()
+    };
     event::emit(AgreementDelivered {
         agreement_id,
         lister,
         hauler,
         hauler_identity,
         beneficiary,
-        delivered: spec::of(&delivered),
+        delivered: delivered_spec,
         currency: type_name::with_original_ids<T>(),
         reward: reward.value(),
         collateral: collateral.value(),
         delivery_fee,
         treasury,
+        proceeds_id,
     });
-    if (to_cap) {
-        send_proceeds<T>(agreement_id, option::some(delivered), balance::zero(), beneficiary, ctx)
-    } else transfer::public_transfer(delivered, beneficiary);
     pay(reward, hauler, ctx);
     pay(collateral, hauler, ctx);
 }
@@ -678,32 +722,46 @@ public fun close_lapsed<T>(
     let to_cap = self.terms.pays_cap_holder();
     let refunded_to = if (to_cap) self.beneficiary else lister;
     let (cargo, reward) = close_open(self);
+    let (cargo_spec, reward_amount) = (spec::of(&cargo), reward.value());
+    let proceeds_id = if (to_cap) {
+        option::some(send_proceeds(agreement_id, non_empty(cargo), reward, refunded_to, ctx))
+    } else {
+        payout::pay(cargo, lister);
+        pay(reward, lister, ctx);
+        option::none()
+    };
     event::emit(AgreementLapsed {
         agreement_id,
         lister,
         refunded_to,
         closed_by: ctx.sender(),
-        cargo: spec::of(&cargo),
+        cargo: cargo_spec,
         currency: type_name::with_original_ids<T>(),
-        reward: reward.value(),
+        reward: reward_amount,
+        proceeds_id,
     });
-    if (to_cap) send_proceeds(agreement_id, non_empty(cargo), reward, refunded_to, ctx)
-    else {
-        payout::pay(cargo, lister);
-        pay(reward, lister, ctx);
-    }
 }
 
 /// Open the `Proceeds` sent to `cap` and delete both, returning the items, if
 /// any, and the coins. Only an agreement whose terms pay the cap holder sends
 /// proceeds, exactly once, when it ends by `deliver`, `default`, `forfeit` or
-/// `close_lapsed`; `cancel` returns its escrow directly instead.
+/// `close_lapsed`; `cancel` returns its escrow directly instead. Emits
+/// `ProceedsCollected`.
 public fun collect<T>(
     mut cap: ListerCap,
     proceeds: Receiving<Proceeds<T>>,
     ctx: &mut TxContext,
 ): (Option<Balance>, Coin<T>) {
-    let Proceeds { id, items, coins, .. } = transfer::receive(&mut cap.id, proceeds);
+    let Proceeds { id, agreement_id, items, coins } = transfer::receive(&mut cap.id, proceeds);
+    event::emit(ProceedsCollected {
+        agreement_id,
+        cap_id: object::id(&cap),
+        proceeds_id: id.to_inner(),
+        collected_by: ctx.sender(),
+        items: items.map_ref!(|balance| spec::of(balance)),
+        currency: type_name::with_original_ids<T>(),
+        coins: coins.value(),
+    });
     id.delete();
     let ListerCap { id, .. } = cap;
     id.delete();
@@ -714,10 +772,16 @@ public fun collect<T>(
 /// ended by `deliver`, `default`, `forfeit` or `close_lapsed`. Deleting it
 /// while the agreement is still open gives up the right to cancel, leaving
 /// `close_lapsed` as the only way to end it. Aborts for a cap that receives
-/// its agreement's proceeds, which must be collected with it instead.
-public fun delete_cap(cap: ListerCap) {
-    let ListerCap { id, receives_proceeds, .. } = cap;
+/// its agreement's proceeds, which must be collected with it instead. Emits
+/// `ListerCapDeleted`.
+public fun delete_cap(cap: ListerCap, ctx: &TxContext) {
+    let ListerCap { id, agreement_id, receives_proceeds } = cap;
     assert!(!receives_proceeds, ECapReceivesProceeds);
+    event::emit(ListerCapDeleted {
+        agreement_id,
+        cap_id: id.to_inner(),
+        deleted_by: ctx.sender(),
+    });
     id.delete();
 }
 
@@ -937,6 +1001,15 @@ fun pay_default<T>(
     let hauler_identity = self.hauler_identity;
     let to_cap = self.terms.pays_cap_holder();
     let (beneficiary, hauler, mut reward, collateral) = close(self);
+    let (reward_amount, collateral_amount) = (reward.value(), collateral.value());
+    let proceeds_id = if (to_cap) {
+        reward.join(collateral);
+        option::some(send_proceeds(agreement_id, option::none(), reward, beneficiary, ctx))
+    } else {
+        pay(reward, beneficiary, ctx);
+        pay(collateral, beneficiary, ctx);
+        option::none()
+    };
     event::emit(AgreementDefaulted {
         agreement_id,
         lister,
@@ -944,17 +1017,11 @@ fun pay_default<T>(
         hauler_identity,
         beneficiary,
         currency: type_name::with_original_ids<T>(),
-        reward: reward.value(),
-        collateral: collateral.value(),
+        reward: reward_amount,
+        collateral: collateral_amount,
         forfeited,
+        proceeds_id,
     });
-    if (to_cap) {
-        reward.join(collateral);
-        send_proceeds(agreement_id, option::none(), reward, beneficiary, ctx)
-    } else {
-        pay(reward, beneficiary, ctx);
-        pay(collateral, beneficiary, ctx);
-    }
 }
 
 fun close<T>(
@@ -986,14 +1053,18 @@ fun pay<T>(funds: balance::Balance<T>, to: address, ctx: &mut TxContext) {
 
 /// Send the lister's side to the agreement's cap at `cap` as one `Proceeds`,
 /// even an empty one: the cap holder needs it to `collect` and close the cap.
+/// Returns the proceeds' ID.
 fun send_proceeds<T>(
     agreement_id: ID,
     items: Option<Balance>,
     coins: balance::Balance<T>,
     cap: address,
     ctx: &mut TxContext,
-) {
-    transfer::transfer(Proceeds { id: object::new(ctx), agreement_id, items, coins }, cap);
+): ID {
+    let proceeds = Proceeds { id: object::new(ctx), agreement_id, items, coins };
+    let proceeds_id = object::id(&proceeds);
+    transfer::transfer(proceeds, cap);
+    proceeds_id
 }
 
 /// `some(balance)`, or `none` once an empty `balance` is destroyed.
@@ -1010,15 +1081,15 @@ fun non_empty(balance: Balance): Option<Balance> {
 public fun posted_event_for_testing(
     agreement_id: ID, lister: address, on_behalf_of: Option<Entity>, cap_id: ID,
     beneficiary: address, pays_cap_holder: bool, cargo: Spec, want: Spec, currency: TypeName,
-    reward: u64, collateral: u64, accept_by_ms: u64, haul_ms: u64,
+    reward: u64, collateral: u64, posted_at_ms: u64, accept_by_ms: u64, haul_ms: u64,
     accept_requirements: vector<Requirement>, identity_rule: Option<TypeName>,
     observer: Option<Binding>, post_fee: Option<PostFee>, delivery_fee_bps: u16,
     treasury: address,
 ): AgreementPosted {
     AgreementPosted {
         agreement_id, lister, on_behalf_of, cap_id, beneficiary, pays_cap_holder, cargo, want,
-        currency, reward, collateral, accept_by_ms, haul_ms, accept_requirements, identity_rule,
-        observer, post_fee, delivery_fee_bps, treasury,
+        currency, reward, collateral, posted_at_ms, accept_by_ms, haul_ms, accept_requirements,
+        identity_rule, observer, post_fee, delivery_fee_bps, treasury,
     }
 }
 
@@ -1034,11 +1105,11 @@ public fun accepted_event_for_testing(
 public fun delivered_event_for_testing(
     agreement_id: ID, lister: address, hauler: address, hauler_identity: Option<ID>,
     beneficiary: address, delivered: Spec, currency: TypeName, reward: u64, collateral: u64,
-    delivery_fee: u64, treasury: address,
+    delivery_fee: u64, treasury: address, proceeds_id: Option<ID>,
 ): AgreementDelivered {
     AgreementDelivered {
         agreement_id, lister, hauler, hauler_identity, beneficiary, delivered, currency, reward,
-        collateral, delivery_fee, treasury,
+        collateral, delivery_fee, treasury, proceeds_id,
     }
 }
 
@@ -1046,10 +1117,11 @@ public fun delivered_event_for_testing(
 public fun defaulted_event_for_testing(
     agreement_id: ID, lister: address, hauler: address, hauler_identity: Option<ID>,
     beneficiary: address, currency: TypeName, reward: u64, collateral: u64, forfeited: bool,
+    proceeds_id: Option<ID>,
 ): AgreementDefaulted {
     AgreementDefaulted {
         agreement_id, lister, hauler, hauler_identity, beneficiary, currency, reward, collateral,
-        forfeited,
+        forfeited, proceeds_id,
     }
 }
 
@@ -1063,9 +1135,26 @@ public fun cancelled_event_for_testing(
 #[test_only]
 public fun lapsed_event_for_testing(
     agreement_id: ID, lister: address, refunded_to: address, closed_by: address, cargo: Spec,
-    currency: TypeName, reward: u64,
+    currency: TypeName, reward: u64, proceeds_id: Option<ID>,
 ): AgreementLapsed {
-    AgreementLapsed { agreement_id, lister, refunded_to, closed_by, cargo, currency, reward }
+    AgreementLapsed {
+        agreement_id, lister, refunded_to, closed_by, cargo, currency, reward, proceeds_id,
+    }
+}
+
+#[test_only]
+public fun collected_event_for_testing(
+    agreement_id: ID, cap_id: ID, proceeds_id: ID, collected_by: address, items: Option<Spec>,
+    currency: TypeName, coins: u64,
+): ProceedsCollected {
+    ProceedsCollected { agreement_id, cap_id, proceeds_id, collected_by, items, currency, coins }
+}
+
+#[test_only]
+public fun cap_deleted_event_for_testing(
+    agreement_id: ID, cap_id: ID, deleted_by: address,
+): ListerCapDeleted {
+    ListerCapDeleted { agreement_id, cap_id, deleted_by }
 }
 
 #[test_only]

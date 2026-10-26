@@ -275,6 +275,7 @@ module hauling_agreements::config_tests {
                     COLLATERAL_QTY,
                     fee,
                     treasury,
+                    option::none(),
                 ),
             ],
         );
@@ -503,6 +504,7 @@ module hauling_agreements::config_tests {
                     currency<GOLD>(),
                     GOLD_REWARD_QTY,
                     GOLD_COLLATERAL_QTY,
+                    START_MS,
                     ACCEPT_BY_MS,
                     HAUL_MS,
                     vector[],
@@ -613,6 +615,7 @@ module hauling_agreements::config_tests {
                     GOLD_COLLATERAL_QTY,
                     GOLD_FEE_QTY,
                     TREASURY,
+                    option::none(),
                 ),
             ],
         );
@@ -653,6 +656,7 @@ module hauling_agreements::config_tests {
                     currency<TOKEN>(),
                     REWARD_QTY,
                     COLLATERAL_QTY,
+                    START_MS,
                     ACCEPT_BY_MS,
                     HAUL_MS,
                     vector[],
@@ -763,6 +767,7 @@ module hauling_agreements::config_tests {
                     currency<TOKEN>(),
                     REWARD_QTY,
                     COLLATERAL_QTY,
+                    START_MS,
                     ACCEPT_BY_MS,
                     HAUL_MS,
                     vector[],
@@ -972,6 +977,7 @@ module hauling_agreements::config_tests {
                     REWARD_QTY,
                     COLLATERAL_QTY,
                     false,
+                    option::none(),
                 ),
             ],
         );
@@ -1002,6 +1008,7 @@ module hauling_agreements::config_tests {
                     REWARD_QTY,
                     COLLATERAL_QTY,
                     true,
+                    option::none(),
                 ),
             ],
         );
@@ -1036,6 +1043,7 @@ module hauling_agreements::config_tests {
                     0,
                     COLLATERAL_QTY,
                     false,
+                    option::none(),
                 ),
             ],
         );

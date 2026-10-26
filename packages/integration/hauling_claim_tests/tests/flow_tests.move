@@ -128,6 +128,7 @@ module hauling_claim_tests::flow_tests {
                     test_config::token(),
                     REWARD_QTY,
                     COLLATERAL_QTY,
+                    START_MS,
                     ACCEPT_BY_MS,
                     HAUL_MS,
                     vector[claim::requirement(gate)],
@@ -217,6 +218,7 @@ module hauling_claim_tests::flow_tests {
                     COLLATERAL_QTY,
                     0,
                     test_config::treasury(),
+                    option::none(),
                 ),
             ],
         );
@@ -327,6 +329,7 @@ module hauling_claim_tests::flow_tests {
                     REWARD_QTY,
                     COLLATERAL_QTY,
                     false,
+                    option::none(),
                 ),
             ],
         );

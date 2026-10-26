@@ -99,16 +99,19 @@ let cargo = agreement.finish_accept(req, collateral, &clock);
 
 | Event | Fields | Emitted by |
 |---|---|---|
-| `AgreementPosted` | `agreement_id`, `lister`, `on_behalf_of`, `cap_id`, `beneficiary`, `pays_cap_holder`, `cargo`, `want`, `currency`, `reward`, `collateral`, `accept_by_ms`, `haul_ms`, `accept_requirements`, `identity_rule`, `observer`, `post_fee`, `delivery_fee_bps`, `treasury` | `publish` |
+| `AgreementPosted` | `agreement_id`, `lister`, `on_behalf_of`, `cap_id`, `beneficiary`, `pays_cap_holder`, `cargo`, `want`, `currency`, `reward`, `collateral`, `posted_at_ms`, `accept_by_ms`, `haul_ms`, `accept_requirements`, `identity_rule`, `observer`, `post_fee`, `delivery_fee_bps`, `treasury` | `publish` |
 | `AgreementAccepted` | `agreement_id`, `hauler`, `hauler_identity`, `identity_rule`, `deadline_ms` | `finish_accept` |
-| `AgreementDelivered` | `agreement_id`, `lister`, `hauler`, `hauler_identity`, `beneficiary`, `delivered`, `currency`, `reward`, `collateral`, `delivery_fee`, `treasury` | `deliver` |
-| `AgreementDefaulted` | `agreement_id`, `lister`, `hauler`, `hauler_identity`, `beneficiary`, `currency`, `reward`, `collateral`, `forfeited` | `default` (`forfeited = false`), `forfeit` (`forfeited = true`) |
+| `AgreementDelivered` | `agreement_id`, `lister`, `hauler`, `hauler_identity`, `beneficiary`, `delivered`, `currency`, `reward`, `collateral`, `delivery_fee`, `treasury`, `proceeds_id` | `deliver` |
+| `AgreementDefaulted` | `agreement_id`, `lister`, `hauler`, `hauler_identity`, `beneficiary`, `currency`, `reward`, `collateral`, `forfeited`, `proceeds_id` | `default` (`forfeited = false`), `forfeit` (`forfeited = true`) |
 | `AgreementCancelled` | `agreement_id`, `cancelled_by`, `cargo`, `currency`, `reward` | `cancel` |
-| `AgreementLapsed` | `agreement_id`, `lister`, `refunded_to`, `closed_by`, `cargo`, `currency`, `reward` | `close_lapsed` |
+| `AgreementLapsed` | `agreement_id`, `lister`, `refunded_to`, `closed_by`, `cargo`, `currency`, `reward`, `proceeds_id` | `close_lapsed` |
+| `ProceedsCollected` | `agreement_id`, `cap_id`, `proceeds_id`, `collected_by`, `items`, `currency`, `coins` | `collect` |
+| `ListerCapDeleted` | `agreement_id`, `cap_id`, `deleted_by` | `delete_cap` |
 | `config::ConfigUpdated` | `config_id`, `currencies`, `post_fee`, `delivery_fee_bps`, `treasury` | `approve_currency`, `revoke_currency`, `set_post_fee`, `clear_post_fee`, `set_delivery_fee_bps`, `set_treasury` |
 
 - **Final events are self-contained.** `Delivered`, `Defaulted`, `Cancelled` and `Lapsed` delete the agreement object, so each one records who received what. A deleted agreement can't be read back by ID afterwards, so index from the package's publish checkpoint.
-- **Terms that pay the cap holder** show as `pays_cap_holder` in `AgreementPosted`. The `beneficiary` in every event is then the cap's address, `AgreementLapsed.refunded_to` is too, and the payout waits there as a `Proceeds` until `collect`.
+- **Terms that pay the cap holder** show as `pays_cap_holder` in `AgreementPosted`. The `beneficiary` in every event is then the cap's address, `AgreementLapsed.refunded_to` is too, and the payout waits there as the `Proceeds` named by the ending's `proceeds_id` until `collect` emits `ProceedsCollected`. `proceeds_id` is `none` for terms with a beneficiary address.
+- **Every end of a cap has an event:** `AgreementCancelled`, `ProceedsCollected` or `ListerCapDeleted`. Transfers of the cap have none, so read its current holder from the object's owner.
 - **`AgreementDelivered.reward` is what the hauler received**, after the fee. It plus `delivery_fee` is the escrowed reward.
 - **`AgreementPosted` carries every requirement with its config**, in the order an accepting transaction must satisfy them, so a client can build the transaction without reading the object.
 - **`lister` is the sender of `draft`.** It can differ from `beneficiary`, for example when a DAO lists for its treasury. `on_behalf_of` names the entity a wrapper vouched the lister drafts for, if any.

@@ -213,18 +213,20 @@ A record holds the outcome, lister, the entity the lister drafted for (if any), 
 
 | Event | Emitted by |
 |---|---|
-| `AgreementPosted` | `publish`: the terms plus every extension, in full, the entity the lister drafts for, whether the terms pay the cap holder, and the posting fee, delivery fee rate and treasury |
+| `AgreementPosted` | `publish`: the terms plus every extension, in full, the entity the lister drafts for, whether the terms pay the cap holder, the drafting time, and the posting fee, delivery fee rate and treasury |
 | `AgreementAccepted` | `finish_accept`: the hauler, identity, identity rule and deadline |
 | `AgreementDelivered` | `deliver`: `reward` is what the hauler received after the fee; `delivery_fee` went to `treasury` |
 | `AgreementDefaulted` | `default` (`forfeited = false`) or `forfeit` (`forfeited = true`) |
-| `AgreementCancelled` | `cancel` |
+| `AgreementCancelled` | `cancel`, which also deletes the cap |
 | `AgreementLapsed` | `close_lapsed`: the cargo and reward went to `refunded_to`, the lister or the cap; `closed_by` sent the transaction |
+| `ProceedsCollected` | `collect`: the cap and `Proceeds` it deleted, the items and coins they held, and who sent the transaction |
+| `ListerCapDeleted` | `delete_cap`: the cap and who sent the transaction |
 | `config::ConfigUpdated` | Every admin change: the whole config after it, including the approved currencies |
 | `agreement_roles::claim::Claimed` | `satisfy` or `satisfy_directly`: the agreement, the action, the actor and the principal they matched |
 
 Every agreement event that carries a reward, collateral or delivery fee also carries `currency`, the agreement's coin type, and those are plain amounts of it. `cargo`, `want` and `delivered` stay `Spec`s. `post_fee` is `Option<PostFee { currency, amount }>`, since its coin type can differ from the agreement's.
 
-Terminal events delete the agreement and are self-contained: each names everyone who was paid. For terms that pay the cap holder, the beneficiary they name is the cap's address, where a `Proceeds` waits for `collect`. Index from the package's publish checkpoint. Off-chain failure rates need no observer at all: count `AgreementDefaulted` against `AgreementDelivered` per `hauler` or `hauler_identity`.
+Terminal events delete the agreement and are self-contained: each names everyone who was paid. For terms that pay the cap holder, the beneficiary they name is the cap's address, where a `Proceeds` waits for `collect`, and `AgreementDelivered`, `AgreementDefaulted` and `AgreementLapsed` carry its `proceeds_id` (`none` otherwise). A cap's end always has an event: `AgreementCancelled`, `ProceedsCollected` or `ListerCapDeleted`. Only transfers of the cap don't, so who holds it now comes from object ownership. Index from the package's publish checkpoint. Off-chain failure rates need no observer at all: count `AgreementDefaulted` against `AgreementDelivered` per `hauler` or `hauler_identity`.
 
 The events cover discovery on both paths. Open jobs and who may take them come from `AgreementPosted`: a claim gate's principals are in `accept_requirements` (decode with `principals_of` or the same BCS layout). Which OU a gated job was taken for comes from `Claimed`, counted only when its `action` is hauling's `AcceptAction` (see [Recording it](#agreement_roles-who-may-claim)). Who is on an OU's board comes from armature's own board events. Open, lapsed and overdue have no event; derive them from `accept_by_ms` and `deadline_ms` against chain time. `AgreementLapsed` marks the admin closing a lapsed agreement, not the moment it lapsed.
 

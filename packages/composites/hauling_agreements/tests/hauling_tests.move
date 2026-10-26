@@ -12,7 +12,8 @@ use hauling_agreements::hauling::{
     AgreementDelivered,
     AgreementDefaulted,
     AgreementCancelled,
-    AgreementLapsed
+    AgreementLapsed,
+    ListerCapDeleted
 };
 use hauling_agreements::terms;
 use hauling_agreements::test_config::{Self, TOKEN};
@@ -122,8 +123,9 @@ fun post_then_accept_releases_cargo_and_locks_collateral() {
         vector[
             hauling::posted_event_for_testing(
                 agreement_id, LISTER, option::none(), cap_id, BENEFICIARY, false, cargo_spec(),
-                want(), test_config::token(), REWARD_QTY, COLLATERAL_QTY, ACCEPT_BY_MS, HAUL_MS,
-                vector[], option::none(), option::none(), option::none(), 0, test_config::treasury(),
+                want(), test_config::token(), REWARD_QTY, COLLATERAL_QTY, START_MS, ACCEPT_BY_MS,
+                HAUL_MS, vector[], option::none(), option::none(), option::none(), 0,
+                test_config::treasury(),
             ),
         ],
     );
@@ -185,6 +187,7 @@ fun deliver_pays_beneficiary_and_returns_reward_and_collateral() {
             hauling::delivered_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, want(),
                 test_config::token(), REWARD_QTY, COLLATERAL_QTY, 0, test_config::treasury(),
+                option::none(),
             ),
         ],
     );
@@ -215,7 +218,7 @@ fun default_at_deadline_pays_beneficiary() {
         vector[
             hauling::defaulted_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, test_config::token(),
-                REWARD_QTY, COLLATERAL_QTY, false,
+                REWARD_QTY, COLLATERAL_QTY, false, option::none(),
             ),
         ],
     );
@@ -291,7 +294,7 @@ fun close_lapsed_returns_cargo_and_reward_to_lister() {
         vector[
             hauling::lapsed_event_for_testing(
                 agreement_id, LISTER, LISTER, ADMIN, cargo_spec(), test_config::token(),
-                REWARD_QTY,
+                REWARD_QTY, option::none(),
             ),
         ],
     );
@@ -308,7 +311,7 @@ fun close_lapsed_returns_cargo_and_reward_to_lister() {
 #[test]
 fun delete_cap_after_delivery_reclaims_the_cap() {
     let (mut scenario, mut clock) = setup();
-    post(&mut scenario, &clock);
+    let (agreement_id, cap_id) = post(&mut scenario, &clock);
     accept(&mut scenario, &mut clock);
     scenario.next_tx(OTHER);
     let delivered = mint(dst(), ITEM, CARGO_QTY, &mut scenario);
@@ -316,7 +319,11 @@ fun delete_cap_after_delivery_reclaims_the_cap() {
     agreement.deliver(delivered, &clock, scenario.ctx());
 
     scenario.next_tx(LISTER);
-    hauling::delete_cap(scenario.take_from_sender<ListerCap>());
+    hauling::delete_cap(scenario.take_from_sender<ListerCap>(), scenario.ctx());
+    assert_eq!(
+        event::events_by_type<ListerCapDeleted>(),
+        vector[hauling::cap_deleted_event_for_testing(agreement_id, cap_id, LISTER)],
+    );
     scenario.next_tx(LISTER);
     assert_eq!(ts::ids_for_address<ListerCap>(LISTER).length(), 0);
     finish(scenario, clock);
@@ -688,7 +695,7 @@ fun forfeit_pays_beneficiary_before_deadline() {
         vector[
             hauling::defaulted_event_for_testing(
                 agreement_id, LISTER, HAULER, option::none(), BENEFICIARY, test_config::token(),
-                REWARD_QTY, COLLATERAL_QTY, true,
+                REWARD_QTY, COLLATERAL_QTY, true, option::none(),
             ),
         ],
     );
