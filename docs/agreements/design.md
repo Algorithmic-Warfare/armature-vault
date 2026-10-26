@@ -4,7 +4,7 @@ How hauling agreements work, why they are built this way, and how they are meant
 
 ## What it is
 
-A **hauling agreement** is a collateralized forward swap of items, paid in a coin. Items are [multicoin](https://github.com/Algorithmic-Warfare/multicoin) balances; payments are a Sui `Coin<T>` of one coin type `T`, so the agreement is a `HaulingAgreement<T>`. The lister escrows `cargo` (a multicoin balance) and a `reward` (a `Coin<T>`) and names a `want`: an exact collection, asset and quantity that counts as delivery. A hauler locks collateral, an agreed amount of `T`, and takes the cargo. Delivering the `want` before the deadline pays the hauler; missing it pays the beneficiary, an address or whoever holds the agreement's `ListerCap`. `T` must be a currency the protocol admin has approved (see [Currencies and protocol fees](#currencies-and-protocol-fees)).
+A **hauling agreement** is a collateralized forward swap of items, paid in a coin. Items are [multicoin](https://github.com/Algorithmic-Warfare/multicoin) balances; payments are a Sui `Coin<T>` of one coin type `T`, so the agreement is a `HaulingAgreement<T>`. The lister escrows `cargo` (multicoin balances, one per item) and a `reward` (a `Coin<T>`) and names a `want`: an exact collection, asset and quantity for each item that counts as delivery. One agreement carries up to 32 items, so one hauler moves a mixed cargo under one reward and one collateral (see [Items](#items)). A hauler locks collateral, an agreed amount of `T`, and takes the cargo. Delivering every item of the `want` before the deadline pays the hauler; missing it pays the beneficiary, an address or whoever holds the agreement's `ListerCap`. `T` must be a currency the protocol admin has approved (see [Currencies and protocol fees](#currencies-and-protocol-fees)).
 
 With [warehouse receipts](https://github.com/loash-industries/warehouse-receipts), a collection identifies a storage unit (SSU) and an asset ID an item type. `cargo` in SSU A's collection and `want` in SSU B's describe a haul from A to B.
 
@@ -13,7 +13,7 @@ With [warehouse receipts](https://github.com/loash-industries/warehouse-receipts
 ## Principles
 
 1. **The core enforces stakes, not conduct.** Nothing leaves escrow except through the agreement's rules. How goods travel is the hauler's business.
-2. **Delivery is objective.** A balance's type and amount either match `want` or they don't, so normal operation needs no adapter, oracle or judge.
+2. **Delivery is objective.** Each delivered balance's type and amount either match its `want` entry or they don't, so normal operation needs no adapter, oracle or judge.
 3. **Time always ends an agreement.** Every accepted agreement ends through `deliver` before the deadline or `default` after it. An open agreement nobody accepts ends when the cap holder cancels it or, once `accept_by_ms` passes, when the config admin closes it with `close_lapsed`, which returns the escrow to the lister, or to the cap for terms that pay the cap holder. No party or extension can keep funds locked forever. A lapsed listing whose cap is lost waits for the config admin, though, and for terms that pay the cap holder the admin's refund goes to that lost cap (see [Trust model](#trust-model)).
 4. **Extensions are opt-in, fixed when the agreement forms, and can't block an ending.** Rules can refuse an accept; observers only receive records.
 5. **One authorization mechanism.** Every extension point is gated by `std::internal::Permit<T>`, which only the module defining `T` can create.
@@ -57,14 +57,25 @@ stateDiagram-v2
 | `deliver` | Already the hauler's; the `want` goes to the beneficiary | Hauler, less the delivery fee, which goes to the treasury | Hauler |
 | `forfeit`, `default` | Kept by the hauler | Beneficiary | Beneficiary |
 
-Every ending deletes the agreement, so each pays out exactly once. Reward, collateral and delivery fee are paid as `Coin<T>`, and a zero amount isn't sent, so nobody receives an empty coin. The posting fee went to the treasury at `draft`, whatever the ending.
+Every ending deletes the agreement, so each pays out exactly once. Reward, collateral and delivery fee are paid as `Coin<T>`, and a zero amount isn't sent, so nobody receives an empty coin. Items move as a `vector<Balance>`, one balance per item in the agreement's order. The posting fee went to the treasury at `draft`, whatever the ending.
+
+### Items
+
+Cargo and `want` are lists, so one agreement can move several item types.
+
+- **`want`** is a `vector<Spec>` in the terms: 1 to 32 entries (`terms::max_items`), each more than 0 and each a different collection and asset.
+- **`cargo`** is a `vector<Balance>` passed to `draft`: one nonempty balance per item, each a different collection and asset, at most 32. It may be empty, for an agreement that only pays for delivery. `draft` aborts with `EInvalidCargo` otherwise.
+- **No `want` entry may name a collection and asset the cargo holds,** since a hauler could then accept and hand that cargo straight back as delivery. `draft` aborts with `terms::EInvalidTerms` if one does.
+- **Order is kept.** `accept`, `finish_accept` and `cancel` return the cargo in the order it was escrowed. `deliver` takes one balance per `want` entry, in `want`'s order, and checks them with `agreements::spec::assert_each_matches`: `spec::EWrongCount` for a different number of balances, then `spec::EWrongAsset` or `spec::EWrongAmount` for the first pair that differs. Events, outcome records and `Proceeds` list items in the agreement's order.
+- **Delivery is all or nothing.** A missing, extra, mismatched or out-of-order balance aborts `deliver`, so nothing is paid for part of a delivery.
+- **In a PTB,** `MakeMoveVec` builds the `want` and the cargo or delivery vectors. A returned `vector<Balance>` can't be transferred as an object: send it to one address with `agreements::payout::pay_all`, or take balances out with `0x1::vector::pop_back` and destroy the empty vector with `0x1::vector::destroy_empty`.
 
 ### Terms, and who receives the lister's side
 
 The `want`, the collateral, the two windows and the beneficiary are one value, `terms::Terms`, built with `terms::new` or `terms::new_for_cap_holder` and passed to `draft`. `Terms` has `store`, so a wrapper can keep them in its own objects, such as a governance payload. Both windows are relative: the accept window (`accept_ms`) starts at `draft` and the haul window at accept, and `draft` records the absolute `accept_by_ms`. So stored terms never expire, and `agreement.terms()` returns terms the cap holder can post again after cancelling, even once the listing has lapsed, with a fresh accept window.
 
 - **`terms::new(..., beneficiary)`** pays an address. The table's beneficiary column is that address, and `close_lapsed` refunds the lister, the signer of `draft`. Transferring the `ListerCap` moves only the right to cancel. `cancel` deletes the cap; after any other ending its holder can delete it with `delete_cap`.
-- **`terms::new_for_cap_holder(...)`** pays the agreement's `ListerCap`. `draft` creates the cap with the agreement, so the beneficiary is the cap's own address. Everything the table sends to the beneficiary, and `close_lapsed`'s refund, arrives there as one `Proceeds<T>` object holding the items (`Option<Balance>`) and the coins (`Balance<T>`). Whoever holds the cap opens it with `collect(cap, proceeds)`, which returns `(Option<Balance>, Coin<T>)` and deletes both, so the cap's life ends with the agreement. `cancel` still returns the escrow directly. `delete_cap` aborts with `ECapReceivesProceeds` for such a cap, since deleting it would strand its proceeds.
+- **`terms::new_for_cap_holder(...)`** pays the agreement's `ListerCap`. `draft` creates the cap with the agreement, so the beneficiary is the cap's own address. Everything the table sends to the beneficiary, and `close_lapsed`'s refund, arrives there as one `Proceeds<T>` object holding the items (`vector<Balance>`, empty after a default or forfeit) and the coins (`Balance<T>`). Whoever holds the cap opens it with `collect(cap, proceeds)`, which returns `(vector<Balance>, Coin<T>)` and deletes both, so the cap's life ends with the agreement. `cancel` still returns the escrow directly. `delete_cap` aborts with `ECapReceivesProceeds` for such a cap, since deleting it would strand its proceeds.
 
 Paying the cap is what makes payouts follow an object. A wallet, a DAO's custody object or a governance vault that holds the cap receives every payout without receiving code or an address of its own, and the result of `collect` composes in the same transaction, for example straight into a vault deposit. Proceeds are sent to the cap's address with Sui transfer-to-object, and only `collect` with that cap can receive them. Collecting takes a transaction of its own after the ending.
 
@@ -79,7 +90,7 @@ Paying the cap is what makes payouts follow an object. A wallet, a DAO's custody
 | Cancel | Any time while open |
 | Close lapsed | `now >= accept_by_ms` while open (config admin only) |
 
-`accept_by_ms` is the drafting time plus the terms' `accept_ms`. The accept window and `haul_ms` are each at most 30 days (`terms::max_duration_ms`). The `terms` constructors abort with `terms::EInvalidTerms` for an `accept_ms` or `haul_ms` of 0 or over 30 days, or a zero `want` or collateral. `draft` aborts with the same code when `want` names the cargo's own collection and asset, since a hauler could then accept and hand the cargo straight back as delivery.
+`accept_by_ms` is the drafting time plus the terms' `accept_ms`. The accept window and `haul_ms` are each at most 30 days (`terms::max_duration_ms`). The `terms` constructors abort with `terms::EInvalidTerms` for an `accept_ms` or `haul_ms` of 0 or over 30 days, a zero collateral, or a `want` that breaks the rules in [Items](#items): empty, over 32 entries, an entry of 0, or the same collection and asset twice. `draft` aborts with the same code when a `want` entry names a collection and asset the cargo holds.
 
 ### Pricing is the lister's job
 
@@ -90,7 +101,7 @@ Once the cargo is released, collateral is the lister's only protection. There's 
 The `config` module creates one shared `Config` at publish. It holds the approved currencies, the posting fee, the delivery fee rate and the treasury that receives both fees. There's no public constructor, so every agreement is drafted against that config. It starts with no currencies, no fees and the publisher as treasury, so nothing can be drafted until a currency is approved.
 
 - **Approved currencies.** An agreement's reward, collateral and delivery fee are all in its coin type `T`, and `draft` aborts with `ECurrencyNotApproved` unless `T` is approved. Revoking a currency stops new agreements in it; agreements already drafted in it run to the end unchanged.
-- **Items stay multicoin.** `cargo`, `want` and the delivered balance are multicoin balances described by `Spec`s. Only payments are coins.
+- **Items stay multicoin.** `cargo`, `want` and the delivered balances are multicoin balances described by `Spec`s, one per item. Only payments are coins.
 
 | Fee | Paid by | When | Amount |
 |---|---|---|---|
@@ -224,7 +235,7 @@ A record holds the outcome, lister, the entity the lister drafted for (if any), 
 | `config::ConfigUpdated` | Every admin change: the whole config after it, including the approved currencies |
 | `agreement_roles::claim::Claimed` | `satisfy` or `satisfy_directly`: the agreement, the action, the actor and the principal they matched |
 
-Every agreement event that carries a reward, collateral or delivery fee also carries `currency`, the agreement's coin type, and those are plain amounts of it. `cargo`, `want` and `delivered` stay `Spec`s. `post_fee` is `Option<PostFee { currency, amount }>`, since its coin type can differ from the agreement's.
+Every agreement event that carries a reward, collateral or delivery fee also carries `currency`, the agreement's coin type, and those are plain amounts of it. `cargo`, `want`, `delivered` and `ProceedsCollected.items` stay `Spec`s, as a `vector<Spec>` with one entry per item in the agreement's order. `delivered` equals the agreement's `want`, and `items` is empty after a default or forfeit, or for a lapsed listing with no cargo. `post_fee` is `Option<PostFee { currency, amount }>`, since its coin type can differ from the agreement's.
 
 Terminal events delete the agreement and are self-contained: each names everyone who was paid. For terms that pay the cap holder, the beneficiary they name is the cap's address, where a `Proceeds` waits for `collect`, and `AgreementDelivered`, `AgreementDefaulted` and `AgreementLapsed` carry its `proceeds_id` (`none` otherwise). A cap's end always has an event: `AgreementCancelled`, `ProceedsCollected` or `ListerCapDeleted`. Only transfers of the cap don't, so who holds it now comes from object ownership. Index from the package's publish checkpoint. Off-chain failure rates need no observer at all: count `AgreementDefaulted` against `AgreementDelivered` per `hauler` or `hauler_identity`.
 
@@ -247,7 +258,7 @@ One requirement, `CanClaim { principals }`: the actor must satisfy any one of th
 
 ## Composition
 
-- **Warehouse receipts.** `deposit_for_receipt` at the destination and `deliver` can share one transaction. Receipts bought on a market are equally valid delivery, because the beneficiary receives the same claim.
+- **Warehouse receipts.** `deposit_for_receipt` at the destination, once per item, and `deliver` can share one transaction. Receipts bought on a market are equally valid delivery, because the beneficiary receives the same claim.
 - **Trinary Exchange.** A trade is a contract and its delivery is an agreement. They compose in one transaction because both hold multicoin `Balance`, but only if both packages link the same published multicoin. `hauling_agreements` pins `2772c26`, like warehouse-receipts and `armature_vault`; bump them together.
 - **Minehaul.** A logistics network can sit on top of the core:
   - Network membership becomes an accept rule, such as an `agreement_roles` claim gate listing the network's OU.
@@ -259,7 +270,8 @@ One requirement, `CanClaim { principals }`: the actor must satisfy any one of th
 
 - **One observer per agreement.** Several reputation systems would need a fan-out observer.
 - **One payment coin per agreement.** Reward, collateral and delivery fee are all in the agreement's `T`, which must be approved. Items can be cargo or `want` but not payment.
-- **Delivery is all-or-nothing.** There is no partial delivery.
+- **Delivery is all-or-nothing.** There is no partial delivery: every `want` entry must arrive in one `deliver` call.
+- **At most 32 items per agreement.** `want` and the cargo each list at most `terms::max_items` entries, and none twice. A larger job takes several agreements.
 - **No disputes.** Arbitration (flags and rulings) was removed for now, so an accepted agreement ends only by `deliver`, `forfeit` or `default`.
 - **The hauler is paid at an address.** The hauler's reward and collateral go to the address that signed the accept. Only the lister's side can follow an object, through terms that pay the cap holder. With a beneficiary address instead, transferring a `ListerCap` moves only the right to cancel, and `close_lapsed` refunds the address that signed `draft`, not the cap holder, so a wrapper that drafts through another signer should use terms that pay the cap holder.
 - **Clients carry the burden of rule ordering.** A PTB must satisfy requirements in declaration order, so a client needs to know every rule it supports.

@@ -51,6 +51,14 @@ A `Spec` is an exact multicoin amount: `{ collection, asset_id, qty }`.
 
 - `spec::new(collection, asset_id, qty)` builds one and `spec::of(&balance)` describes a balance.
 - `spec.assert_matches(&balance)` aborts with `EWrongAsset` for another collection or asset and `EWrongAmount` for another quantity.
+- `spec::same_asset(&a, &b)` is whether two specs name the same collection and asset, whatever their quantities.
+
+A `vector<Spec>` names several items at once, such as a mixed cargo. The set functions treat it as a list whose entries pair with balances one for one, in order:
+
+- `spec::of_each(&balances)` describes each of a `vector<Balance>`, in order.
+- `spec::assert_each_matches(&specs, &balances)` aborts with `EWrongCount` unless there is one balance per spec, then as `assert_matches` for each pair in order.
+- `spec::all_distinct(&specs)` is whether no two entries name the same collection and asset.
+- `spec::any_shared(&a, &b)` is whether some entry of `a` names the same collection and asset as some entry of `b`.
 
 ## `agreements::payout`
 
@@ -60,7 +68,9 @@ A `Spec` is an exact multicoin amount: `{ collection, asset_id, qty }`.
 - Each recipient gets the floor of their share. The units left over go one each to the largest fractional remainders, with ties going to the earlier recipient.
 - Nobody without a share is paid, and nobody gets more than one unit over their exact share.
 
-`pay(balance, to)` sends a whole balance, or destroys it when it is empty, so nobody receives an empty balance. `pay_by_bps` pays its last recipient this way, and `hauling_agreements` uses it to return a lapsed agreement's cargo.
+`pay(balance, to)` sends a whole balance, or destroys it when it is empty, so nobody receives an empty balance. `pay_by_bps` pays its last recipient this way.
+
+`pay_all(balances, to)` pays each of a `vector<Balance>` to one address with `pay`, and consumes the vector even when it is empty. `hauling_agreements` uses it to send a delivery or a lapsed agreement's cargo, and a PTB can use it to send an agreement's returned cargo or proceeds to one address, since a vector isn't an object it can transfer.
 
 ## Dependency pin
 
@@ -79,5 +89,5 @@ sui move test  --build-env testnet_stillness
 ```
 
 - `tests/request_tests.move`: ordering, follow-ups, identity, and every abort. It uses two stand-in agreement types, `tests/test_agreements.move` (a lease with two actions, plus example rules) and `tests/test_auction.move`, so requests are shown not to cross actions or agreement types.
-- `tests/spec_tests.move`: `Spec` and `Requirement`.
-- `tests/payout_tests.move`: `pay`, exact and rounded splits, ties, zero shares, empty and maximum balances, invalid shares, and a sweep of totals checking every payout adds up and stays within one unit of its exact share.
+- `tests/spec_tests.move`: `Spec`, the set functions and `Requirement`.
+- `tests/payout_tests.move`: `pay`, `pay_all`, exact and rounded splits, ties, zero shares, empty and maximum balances, invalid shares, and a sweep of totals checking every payout adds up and stays within one unit of its exact share.

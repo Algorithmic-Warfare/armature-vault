@@ -3,6 +3,7 @@
 /// agreement takes of the config, and the admin functions.
 #[test_only]
 module hauling_agreements::config_tests {
+    use agreements::payout;
     use agreements::spec::{Self, Spec};
     use hauling_agreements::{
         config::{Self, Config, AdminCap, ConfigUpdated, PostFee},
@@ -82,9 +83,9 @@ module hauling_agreements::config_tests {
         multicoin::create_balance_for_testing(collection, asset_id, qty, scenario.ctx())
     }
 
-    fun want(): Spec { spec::new(dst(), ITEM, CARGO_QTY) }
+    fun want(): vector<Spec> { vector[spec::new(dst(), ITEM, CARGO_QTY)] }
 
-    fun cargo_spec(): Spec { spec::new(src(), ITEM, CARGO_QTY) }
+    fun cargo_spec(): vector<Spec> { vector[spec::new(src(), ITEM, CARGO_QTY)] }
 
     /// The standard want and windows, paying BENEFICIARY, with `collateral`.
     fun standard_terms(collateral: u64): Terms {
@@ -144,7 +145,7 @@ module hauling_agreements::config_tests {
         clock: &Clock,
     ): (ID, ID) {
         let config = scenario.take_shared<Config>();
-        let cargo = mint(src(), ITEM, CARGO_QTY, scenario);
+        let cargo = vector[mint(src(), ITEM, CARGO_QTY, scenario)];
         let cap = hauling::post(
             cargo,
             reward,
@@ -201,7 +202,7 @@ module hauling_agreements::config_tests {
         let collateral = coin<T>(collateral, scenario);
         let mut agreement = scenario.take_shared_by_id<HaulingAgreement<T>>(agreement_id);
         let cargo = agreement.accept(collateral, clock, scenario.ctx());
-        transfer::public_transfer(cargo, HAULER);
+        payout::pay_all(cargo, HAULER);
         ts::return_shared(agreement);
     }
 
@@ -215,7 +216,7 @@ module hauling_agreements::config_tests {
     fun deliver_in<T>(agreement_id: ID, scenario: &mut Scenario, clock: &mut Clock) {
         clock.set_for_testing(DEADLINE_MS - 1);
         scenario.next_tx(OTHER);
-        let delivered = mint(dst(), ITEM, CARGO_QTY, scenario);
+        let delivered = vector[mint(dst(), ITEM, CARGO_QTY, scenario)];
         let agreement = scenario.take_shared_by_id<HaulingAgreement<T>>(agreement_id);
         agreement.deliver(delivered, clock, scenario.ctx());
     }
@@ -577,7 +578,7 @@ module hauling_agreements::config_tests {
         let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
         assert_eq!(reward.value(), REWARD_QTY);
-        transfer::public_transfer(cargo, LISTER);
+        payout::pay_all(cargo, LISTER);
         transfer::public_transfer(reward, LISTER);
         assert_coins<TOKEN>(&mut scenario, 0, 0, REWARD_QTY, 0);
         finish(scenario, clock);
@@ -810,9 +811,9 @@ module hauling_agreements::config_tests {
         let cap = scenario.take_from_sender<ListerCap>();
         let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
-        assert_eq!(spec::of(&cargo), cargo_spec());
+        assert_eq!(spec::of_each(&cargo), cargo_spec());
         assert_eq!(reward.value(), REWARD_QTY);
-        transfer::public_transfer(cargo, LISTER);
+        payout::pay_all(cargo, LISTER);
         transfer::public_transfer(reward, LISTER);
         assert_coins<TOKEN>(&mut scenario, 0, 0, REWARD_QTY, 0);
         assert_coins<FEE>(&mut scenario, 0, 0, 0, POST_FEE_QTY);
@@ -914,7 +915,7 @@ module hauling_agreements::config_tests {
 
         scenario.next_tx(LISTER);
         let config = scenario.take_shared<Config>();
-        let cargo = mint(src(), ITEM, CARGO_QTY, &mut scenario);
+        let cargo = vector[mint(src(), ITEM, CARGO_QTY, &mut scenario)];
         let reward = coin<TOKEN>(REWARD_QTY, &mut scenario);
         let fee = coin::zero<TOKEN>(scenario.ctx());
         let mut d = hauling::draft(
