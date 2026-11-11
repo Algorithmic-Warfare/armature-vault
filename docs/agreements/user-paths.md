@@ -2,9 +2,11 @@
 
 Every way a player, service or extension author interacts with a hauling agreement, step by step. For the reasoning behind the design, see [design.md](design.md).
 
-Code blocks show the commands of one programmable transaction block (PTB), written as Move calls. `hauling` is `hauling_agreements::hauling`, `terms` is `hauling_agreements::terms`, `config` is `hauling_agreements::config`, `spec` is `agreements::spec`, `request` is `agreements::request`, `claim` is `agreement_roles::claim`, `acl` is `roles::acl`, and `coin` is `sui::coin`. Times are milliseconds from the Sui `Clock`.
+Code blocks show the commands of one programmable transaction block (PTB), written as Move calls. `hauling` is `hauling_agreements::hauling`, `terms` is `hauling_agreements::terms`, `config` is `hauling_agreements::config`, `spec` is `agreements::spec`, `payout` is `agreements::payout`, `request` is `agreements::request`, `claim` is `agreement_roles::claim`, `acl` is `roles::acl`, and `coin` is `sui::coin`. Times are milliseconds from the Sui `Clock`.
 
 `T` is the agreement's currency: the coin type of its reward, collateral and delivery fee, which must be approved in the shared `Config`. `F` is the posting fee's coin type. A PTB passes `T` as a type argument to every call on a `HaulingAgreement<T>` or `Draft<T>`, and `T` then `F` to `draft` and `post`. Cargo and `want` are multicoin balances; only payments are coins.
+
+Cargo, `want` and a delivery are lists, one entry per item, up to 32 (`terms::max_items`). `vector[a, b]` in a code block is a `MakeMoveVec` command (`tx.makeMoveVec` in the TypeScript SDK). A PTB can't transfer a returned `vector<Balance>` as an object: send every balance in it to one address with `payout::pay_all(balances, to)`, or take them out one at a time with `0x1::vector::pop_back` and then destroy the empty vector with `0x1::vector::destroy_empty`.
 
 ## Who is involved
 
@@ -75,14 +77,17 @@ sequenceDiagram
 let reward = coin::split(&mut my_coins, reward_amount, ctx);        // Coin<T>
 let post_fee = coin::split(&mut my_fee_coins, post_fee_amount, ctx); // Coin<F>
 let terms = terms::new(
-    spec::new(dest_collection, item_type, qty),      // want
+    vector[                                           // want: one Spec per item, in delivery order
+        spec::new(dest_collection, ore_type, ore_qty),
+        spec::new(dest_collection, fuel_type, fuel_qty),
+    ],
     collateral,       // u64: the amount of T a hauler must lock
     accept_ms,        // relative: accept window from posting
     haul_ms,          // relative: delivery window from acceptance
     beneficiary,      // who receives the delivery
 );
 let cap = hauling::post<T, F>(
-    cargo,            // Balance: receipts from the source SSU's collection
+    vector[ore_receipts, fuel_receipts],  // cargo: one Balance per item, from the source SSU's collection
     reward,           // Coin<T>: what the hauler earns
     terms,
     &config,          // the package's shared Config
@@ -93,9 +98,10 @@ transfer::public_transfer(cap, lister);
 ```
 
 - **Result:** a shared `HaulingAgreement<T>` and an `AgreementPosted` event. Keep the `ListerCap`: it is the only way to cancel. It has `store`, so a DAO or vault can hold it.
+- **Items:** cargo and `want` each name an item at most once. Cargo may be `vector[]`, for a job that only pays for delivery; an empty `MakeMoveVec` must name its element type, `multicoin::multicoin::Balance`. The hauler must deliver every `want` entry, in `want`'s order. The cargo is released, and shown in events and records, in the order you list it.
 - **Currency:** `T` must be approved; check with `config.is_approved<T>()` or list them with `config.currencies()`. Revoking `T` later doesn't affect this agreement.
 - **Fees:** `post_fee` goes to the treasury at once and isn't refunded if you cancel. Read the current fee from `config.post_fee()`, which names its coin type and amount; when it is `none`, pass an empty coin of any type, such as `coin::zero<SUI>(ctx)`. The agreement also copies the config's delivery fee rate and treasury, and `AgreementPosted` shows all three.
-- **Fails with:** `terms::EInvalidTerms`, from `terms::new` if `accept_ms` or `haul_ms` is 0 or more than 30 days or the `want` quantity or `collateral` is 0, and from `post` if `want` names the cargo's own collection and asset. `config::ECurrencyNotApproved` if `T` isn't approved. `config::EWrongPostFeeCurrency` or `config::EWrongPostFeeAmount` if `post_fee` isn't exactly the posting fee, and `config::EUnexpectedFee` if no posting fee is set and `post_fee` isn't empty.
+- **Fails with:** `terms::EInvalidTerms`, from `terms::new` if `accept_ms` or `haul_ms` is 0 or more than 30 days, `collateral` is 0, or `want` is empty, has more than 32 entries, has an entry of 0 or names the same collection and asset twice, and from `post` if any `want` entry names a collection and asset the cargo holds. `EInvalidCargo` if a cargo balance is empty, two cargo balances are the same collection and asset, or there are more than 32. `config::ECurrencyNotApproved` if `T` isn't approved. `config::EWrongPostFeeCurrency` or `config::EWrongPostFeeAmount` if `post_fee` isn't exactly the posting fee, and `config::EUnexpectedFee` if no posting fee is set and `post_fee` isn't empty.
 - **Pricing:** set collateral to at least the cargo's value plus the reward. The hauler holds the cargo from the moment they accept, and collateral is your only protection.
 
 ### L2. Post with extensions
@@ -152,10 +158,11 @@ let cap = draft.publish();
 **When:** nobody has accepted yet, including after `accept_by_ms` has passed (the agreement has lapsed).
 
 ```move
-let (cargo, reward) = agreement.cancel(cap, &clock, ctx);   // Balance, Coin<T>
+let (cargo, reward) = agreement.cancel(cap, &clock, ctx);   // vector<Balance>, Coin<T>
+payout::pay_all(cargo, lister);                             // or pass it on to `post`
 ```
 
-- **Result:** the cargo and the reward coin are returned to the cap holder, the agreement and the cap are deleted, and `AgreementCancelled` is emitted. A bound observer receives a `Cancelled` record. The posting fee is not refunded.
+- **Result:** the cargo, one balance per item in the order escrowed, and the reward coin are returned to the cap holder, the agreement and the cap are deleted, and `AgreementCancelled` is emitted. A bound observer receives a `Cancelled` record. The posting fee is not refunded.
 - **Fails with:** `ENotOpen` once a hauler has accepted, and `EWrongCap` for another agreement's cap.
 - **To post the same terms again,** read `agreement.terms()` before cancelling and pass them to `post` with the returned cargo and reward. Their windows are relative, so this works after the listing has lapsed too, with a fresh accept window.
 - **If the cap is lost,** the config admin can close the agreement once it lapses ([A2](#a2-close-a-lapsed-agreement)). With a beneficiary address, that sends the cargo and reward to the address that signed `draft`. For terms that pay the cap holder it sends them to the lost cap as `Proceeds`, which only that cap can collect, so they can't be recovered.
@@ -192,12 +199,14 @@ transfer::public_transfer(cap, custodian);   // or store it in the wrapper's own
 
 ```move
 let (items, coins) = hauling::collect<T>(cap, proceeds);   // proceeds: Receiving<Proceeds<T>>
-// items: Option<Balance>, the delivered want or the returned cargo; none after a default
+// items: vector<Balance>, the delivered want or the returned cargo, one per item in the
+//        agreement's order; empty after a default, or for a lapsed listing with no cargo
 // coins: Coin<T>, the reward and collateral after a default, the reward after a lapse,
 //        and empty after a delivery
+payout::pay_all(items, me);   // or pop_back each balance into a vault deposit
 ```
 
-- **Result:** the proceeds and the cap are deleted, their storage rebate goes to the gas payer, and `ProceedsCollected` is emitted with what they held. The results compose in the same PTB, for example straight into a vault deposit.
+- **Result:** the proceeds and the cap are deleted, their storage rebate goes to the gas payer, and `ProceedsCollected` is emitted with what they held. The results compose in the same PTB, for example straight into a vault deposit. `items` must be consumed even when empty: `payout::pay_all` does that, as does `0x1::vector::destroy_empty`.
 - **Fails with:** `sui::transfer::EUnableToReceiveObject` for proceeds sent to another cap.
 
 ---
@@ -210,11 +219,12 @@ let (items, coins) = hauling::collect<T>(cap, proceeds);   // proceeds: Receivin
 
 ```move
 let collateral = coin::split(&mut my_coins, agreement.collateral_amount(), ctx);   // Coin<T>
-let cargo = agreement.accept(collateral, &clock, ctx);
+let cargo = agreement.accept(collateral, &clock, ctx);   // vector<Balance>, one per cargo item
+payout::pay_all(cargo, me);   // or pop_back each balance to redeem it in this PTB
 ```
 
-- **Before accepting,** check that `want.collection` really is the destination SSU's receipt collection and that you can redeem the cargo at the source. The contract checks neither. Also check `currency` and `delivery_fee_bps` in `AgreementPosted` (or `agreement.currency()` and `agreement.delivery_fee_bps()`): you are paid in that coin, and that share of the reward goes to the treasury when you deliver.
-- **Result:** the cargo is returned to you, the collateral is locked, and `deadline_ms = now + haul_ms`. `AgreementAccepted` is emitted.
+- **Before accepting,** check that every `want` entry's collection really is the destination SSU's receipt collection and that you can redeem the cargo at the source. The contract checks neither. Also check `currency` and `delivery_fee_bps` in `AgreementPosted` (or `agreement.currency()` and `agreement.delivery_fee_bps()`): you are paid in that coin, and that share of the reward goes to the treasury when you deliver.
+- **Result:** the cargo is returned to you, one balance per item in the order escrowed (an empty vector for an agreement with no cargo), the collateral is locked, and `deadline_ms = now + haul_ms`. `AgreementAccepted` is emitted.
 - **Fails with:** `ENotOpen` if someone accepted first, `ETooLate` at or after `accept_by_ms`, `EWrongCollateral` for a coin that isn't exactly `collateral_amount`, and `request::ERequestNotComplete` if the agreement has requirements (use H2).
 
 ### H2. Accept a gated agreement
@@ -228,7 +238,7 @@ some_rule::satisfy(&mut req, &my_profile);    // requirement 2: whatever rule co
 let cargo = agreement.finish_accept(req, collateral, &clock);
 ```
 
-The same transaction with the TypeScript SDK (a sketch). `coinType` is the agreement's `T`, from the object's type `HaulingAgreement<T>`:
+The same transaction with the TypeScript SDK (a sketch). `coinType` is the agreement's `T`, from the object's type `HaulingAgreement<T>`, and `AGREEMENTS` is the `agreements` package:
 
 ```ts
 const tx = new Transaction();
@@ -247,7 +257,11 @@ const cargo = tx.moveCall({
   typeArguments: [coinType],
   arguments: [tx.object(agreementId), req, collateral, tx.object.clock()],
 });
-tx.transferObjects([cargo], myAddress);
+// cargo is a vector<Balance>, not an object, so transferObjects can't send it.
+tx.moveCall({
+  target: `${AGREEMENTS}::payout::pay_all`,
+  arguments: [cargo, tx.pure.address(myAddress)],
+});
 ```
 
 - **How a client knows what to call:** each requirement's type name identifies the rule's package and module, and its config is BCS-encoded in `data`. A client keeps a map from rule type to the satisfy call it knows how to build.
@@ -257,21 +271,22 @@ tx.transferObjects([cargo], myAddress);
 
 ### H3. Haul and deliver with warehouse receipts
 
-**When:** you hold the cargo receipts and want to be paid. Delivery is a type-and-amount check, so how the goods travel is up to you.
+**When:** you hold the cargo receipts and want to be paid. Delivery is a type-and-amount check on each item, so how the goods travel is up to you.
 
 ```move
-// At the source SSU (any time after accepting):
-warehouse_receipts::receipt::redeem_receipt(/* source vault, cargo receipts, ... */);
+// At the source SSU (any time after accepting), once per cargo item:
+warehouse_receipts::receipt::redeem_receipt(/* one cargo receipt, source vault, ... */);
 
 // ...move the items in game...
 
-// At the destination SSU, in one PTB:
-let delivered = warehouse_receipts::receipt::deposit_for_receipt(/* destination vault, items, ... */);
-agreement.deliver(delivered, &clock, ctx);
+// At the destination SSU, in one PTB: one deposit per want entry.
+let ore = warehouse_receipts::receipt::deposit_for_receipt(/* destination vault, ore, ... */);
+let fuel = warehouse_receipts::receipt::deposit_for_receipt(/* destination vault, fuel, ... */);
+agreement.deliver(vector[ore, fuel], &clock, ctx);   // in want's order
 ```
 
 - **Result:** the delivered receipts go to the beneficiary, or to the cap as `Proceeds` for terms that pay the cap holder. The delivery fee, `reward * delivery_fee_bps / 10,000` rounded down, goes to the agreement's treasury, and the rest of the reward and the collateral go to you, as coins of `T`. A zero amount, such as a delivery fee at a rate of 0, isn't sent. The agreement is deleted, and `AgreementDelivered` and an observer record are produced. The event's `reward` is what you received, and `delivery_fee` is what the treasury received.
-- **Fails with:** `ETooLate` at or after `deadline_ms`, and `spec::EWrongAsset` or `spec::EWrongAmount` unless the balance is exactly `want`. Handing back the source receipts is not delivery: `draft` rejects a `want` in the cargo's own collection and asset.
+- **Fails with:** `ETooLate` at or after `deadline_ms`, `spec::EWrongCount` unless there is exactly one balance per `want` entry, and `spec::EWrongAsset` or `spec::EWrongAmount` unless each balance is exactly its `want` entry, in `want`'s order. Delivery is all or nothing: a missing, extra, mismatched or out-of-order balance aborts the call, and nothing is paid. Handing back the source receipts is not delivery: `draft` rejects a `want` entry naming a collection and asset the cargo holds.
 
 ### H4. Forfeit
 
@@ -293,7 +308,7 @@ agreement.forfeit(&clock, ctx);   // only the hauler
 **When:** you hold receipts that match `want`, for example ones bought on a market. `deliver` is permissionless and its recipients are fixed, so the hauler is still paid the reward less the delivery fee, and the fee still goes to the agreement's treasury. Pair it with a private arrangement with the hauler if you want to be paid yourself.
 
 ```move
-agreement.deliver(receipts_matching_want, &clock, ctx);
+agreement.deliver(vector[receipt_a, receipt_b], &clock, ctx);   // one per want entry, in want's order
 ```
 
 ### X2. Collect a default
@@ -407,7 +422,7 @@ A wrapper that drafts for an entity, such as a DAO's governance handler run by o
 ```move
 public struct Desk has drop {}
 
-public fun post_for_dao<T, F>(dao: &Dao, /* the DAO's authorization, */ cargo: Balance,
+public fun post_for_dao<T, F>(dao: &Dao, /* the DAO's authorization, */ cargo: vector<Balance>,
     reward: Coin<T>, terms: Terms, config: &Config, post_fee: Coin<F>, clock: &Clock,
     ctx: &mut TxContext): ListerCap {
     // check that the DAO authorized this, then:
@@ -452,7 +467,7 @@ config::set_treasury(&admin_cap, &mut config, treasury);
 agreement.close_lapsed(&admin_cap, &clock, ctx);   // the config::AdminCap
 ```
 
-- **Result:** the cargo and reward go to the agreement's `lister`, the address that signed `draft`, or to its cap as `Proceeds` for terms that pay the cap holder, and never to the caller. The agreement is deleted and `AgreementLapsed` is emitted. A bound observer receives a `Lapsed` record. No fee is taken and the posting fee is not refunded. An empty cargo or a zero reward isn't sent.
+- **Result:** the cargo and reward go to the agreement's `lister`, the address that signed `draft`, or to its cap as `Proceeds` for terms that pay the cap holder, and never to the caller. The agreement is deleted and `AgreementLapsed` is emitted. A bound observer receives a `Lapsed` record. No fee is taken and the posting fee is not refunded. A zero reward isn't sent, and an agreement with no cargo sends no items.
 - **With a beneficiary address, refunds follow the signer, not the cap.** If a DAO or other wrapper listed through someone's key and holds the cap, the refund lands at that key's address. Such a lister should post on terms that pay the cap holder ([L6](#l6-post-with-payouts-to-the-cap-holder)).
 - **Give the cap holder time first.** The holder can still `cancel` a lapsed listing ([L4](#l4-cancel)), and whichever transaction lands first decides where the escrow goes. Close only listings lapsed long enough that a holder who meant to cancel would have.
 - **The cap survives.** Whoever holds it can delete it with `delete_cap` ([L5](#l5-delete-a-spent-cap)), or, for terms that pay the cap holder, collect the refund with it ([L7](#l7-collect-proceeds)).

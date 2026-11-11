@@ -63,6 +63,25 @@ module agreements::payout_tests {
         sc.end();
     }
 
+    #[test]
+    fun pay_all_sends_every_nonempty_balance() {
+        let mut sc = ts::begin(PAYER);
+        payout::pay_all(
+            vector[
+                multicoin::create_balance_for_testing(coll(), ASSET, 42, sc.ctx()),
+                multicoin::create_balance_for_testing(coll(), ASSET + 1, 0, sc.ctx()),
+                multicoin::create_balance_for_testing(coll(), ASSET + 2, 8, sc.ctx()),
+            ],
+            A,
+        );
+        payout::pay_all(vector[], B);
+        sc.next_tx(PAYER);
+        assert_eq!(received(&sc, A), 50);
+        assert_eq!(pieces(A), 2);
+        assert_eq!(pieces(B), 0);
+        sc.end();
+    }
+
     // === Exact and rounded splits ===
 
     #[test]

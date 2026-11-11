@@ -1,13 +1,20 @@
 /// Hauling agreements: a collateralized forward swap of items, paid in a coin.
 ///
-/// A lister escrows `cargo` (a multicoin balance of items) and a `reward` in
-/// coin type `T`, and names what counts as delivery (`want`: an exact
-/// collection, asset and quantity) and the collateral, also in `T`, a hauler
-/// must lock. Accepting locks that collateral and releases the cargo to the
-/// hauler at once. Delivering the wanted balance before the deadline pays it to
-/// the beneficiary and returns reward plus collateral to the hauler. Missing
-/// the deadline lets anyone send reward and collateral to the beneficiary; the
-/// hauler may also forfeit them early.
+/// A lister escrows `cargo` (multicoin balances, one per item) and a `reward`
+/// in coin type `T`, and names what counts as delivery (`want`: an exact
+/// collection, asset and quantity for each item) and the collateral, also in
+/// `T`, a hauler must lock. Accepting locks that collateral and releases the
+/// cargo to the hauler at once. Delivering the wanted balances before the
+/// deadline pays them to the beneficiary and returns reward plus collateral to
+/// the hauler. Missing the deadline lets anyone send reward and collateral to
+/// the beneficiary; the hauler may also forfeit them early.
+///
+/// Every agreement carries a list of items, so one hauler moves a mixed cargo
+/// under one reward and one collateral. Cargo and `want` each list at most
+/// `terms::max_items` entries, each of a different collection and asset, and
+/// lists keep their order: a delivery hands in one balance per `want` entry,
+/// in `want`'s order, and events, outcome records and `Proceeds` list items in
+/// the order the agreement does.
 ///
 /// `T` must be one of the currencies approved in `config` when the agreement
 /// is drafted. Reward, collateral and the delivery fee are all in `T`.
@@ -15,8 +22,8 @@
 /// With warehouse receipts, a balance's collection identifies its storage unit
 /// and its asset ID the item type, so `cargo` in the source SSU's collection
 /// and `want` in the destination's describe a haul between two SSUs. Delivery
-/// is a type-and-amount check, so there is nothing to dispute and no adapter
-/// to trust. The contract does not check that a collection is a real
+/// is a type-and-amount check on each item, so there is nothing to dispute and
+/// no adapter to trust. The contract does not check that a collection is a real
 /// warehouse-receipt vault; parties must verify collections before posting or
 /// accepting.
 ///
@@ -24,7 +31,8 @@
 /// an oracle the lister prices it; collateral below the cargo's value plus the
 /// reward makes keeping the cargo the hauler's rational choice.
 ///
-/// Delivery also depends on the destination vault being able to mint `want`.
+/// Delivery also depends on the destination vault being able to mint every
+/// item of `want`.
 /// Whoever controls that storage unit (often the lister) can take it offline
 /// until the deadline and collect the collateral by default. Haulers should
 /// check who controls both endpoints before accepting.
@@ -76,8 +84,8 @@ use agreements::request::{Self, Request};
 use agreements::requirement::Requirement;
 use agreements::spec::{Self, Spec};
 use hauling_agreements::config::{Self, AdminCap, Config, PostFee};
-use hauling_agreements::terms::Terms;
-use multicoin::multicoin::{Self, Balance};
+use hauling_agreements::terms::{Self, Terms};
+use multicoin::multicoin::Balance;
 use std::internal::{Self, Permit};
 use std::type_name::{Self, TypeName};
 use sui::balance;
@@ -116,6 +124,9 @@ const ENotLapsed: vector<u8> = b"Accept window has not closed";
 #[error(code = 22)]
 const ECapReceivesProceeds: vector<u8> =
     b"Cap receives its agreement's proceeds; collect them instead of deleting it";
+#[error(code = 23)]
+const EInvalidCargo: vector<u8> =
+    b"Cargo must be at most max_items nonempty balances, each of a different item";
 
 // === Structs ===
 
@@ -155,10 +166,11 @@ public struct HaulingAgreement<phantom T> has key {
     /// Receives the delivery, or reward and collateral on default: the terms'
     /// beneficiary, or the `ListerCap`'s address when they pay the cap holder.
     beneficiary: address,
-    /// Released to the hauler on accept.
-    cargo: Option<Balance>,
-    /// What `cargo` held when drafted; kept after accept for outcome records.
-    cargo_spec: Spec,
+    /// One balance per item, possibly none; released to the hauler on accept.
+    cargo: Option<vector<Balance>>,
+    /// What `cargo` held when drafted, in order; kept after accept for outcome
+    /// records.
+    cargo_spec: vector<Spec>,
     reward: balance::Balance<T>,
     /// Empty until accepted.
     collateral: balance::Balance<T>,
@@ -210,9 +222,10 @@ public struct ListerCap has key, store {
 public struct Proceeds<phantom T> has key {
     id: UID,
     agreement_id: ID,
-    /// The delivered `want`, or the cargo when the listing lapsed. `none` on
-    /// default or forfeit, and for a lapsed listing with empty cargo.
-    items: Option<Balance>,
+    /// The delivered `want`, or the cargo when the listing lapsed, in the
+    /// agreement's order. Empty on default or forfeit, and for a lapsed listing
+    /// with no cargo.
+    items: vector<Balance>,
     /// Reward and collateral on default or forfeit, the reward when the listing
     /// lapsed, and nothing on delivery.
     coins: balance::Balance<T>,
@@ -244,8 +257,8 @@ public struct OutcomeRecord has key {
     /// The rule that attested `hauler_identity`. The lister chooses it, so an
     /// observer must ignore identities from rules it does not trust.
     identity_rule: Option<TypeName>,
-    cargo: Spec,
-    want: Spec,
+    cargo: vector<Spec>,
+    want: vector<Spec>,
     /// The coin type of `reward` and `collateral`.
     currency: TypeName,
     /// The escrowed reward, before any delivery fee.
@@ -283,8 +296,8 @@ public struct AgreementPosted has copy, drop {
     /// `beneficiary` is the cap's address, and the lister's side of the
     /// payouts arrives there as `Proceeds`.
     pays_cap_holder: bool,
-    cargo: Spec,
-    want: Spec,
+    cargo: vector<Spec>,
+    want: vector<Spec>,
     currency: TypeName,
     reward: u64,
     collateral: u64,
@@ -321,7 +334,8 @@ public struct AgreementDelivered has copy, drop {
     hauler: address,
     hauler_identity: Option<ID>,
     beneficiary: address,
-    delivered: Spec,
+    /// Equal to the agreement's `want`.
+    delivered: vector<Spec>,
     currency: TypeName,
     reward: u64,
     collateral: u64,
@@ -353,7 +367,7 @@ public struct AgreementDefaulted has copy, drop {
 public struct AgreementCancelled has copy, drop {
     agreement_id: ID,
     cancelled_by: address,
-    cargo: Spec,
+    cargo: vector<Spec>,
     currency: TypeName,
     reward: u64,
 }
@@ -367,7 +381,7 @@ public struct AgreementLapsed has copy, drop {
     lister: address,
     refunded_to: address,
     closed_by: address,
-    cargo: Spec,
+    cargo: vector<Spec>,
     currency: TypeName,
     reward: u64,
     /// The `Proceeds` holding cargo and reward, when the terms pay the cap
@@ -376,15 +390,15 @@ public struct AgreementLapsed has copy, drop {
 }
 
 /// The holder of `cap_id` opened `proceeds_id` with `collect`, deleting both.
-/// `items` is what the proceeds held, `none` after a default or forfeit or for
-/// a lapsed listing with empty cargo, and `coins` its amount of `currency`.
+/// `items` is what the proceeds held, empty after a default or forfeit or for
+/// a lapsed listing with no cargo, and `coins` its amount of `currency`.
 /// `collected_by` sent the transaction, which received them.
 public struct ProceedsCollected has copy, drop {
     agreement_id: ID,
     cap_id: ID,
     proceeds_id: ID,
     collected_by: address,
-    items: Option<Spec>,
+    items: vector<Spec>,
     currency: TypeName,
     coins: u64,
 }
@@ -401,15 +415,17 @@ public struct ListerCapDeleted has copy, drop {
 
 /// Start an agreement escrowing `cargo` and `reward`, paid in coin type `T`,
 /// which `config` must approve, on `terms` (see `terms`). The accept window
-/// starts now: someone must accept before `now + terms.accept_ms()`. `want`
-/// must name a different collection or asset than `cargo`, so handing the
-/// cargo back can never count as delivery.
+/// starts now: someone must accept before `now + terms.accept_ms()`. `cargo`
+/// is one nonempty balance per item, each of a different collection and
+/// asset, at most `terms::max_items` of them; it may be empty, for an
+/// agreement that only pays for delivery. No entry of `want` may name an item
+/// the cargo holds, so handing cargo back can never count as delivery.
 /// `post_fee` must be exactly `config`'s posting fee in its coin type `F` (an
 /// empty coin of any type when there is none); it goes to the treasury now and
 /// is not refunded. The agreement fixes `config`'s delivery rate and treasury.
 /// Attach extensions, then `publish`.
 public fun draft<T, F>(
-    cargo: Balance,
+    cargo: vector<Balance>,
     reward: Coin<T>,
     terms: Terms,
     config: &Config,
@@ -418,7 +434,13 @@ public fun draft<T, F>(
     ctx: &mut TxContext,
 ): Draft<T> {
     let now = clock.timestamp_ms();
-    let cargo_spec = spec::of(&cargo);
+    let cargo_spec = spec::of_each(&cargo);
+    assert!(
+        cargo_spec.length() <= terms::max_items()
+            && cargo_spec.all!(|item| item.qty() > 0)
+            && spec::all_distinct(&cargo_spec),
+        EInvalidCargo,
+    );
     terms.assert_fits(&cargo_spec);
     config.assert_approved<T>();
     config.collect_post_fee(post_fee);
@@ -531,7 +553,7 @@ public fun publish<T>(draft: Draft<T>): ListerCap {
 
 /// `draft` then `publish`, for an agreement with no extensions.
 public fun post<T, F>(
-    cargo: Balance,
+    cargo: vector<Balance>,
     reward: Coin<T>,
     terms: Terms,
     config: &Config,
@@ -558,15 +580,17 @@ public fun begin_accept<T>(self: &HaulingAgreement<T>, clock: &Clock, ctx: &TxCo
     )
 }
 
-/// Lock exactly the agreed collateral and receive the cargo. The request must
-/// come from `begin_accept` on this agreement with every requirement
-/// satisfied. How the cargo is moved is the hauler's business.
+/// Lock exactly the agreed collateral and receive the cargo, one balance per
+/// item in the agreement's order (`agreements::payout::pay_all` sends them all
+/// to one address). The request must come from `begin_accept` on this
+/// agreement with every requirement satisfied. How the cargo is moved is the
+/// hauler's business.
 public fun finish_accept<T>(
     self: &mut HaulingAgreement<T>,
     request: Request,
     collateral: Coin<T>,
     clock: &Clock,
-): Balance {
+): vector<Balance> {
     let (hauler, hauler_identity) = request.complete(
         internal::permit<AcceptAction>(),
         object::id(self),
@@ -596,28 +620,30 @@ public fun accept<T>(
     collateral: Coin<T>,
     clock: &Clock,
     ctx: &mut TxContext,
-): Balance {
+): vector<Balance> {
     let request = self.begin_accept(clock, ctx);
     self.finish_accept(request, collateral, clock)
 }
 
 // === Delivering and defaulting ===
 
-/// Hand in exactly the wanted balance before the deadline. Permissionless:
-/// recipients are fixed, so it does not matter who submits. The wanted balance
-/// goes to the beneficiary, or as `Proceeds` to the cap when the terms pay the
-/// cap holder. The delivery fee, `reward * delivery_fee_bps / 10,000` rounded
-/// down, goes to the treasury and the rest of the reward to the hauler.
+/// Hand in exactly the wanted balances before the deadline: one per `want`
+/// entry, in `want`'s order (see `agreements::spec::assert_each_matches`).
+/// Permissionless: recipients are fixed, so it does not matter who submits.
+/// The wanted balances go to the beneficiary, or as `Proceeds` to the cap when
+/// the terms pay the cap holder. The delivery fee, `reward * delivery_fee_bps /
+/// 10,000` rounded down, goes to the treasury and the rest of the reward to the
+/// hauler.
 public fun deliver<T>(
     self: HaulingAgreement<T>,
-    delivered: Balance,
+    delivered: vector<Balance>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
     assert!(self.hauler.is_some(), ENotAccepted);
     assert!(clock.timestamp_ms() < self.deadline_ms, ETooLate);
     let want = self.terms.want();
-    want.assert_matches(&delivered);
+    spec::assert_each_matches(&want, &delivered);
     self.record(Outcome::Delivered, clock, ctx);
     let (agreement_id, lister) = (object::id(&self), self.lister);
     let hauler_identity = self.hauler_identity;
@@ -626,12 +652,10 @@ public fun deliver<T>(
     let (beneficiary, hauler, mut reward, collateral) = close(self);
     let delivery_fee = config::delivery_fee_on(reward.value(), fee_bps);
     pay(reward.split(delivery_fee), treasury, ctx);
-    let delivered_spec = spec::of(&delivered);
     let proceeds_id = if (to_cap) {
-        let items = option::some(delivered);
-        option::some(send_proceeds<T>(agreement_id, items, balance::zero(), beneficiary, ctx))
+        option::some(send_proceeds<T>(agreement_id, delivered, balance::zero(), beneficiary, ctx))
     } else {
-        transfer::public_transfer(delivered, beneficiary);
+        payout::pay_all(delivered, beneficiary);
         option::none()
     };
     event::emit(AgreementDelivered {
@@ -640,7 +664,7 @@ public fun deliver<T>(
         hauler,
         hauler_identity,
         beneficiary,
-        delivered: delivered_spec,
+        delivered: want,
         currency: type_name::with_original_ids<T>(),
         reward: reward.value(),
         collateral: collateral.value(),
@@ -674,14 +698,15 @@ public fun forfeit<T>(self: HaulingAgreement<T>, clock: &Clock, ctx: &mut TxCont
     pay_default(self, true, clock, ctx);
 }
 
-/// Delete an open agreement, returning `(cargo, reward)` to the cap holder.
-/// Allowed before or after `accept_by_ms`, whoever the terms pay.
+/// Delete an open agreement, returning `(cargo, reward)` to the cap holder, the
+/// cargo as one balance per item in the agreement's order. Allowed before or
+/// after `accept_by_ms`, whoever the terms pay.
 public fun cancel<T>(
     self: HaulingAgreement<T>,
     cap: ListerCap,
     clock: &Clock,
     ctx: &mut TxContext,
-): (Balance, Coin<T>) {
+): (vector<Balance>, Coin<T>) {
     let ListerCap { id: cap_id, agreement_id, .. } = cap;
     cap_id.delete();
     assert!(agreement_id == object::id(&self), EWrongCap);
@@ -691,7 +716,7 @@ public fun cancel<T>(
     event::emit(AgreementCancelled {
         agreement_id,
         cancelled_by: ctx.sender(),
-        cargo: spec::of(&returned),
+        cargo: spec::of_each(&returned),
         currency: type_name::with_original_ids<T>(),
         reward: reward.value(),
     });
@@ -722,11 +747,11 @@ public fun close_lapsed<T>(
     let to_cap = self.terms.pays_cap_holder();
     let refunded_to = if (to_cap) self.beneficiary else lister;
     let (cargo, reward) = close_open(self);
-    let (cargo_spec, reward_amount) = (spec::of(&cargo), reward.value());
+    let (cargo_spec, reward_amount) = (spec::of_each(&cargo), reward.value());
     let proceeds_id = if (to_cap) {
-        option::some(send_proceeds(agreement_id, non_empty(cargo), reward, refunded_to, ctx))
+        option::some(send_proceeds(agreement_id, cargo, reward, refunded_to, ctx))
     } else {
-        payout::pay(cargo, lister);
+        payout::pay_all(cargo, lister);
         pay(reward, lister, ctx);
         option::none()
     };
@@ -742,8 +767,9 @@ public fun close_lapsed<T>(
     });
 }
 
-/// Open the `Proceeds` sent to `cap` and delete both, returning the items, if
-/// any, and the coins. Only an agreement whose terms pay the cap holder sends
+/// Open the `Proceeds` sent to `cap` and delete both, returning the items, one
+/// balance per item and possibly none, and the coins. Only an agreement whose
+/// terms pay the cap holder sends
 /// proceeds, exactly once, when it ends by `deliver`, `default`, `forfeit` or
 /// `close_lapsed`; `cancel` returns its escrow directly instead. Emits
 /// `ProceedsCollected`.
@@ -751,14 +777,14 @@ public fun collect<T>(
     mut cap: ListerCap,
     proceeds: Receiving<Proceeds<T>>,
     ctx: &mut TxContext,
-): (Option<Balance>, Coin<T>) {
+): (vector<Balance>, Coin<T>) {
     let Proceeds { id, agreement_id, items, coins } = transfer::receive(&mut cap.id, proceeds);
     event::emit(ProceedsCollected {
         agreement_id,
         cap_id: object::id(&cap),
         proceeds_id: id.to_inner(),
         collected_by: ctx.sender(),
-        items: items.map_ref!(|balance| spec::of(balance)),
+        items: spec::of_each(&items),
         currency: type_name::with_original_ids<T>(),
         coins: coins.value(),
     });
@@ -829,10 +855,11 @@ public fun pays_cap_holder<T>(self: &HaulingAgreement<T>): bool {
     self.terms.pays_cap_holder()
 }
 
-public fun cargo<T>(self: &HaulingAgreement<T>): &Option<Balance> { &self.cargo }
+/// The escrowed cargo, one balance per item; `none` once released on accept.
+public fun cargo<T>(self: &HaulingAgreement<T>): &Option<vector<Balance>> { &self.cargo }
 
 /// What the cargo held when drafted, before or after it is released.
-public fun cargo_spec<T>(self: &HaulingAgreement<T>): Spec { self.cargo_spec }
+public fun cargo_spec<T>(self: &HaulingAgreement<T>): vector<Spec> { self.cargo_spec }
 
 /// The coin type the agreement is paid in.
 public fun currency<T>(_: &HaulingAgreement<T>): TypeName { type_name::with_original_ids<T>() }
@@ -840,7 +867,7 @@ public fun currency<T>(_: &HaulingAgreement<T>): TypeName { type_name::with_orig
 /// The escrowed reward, before any delivery fee.
 public fun reward<T>(self: &HaulingAgreement<T>): u64 { self.reward.value() }
 
-public fun want<T>(self: &HaulingAgreement<T>): Spec { self.terms.want() }
+public fun want<T>(self: &HaulingAgreement<T>): vector<Spec> { self.terms.want() }
 
 /// The collateral a hauler must lock.
 public fun collateral_amount<T>(self: &HaulingAgreement<T>): u64 { self.terms.collateral() }
@@ -939,9 +966,9 @@ public fun record_hauler_identity(self: &OutcomeRecord): Option<ID> { self.haule
 /// the identity.
 public fun record_identity_rule(self: &OutcomeRecord): Option<TypeName> { self.identity_rule }
 
-public fun record_cargo(self: &OutcomeRecord): Spec { self.cargo }
+public fun record_cargo(self: &OutcomeRecord): vector<Spec> { self.cargo }
 
-public fun record_want(self: &OutcomeRecord): Spec { self.want }
+public fun record_want(self: &OutcomeRecord): vector<Spec> { self.want }
 
 public fun record_currency(self: &OutcomeRecord): TypeName { self.currency }
 
@@ -1004,7 +1031,7 @@ fun pay_default<T>(
     let (reward_amount, collateral_amount) = (reward.value(), collateral.value());
     let proceeds_id = if (to_cap) {
         reward.join(collateral);
-        option::some(send_proceeds(agreement_id, option::none(), reward, beneficiary, ctx))
+        option::some(send_proceeds(agreement_id, vector[], reward, beneficiary, ctx))
     } else {
         pay(reward, beneficiary, ctx);
         pay(collateral, beneficiary, ctx);
@@ -1034,7 +1061,7 @@ fun close<T>(
 }
 
 /// Delete an open agreement, returning its `(cargo, reward)`.
-fun close_open<T>(self: HaulingAgreement<T>): (Balance, balance::Balance<T>) {
+fun close_open<T>(self: HaulingAgreement<T>): (vector<Balance>, balance::Balance<T>) {
     let HaulingAgreement { id, mut cargo, reward, collateral, hauler, .. } = self;
     id.delete();
     collateral.destroy_zero();
@@ -1056,7 +1083,7 @@ fun pay<T>(funds: balance::Balance<T>, to: address, ctx: &mut TxContext) {
 /// Returns the proceeds' ID.
 fun send_proceeds<T>(
     agreement_id: ID,
-    items: Option<Balance>,
+    items: vector<Balance>,
     coins: balance::Balance<T>,
     cap: address,
     ctx: &mut TxContext,
@@ -1067,20 +1094,13 @@ fun send_proceeds<T>(
     proceeds_id
 }
 
-/// `some(balance)`, or `none` once an empty `balance` is destroyed.
-fun non_empty(balance: Balance): Option<Balance> {
-    if (multicoin::value(&balance) == 0) {
-        multicoin::destroy_zero(balance);
-        option::none()
-    } else option::some(balance)
-}
-
 // === Test helpers ===
 
 #[test_only]
 public fun posted_event_for_testing(
     agreement_id: ID, lister: address, on_behalf_of: Option<Entity>, cap_id: ID,
-    beneficiary: address, pays_cap_holder: bool, cargo: Spec, want: Spec, currency: TypeName,
+    beneficiary: address, pays_cap_holder: bool, cargo: vector<Spec>, want: vector<Spec>,
+    currency: TypeName,
     reward: u64, collateral: u64, posted_at_ms: u64, accept_by_ms: u64, haul_ms: u64,
     accept_requirements: vector<Requirement>, identity_rule: Option<TypeName>,
     observer: Option<Binding>, post_fee: Option<PostFee>, delivery_fee_bps: u16,
@@ -1104,7 +1124,8 @@ public fun accepted_event_for_testing(
 #[test_only]
 public fun delivered_event_for_testing(
     agreement_id: ID, lister: address, hauler: address, hauler_identity: Option<ID>,
-    beneficiary: address, delivered: Spec, currency: TypeName, reward: u64, collateral: u64,
+    beneficiary: address, delivered: vector<Spec>, currency: TypeName, reward: u64,
+    collateral: u64,
     delivery_fee: u64, treasury: address, proceeds_id: Option<ID>,
 ): AgreementDelivered {
     AgreementDelivered {
@@ -1127,14 +1148,16 @@ public fun defaulted_event_for_testing(
 
 #[test_only]
 public fun cancelled_event_for_testing(
-    agreement_id: ID, cancelled_by: address, cargo: Spec, currency: TypeName, reward: u64,
+    agreement_id: ID, cancelled_by: address, cargo: vector<Spec>, currency: TypeName,
+    reward: u64,
 ): AgreementCancelled {
     AgreementCancelled { agreement_id, cancelled_by, cargo, currency, reward }
 }
 
 #[test_only]
 public fun lapsed_event_for_testing(
-    agreement_id: ID, lister: address, refunded_to: address, closed_by: address, cargo: Spec,
+    agreement_id: ID, lister: address, refunded_to: address, closed_by: address,
+    cargo: vector<Spec>,
     currency: TypeName, reward: u64, proceeds_id: Option<ID>,
 ): AgreementLapsed {
     AgreementLapsed {
@@ -1144,7 +1167,7 @@ public fun lapsed_event_for_testing(
 
 #[test_only]
 public fun collected_event_for_testing(
-    agreement_id: ID, cap_id: ID, proceeds_id: ID, collected_by: address, items: Option<Spec>,
+    agreement_id: ID, cap_id: ID, proceeds_id: ID, collected_by: address, items: vector<Spec>,
     currency: TypeName, coins: u64,
 ): ProceedsCollected {
     ProceedsCollected { agreement_id, cap_id, proceeds_id, collected_by, items, currency, coins }

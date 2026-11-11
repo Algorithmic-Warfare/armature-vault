@@ -523,8 +523,19 @@ class Harness:
         return created(res, "::multicoin::Balance")[0]
 
     def spec(self, ptb, assign):
-        return ptb.call(self.target("agreements", "spec", "new"), "@" + self.collection,
-                        WANT_ASSET, CARGO_QTY, assign=assign)
+        """The standard want: one item, as the one-entry list `terms` take."""
+        ptb.call(self.target("agreements", "spec", "new"), "@" + self.collection,
+                 WANT_ASSET, CARGO_QTY, assign=assign + "_item")
+        return ptb.vec(f"{self.p['agreements']}::spec::Spec", [assign + "_item"], assign)
+
+    def balances(self, ptb, objects, assign):
+        """`objects`, wallet-held multicoin balances, as one `vector<Balance>`."""
+        return ptb.vec(f"{self.p['multicoin']}::multicoin::Balance",
+                       ["@" + o for o in objects], assign)
+
+    def pay_all(self, ptb, balances, to):
+        """Send a returned `vector<Balance>` to `to`."""
+        return ptb.call(self.target("agreements", "payout", "pay_all"), balances, to)
 
     def terms(self, ptb, assign, haul_ms=HAUL_MS, accept_ms=ACCEPT_WINDOW_MS,
               cap_holder=False):
@@ -569,8 +580,9 @@ class Harness:
         cargo = self.mint(CARGO_QTY, CARGO_ASSET, "lister")
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
         self.terms(ptb, "terms", haul_ms, accept_ms, cap_holder)
+        self.balances(ptb, [cargo], "cargo")
         ptb.call(self.target("hauling_agreements", "hauling", "post"),
-                 "@" + cargo, "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
+                 "cargo", "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
                  types=[SUI, SUI], assign="cap")
         ptb.transfer(["cap"], self.at("lister"))
         res, row = self.measure(label, "lister", ptb, "lister")
@@ -591,8 +603,9 @@ class Harness:
         ptb = Ptb().split_gas([REWARD, POST_FEE], "coins")
         self.terms(ptb, "terms")
         self.principals(ptb, specs)
+        self.balances(ptb, [cargo], "cargo")
         ptb.call(self.target("hauling_agreements", "hauling", "draft"),
-                 "@" + cargo, "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
+                 "cargo", "coins.0", "terms", "@" + self.config, "coins.1", CLOCK,
                  types=[SUI, SUI], assign="draft")
         ptb.call(self.target("agreement_roles", "claim", "requirement"), "principals",
                  assign="gate")
@@ -611,7 +624,8 @@ class Harness:
     def cancel(self, agreement, cap):
         ptb = (Ptb().call(self.target("hauling_agreements", "hauling", "cancel"),
                           "@" + agreement, "@" + cap, CLOCK, types=[SUI], assign="out")
-               .transfer(["out.0", "out.1"], self.at("lister")))
+               .transfer(["out.1"], self.at("lister")))
+        self.pay_all(ptb, "out.0", self.at("lister"))
         return self.measure("cancel", "lister", ptb, "lister")[1]
 
     def delete_cap(self, cap):
@@ -628,15 +642,13 @@ class Harness:
         """Collect the `Proceeds` the last transaction sent to `cap`: keep the
         items, and the coins when there are any (an empty coin is destroyed)."""
         proceeds = created_containing(self.last, "::hauling::Proceeds<")[0]
-        balance = f"{self.p['multicoin']}::multicoin::Balance"
-        ptb = (Ptb().call(self.target("hauling_agreements", "hauling", "collect"),
-                          "@" + cap, "@" + proceeds, types=[SUI], assign="out")
-               .call("0x1::option::destroy_some", "out.0", types=[balance], assign="items"))
+        ptb = Ptb().call(self.target("hauling_agreements", "hauling", "collect"),
+                         "@" + cap, "@" + proceeds, types=[SUI], assign="out")
+        self.pay_all(ptb, "out.0", self.at("lister"))
         if with_coins:
-            ptb.transfer(["items", "out.1"], self.at("lister"))
+            ptb.transfer(["out.1"], self.at("lister"))
         else:
             ptb.call("0x2::coin::destroy_zero", "out.1", types=[SUI])
-            ptb.transfer(["items"], self.at("lister"))
         return self.measure("collect", "lister", ptb, "lister")[1]
 
     # --- hauling ---
@@ -644,8 +656,8 @@ class Harness:
     def accept_open(self, agreement):
         ptb = (Ptb().split_gas([COLLATERAL], "c")
                .call(self.target("hauling_agreements", "hauling", "accept"),
-                     "@" + agreement, "c.0", CLOCK, types=[SUI], assign="cargo")
-               .transfer(["cargo"], self.at("hauler")))
+                     "@" + agreement, "c.0", CLOCK, types=[SUI], assign="cargo"))
+        self.pay_all(ptb, "cargo", self.at("hauler"))
         return self.measure("accept (open)", "hauler", ptb, "hauler")[1]
 
     def accept_gated(self, agreement, actor, via_ou, label):
@@ -658,13 +670,14 @@ class Harness:
             ptb.call(self.target("agreement_roles", "claim", "satisfy_directly"), "req")
         ptb.call(self.target("hauling_agreements", "hauling", "finish_accept"),
                  "@" + agreement, "req", "c.0", CLOCK, types=[SUI], assign="cargo")
-        ptb.transfer(["cargo"], self.at(actor))
+        self.pay_all(ptb, "cargo", self.at(actor))
         return self.measure(label, actor, ptb, "hauler (claim gate)")[1]
 
     def deliver(self, agreement, actor="hauler", label="deliver"):
         want = self.mint(CARGO_QTY, WANT_ASSET, actor)
-        ptb = Ptb().call(self.target("hauling_agreements", "hauling", "deliver"),
-                         "@" + agreement, "@" + want, CLOCK, types=[SUI])
+        ptb = self.balances(Ptb(), [want], "delivered")
+        ptb.call(self.target("hauling_agreements", "hauling", "deliver"),
+                 "@" + agreement, "delivered", CLOCK, types=[SUI])
         self.last, row = self.measure(label, actor, ptb, "anyone")
         return row
 

@@ -6,6 +6,7 @@ module hauling_claim_tests::accept_gate_tests;
 
 use agreement_roles::claim;
 use agreement_roles::test_ou;
+use agreements::payout;
 use agreements::request::{Self, Request};
 use agreements::spec;
 use armature::ou::OU;
@@ -56,13 +57,13 @@ fun world(): World {
 
 /// The standard want and windows, paying BENEFICIARY.
 fun standard_terms(): Terms {
-    terms::new(spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY)
+    terms::new(vector[spec::new(dst(), ITEM, QTY)], COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY)
 }
 
 /// Start a LISTER transaction drafting an agreement on `terms`.
 fun new_draft(w: &mut World, terms: Terms): Draft<TOKEN> {
     w.scenario.next_tx(LISTER);
-    let cargo = multicoin::create_balance_for_testing(src(), ITEM, QTY, w.scenario.ctx());
+    let cargo = vector[multicoin::create_balance_for_testing(src(), ITEM, QTY, w.scenario.ctx())];
     let reward = test_config::mint(REWARD_QTY, w.scenario.ctx());
     test_config::draft_with_terms(cargo, reward, terms, &w.clock, w.scenario.ctx())
 }
@@ -86,7 +87,7 @@ fun finish_accept(
 ) {
     let collateral = test_config::mint(COLLATERAL_QTY, w.scenario.ctx());
     let cargo = agreement.finish_accept(req, collateral, &w.clock);
-    transfer::public_transfer(cargo, who);
+    payout::pay_all(cargo, who);
     ts::return_shared(agreement);
 }
 
@@ -135,7 +136,7 @@ fun gate_reserves_an_agreement_for_one_player() {
 fun gate_keeps_terms_that_pay_the_cap_holder() {
     let mut w = world();
     let terms = terms::new_for_cap_holder(
-        spec::new(dst(), ITEM, QTY), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS,
+        vector[spec::new(dst(), ITEM, QTY)], COLLATERAL_QTY, ACCEPT_MS, HAUL_MS,
     );
     let haulers = w.haulers;
     let cap_address = post(&mut w, terms, vector[acl::ou(haulers)]);
@@ -167,7 +168,7 @@ fun plain_accept_cannot_skip_the_gate() {
     let mut agreement = w.scenario.take_shared<HaulingAgreement<TOKEN>>();
     let collateral = test_config::mint(COLLATERAL_QTY, w.scenario.ctx());
     let cargo = agreement.accept(collateral, &w.clock, w.scenario.ctx());
-    transfer::public_transfer(cargo, HAULER_1);
+    payout::pay_all(cargo, HAULER_1);
     ts::return_shared(agreement);
     done(w);
 }

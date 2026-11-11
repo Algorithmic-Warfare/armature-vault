@@ -28,7 +28,12 @@ module hauling_agreements::terms_tests {
     const LAPSED_MS: u64 = 9_000;
     const HAUL_MS: u64 = 10_000;
 
-    fun want(): Spec { spec::new(object::id_from_address(@0xD5), ITEM, CARGO_QTY) }
+    fun dst(): ID { object::id_from_address(@0xD5) }
+
+    fun want(): vector<Spec> { vector[spec::new(dst(), ITEM, CARGO_QTY)] }
+
+    /// `n` distinct items at the destination.
+    fun items(n: u64): vector<Spec> { vector::tabulate!(n, |i| spec::new(dst(), ITEM + i, 1)) }
 
     #[test]
     fun new_keeps_every_field() {
@@ -74,6 +79,57 @@ module hauling_agreements::terms_tests {
         terms::new_for_cap_holder(want(), 0, ACCEPT_MS, HAUL_MS);
     }
 
+    #[test]
+    fun want_keeps_several_items_in_order() {
+        let mixed = vector[spec::new(dst(), ITEM + 1, 3), spec::new(dst(), ITEM, CARGO_QTY)];
+        let t = terms::new(mixed, COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY);
+        assert_eq!(t.want(), mixed);
+    }
+
+    #[test]
+    fun want_allows_max_items() {
+        assert_eq!(terms::max_items(), 32);
+        terms::new_for_cap_holder(items(terms::max_items()), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS);
+    }
+
+    #[test, expected_failure(abort_code = terms::EInvalidTerms)]
+    fun want_rejects_more_than_max_items() {
+        terms::new_for_cap_holder(
+            items(terms::max_items() + 1),
+            COLLATERAL_QTY,
+            ACCEPT_MS,
+            HAUL_MS,
+        );
+    }
+
+    #[test, expected_failure(abort_code = terms::EInvalidTerms)]
+    fun want_rejects_no_items() {
+        terms::new(vector[], COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY);
+    }
+
+    #[test, expected_failure(abort_code = terms::EInvalidTerms)]
+    fun want_rejects_a_zero_item_among_others() {
+        terms::new(
+            vector[spec::new(dst(), ITEM, CARGO_QTY), spec::new(dst(), ITEM + 1, 0)],
+            COLLATERAL_QTY,
+            ACCEPT_MS,
+            HAUL_MS,
+            BENEFICIARY,
+        );
+    }
+
+    /// Each entry is a different item; the same item twice would be one entry.
+    #[test, expected_failure(abort_code = terms::EInvalidTerms)]
+    fun want_rejects_a_repeated_item() {
+        terms::new(
+            vector[spec::new(dst(), ITEM, CARGO_QTY), spec::new(dst(), ITEM, 1)],
+            COLLATERAL_QTY,
+            ACCEPT_MS,
+            HAUL_MS,
+            BENEFICIARY,
+        );
+    }
+
     #[test, expected_failure(abort_code = terms::EInvalidTerms)]
     fun new_for_cap_holder_rejects_haul_window_over_max() {
         terms::new_for_cap_holder(want(), COLLATERAL_QTY, ACCEPT_MS, terms::max_duration_ms() + 1);
@@ -87,12 +143,14 @@ module hauling_agreements::terms_tests {
         let mut scenario = ts::begin(LISTER);
         let mut clock = clock::create_for_testing(scenario.ctx());
         clock.set_for_testing(START_MS);
-        let cargo = multicoin::create_balance_for_testing(
-            object::id_from_address(@0x51),
-            ITEM,
-            CARGO_QTY,
-            scenario.ctx(),
-        );
+        let cargo = vector[
+            multicoin::create_balance_for_testing(
+                object::id_from_address(@0x51),
+                ITEM,
+                CARGO_QTY,
+                scenario.ctx(),
+            ),
+        ];
         let reward = test_config::mint(REWARD_QTY, scenario.ctx());
         let posted = terms::new(want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS, BENEFICIARY);
         let cap = test_config::post_with_terms(cargo, reward, posted, &clock, scenario.ctx());

@@ -71,6 +71,114 @@ fun assert_matches_rejects_more() {
     abort
 }
 
+// === Spec Sets ===
+
+#[test]
+fun same_asset_ignores_quantity() {
+    assert!(spec::new(coll(), 7, 10).same_asset(&spec::new(coll(), 7, 3)));
+    assert!(!spec::new(coll(), 7, 10).same_asset(&spec::new(coll(), 8, 10)));
+    assert!(!spec::new(coll(), 7, 10).same_asset(&spec::new(other_coll(), 7, 10)));
+}
+
+#[test]
+fun of_each_describes_balances_in_order() {
+    let mut sc = ts::begin(ALICE);
+    let balances = vector[mint(coll(), 7, 10, &mut sc), mint(other_coll(), 8, 3, &mut sc)];
+    assert_eq!(
+        spec::of_each(&balances),
+        vector[spec::new(coll(), 7, 10), spec::new(other_coll(), 8, 3)],
+    );
+    let none: vector<Balance> = vector[];
+    assert_eq!(spec::of_each(&none), vector[]);
+    none.destroy_empty();
+    balances.do!(|b| transfer::public_transfer(b, ALICE));
+    sc.end();
+}
+
+#[test]
+fun assert_each_matches_pairs_in_order() {
+    let mut sc = ts::begin(ALICE);
+    let balances = vector[mint(coll(), 7, 10, &mut sc), mint(other_coll(), 8, 3, &mut sc)];
+    spec::assert_each_matches(
+        &vector[spec::new(coll(), 7, 10), spec::new(other_coll(), 8, 3)],
+        &balances,
+    );
+    let none: vector<Balance> = vector[];
+    spec::assert_each_matches(&vector[], &none);
+    none.destroy_empty();
+    balances.do!(|b| transfer::public_transfer(b, ALICE));
+    sc.end();
+}
+
+#[test, expected_failure(abort_code = spec::EWrongAsset)]
+fun assert_each_matches_rejects_another_order() {
+    let mut sc = ts::begin(ALICE);
+    let balances = vector[mint(other_coll(), 8, 3, &mut sc), mint(coll(), 7, 10, &mut sc)];
+    spec::assert_each_matches(
+        &vector[spec::new(coll(), 7, 10), spec::new(other_coll(), 8, 3)],
+        &balances,
+    );
+    abort
+}
+
+#[test, expected_failure(abort_code = spec::EWrongCount)]
+fun assert_each_matches_rejects_a_missing_balance() {
+    let mut sc = ts::begin(ALICE);
+    let balances = vector[mint(coll(), 7, 10, &mut sc)];
+    spec::assert_each_matches(
+        &vector[spec::new(coll(), 7, 10), spec::new(other_coll(), 8, 3)],
+        &balances,
+    );
+    abort
+}
+
+#[test, expected_failure(abort_code = spec::EWrongCount)]
+fun assert_each_matches_rejects_an_extra_balance() {
+    let mut sc = ts::begin(ALICE);
+    let balances = vector[mint(coll(), 7, 10, &mut sc), mint(coll(), 8, 1, &mut sc)];
+    spec::assert_each_matches(&vector[spec::new(coll(), 7, 10)], &balances);
+    abort
+}
+
+#[test, expected_failure(abort_code = spec::EWrongAmount)]
+fun assert_each_matches_checks_every_quantity() {
+    let mut sc = ts::begin(ALICE);
+    let balances = vector[mint(coll(), 7, 10, &mut sc), mint(other_coll(), 8, 2, &mut sc)];
+    spec::assert_each_matches(
+        &vector[spec::new(coll(), 7, 10), spec::new(other_coll(), 8, 3)],
+        &balances,
+    );
+    abort
+}
+
+#[test]
+fun all_distinct_spots_a_repeated_asset() {
+    assert!(spec::all_distinct(&vector[]));
+    assert!(spec::all_distinct(&vector[spec::new(coll(), 7, 10)]));
+    assert!(
+        spec::all_distinct(
+            &vector[
+                spec::new(coll(), 7, 10),
+                spec::new(coll(), 8, 10),
+                spec::new(other_coll(), 7, 10),
+            ],
+        ),
+    );
+    assert!(
+        !spec::all_distinct(
+            &vector[spec::new(coll(), 7, 10), spec::new(coll(), 8, 10), spec::new(coll(), 7, 1)],
+        ),
+    );
+}
+
+#[test]
+fun any_shared_compares_assets_across_sets() {
+    let a = vector[spec::new(coll(), 7, 10), spec::new(coll(), 8, 10)];
+    assert!(spec::any_shared(&a, &vector[spec::new(other_coll(), 9, 1), spec::new(coll(), 8, 1)]));
+    assert!(!spec::any_shared(&a, &vector[spec::new(other_coll(), 7, 10)]));
+    assert!(!spec::any_shared(&a, &vector[]));
+}
+
 // === Requirement ===
 
 public struct Config has drop {

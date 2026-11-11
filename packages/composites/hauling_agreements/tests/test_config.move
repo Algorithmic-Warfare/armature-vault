@@ -50,7 +50,7 @@ module hauling_agreements::test_config {
 
     /// `hauling::draft` in `TOKEN` against a fee-free config.
     public fun draft_with_terms(
-        cargo: Balance,
+        cargo: vector<Balance>,
         reward: Coin<TOKEN>,
         terms: Terms,
         clock: &Clock,
@@ -73,7 +73,7 @@ module hauling_agreements::test_config {
 
     /// `hauling::post` in `TOKEN` against a fee-free config.
     public fun post_with_terms(
-        cargo: Balance,
+        cargo: vector<Balance>,
         reward: Coin<TOKEN>,
         terms: Terms,
         clock: &Clock,
@@ -84,9 +84,9 @@ module hauling_agreements::test_config {
 
     /// `draft_with_terms` with terms that pay `beneficiary`.
     public fun draft(
-        cargo: Balance,
+        cargo: vector<Balance>,
         reward: Coin<TOKEN>,
-        want: Spec,
+        want: vector<Spec>,
         collateral: u64,
         accept_ms: u64,
         haul_ms: u64,
@@ -100,9 +100,9 @@ module hauling_agreements::test_config {
 
     /// `post_with_terms` with terms that pay `beneficiary`.
     public fun post(
-        cargo: Balance,
+        cargo: vector<Balance>,
         reward: Coin<TOKEN>,
-        want: Spec,
+        want: vector<Spec>,
         collateral: u64,
         accept_ms: u64,
         haul_ms: u64,

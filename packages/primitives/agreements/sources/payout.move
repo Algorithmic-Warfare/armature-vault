@@ -1,5 +1,5 @@
-/// Pay out multicoin balances: whole, or divided among recipients by basis
-/// points.
+/// Pay out multicoin balances: whole, several to one recipient, or divided
+/// among recipients by basis points.
 module agreements::payout {
     use multicoin::multicoin::{Self, Balance};
 
@@ -70,6 +70,11 @@ module agreements::payout {
     public fun pay(balance: Balance, to: address) {
         if (multicoin::value(&balance) == 0) multicoin::destroy_zero(balance)
         else transfer::public_transfer(balance, to);
+    }
+
+    /// `pay` each of `balances` to `to`, for an agreement's multi-item payouts.
+    public fun pay_all(balances: vector<Balance>, to: address) {
+        balances.do!(|balance| pay(balance, to));
     }
 
     public fun bps(): u64 { BPS }

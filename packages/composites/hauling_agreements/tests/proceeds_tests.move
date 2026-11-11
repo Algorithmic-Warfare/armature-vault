@@ -3,6 +3,7 @@
 /// with `collect`.
 #[test_only]
 module hauling_agreements::proceeds_tests {
+    use agreements::payout;
     use agreements::spec::{Self, Spec};
     use hauling_agreements::{
         config,
@@ -54,9 +55,9 @@ module hauling_agreements::proceeds_tests {
         multicoin::create_balance_for_testing(collection, asset_id, qty, scenario.ctx())
     }
 
-    fun want(): Spec { spec::new(dst(), ITEM, CARGO_QTY) }
+    fun want(): vector<Spec> { vector[spec::new(dst(), ITEM, CARGO_QTY)] }
 
-    fun cargo_spec(): Spec { spec::new(src(), ITEM, CARGO_QTY) }
+    fun cargo_spec(): vector<Spec> { vector[spec::new(src(), ITEM, CARGO_QTY)] }
 
     fun cap_holder_terms(): Terms {
         terms::new_for_cap_holder(want(), COLLATERAL_QTY, ACCEPT_MS, HAUL_MS)
@@ -84,7 +85,9 @@ module hauling_agreements::proceeds_tests {
         clock: &Clock,
     ): (ID, ID) {
         scenario.next_tx(LISTER);
-        let cargo = mint(src(), ITEM, cargo_qty, scenario);
+        // No cargo at all when `cargo_qty` is 0.
+        let cargo = if (cargo_qty == 0) vector[]
+        else vector[mint(src(), ITEM, cargo_qty, scenario)];
         let reward = test_config::mint(reward_qty, scenario.ctx());
         let cap = test_config::post_with_terms(
             cargo,
@@ -110,7 +113,7 @@ module hauling_agreements::proceeds_tests {
         let collateral = test_config::mint(COLLATERAL_QTY, scenario.ctx());
         let mut agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         let cargo = agreement.accept(collateral, clock, scenario.ctx());
-        transfer::public_transfer(cargo, HAULER);
+        payout::pay_all(cargo, HAULER);
         ts::return_shared(agreement);
     }
 
@@ -118,7 +121,7 @@ module hauling_agreements::proceeds_tests {
     fun deliver(scenario: &mut Scenario, clock: &mut Clock) {
         clock.set_for_testing(DEADLINE_MS - 1);
         scenario.next_tx(OTHER);
-        let delivered = mint(dst(), ITEM, CARGO_QTY, scenario);
+        let delivered = vector[mint(dst(), ITEM, CARGO_QTY, scenario)];
         let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         agreement.deliver(delivered, clock, scenario.ctx());
     }
@@ -145,7 +148,7 @@ module hauling_agreements::proceeds_tests {
         holder: address,
         cap_id: ID,
         scenario: &mut Scenario,
-    ): (Option<Balance>, Coin<TOKEN>) {
+    ): (vector<Balance>, Coin<TOKEN>) {
         scenario.next_tx(holder);
         let cap = scenario.take_from_sender_by_id<ListerCap>(cap_id);
         let agreement_id = cap.cap_agreement_id();
@@ -160,7 +163,7 @@ module hauling_agreements::proceeds_tests {
                     cap_id,
                     proceeds_id,
                     holder,
-                    items.map_ref!(|balance| spec::of(balance)),
+                    spec::of_each(&items),
                     test_config::token(),
                     coins.value(),
                 ),
@@ -256,10 +259,9 @@ module hauling_agreements::proceeds_tests {
         assert_eq!(test_config::coins<TOKEN>(&scenario, HAULER), REWARD_QTY + COLLATERAL_QTY);
 
         let (items, coins) = collect(LISTER, cap_id, &mut scenario);
-        let items = items.destroy_some();
-        assert_eq!(spec::of(&items), want());
+        assert_eq!(spec::of_each(&items), want());
         assert_eq!(coins.value(), 0);
-        transfer::public_transfer(items, OTHER);
+        payout::pay_all(items, OTHER);
         coins.destroy_zero();
         assert_lister_holds_nothing(&mut scenario);
         finish(scenario, clock);
@@ -295,8 +297,7 @@ module hauling_agreements::proceeds_tests {
         );
 
         let (items, coins) = collect(LISTER, cap_id, &mut scenario);
-        assert!(items.is_none());
-        items.destroy_none();
+        items.destroy_empty();
         // Reward and collateral arrive together, as one coin.
         assert_eq!(coins.value(), REWARD_QTY + COLLATERAL_QTY);
         transfer::public_transfer(coins, OTHER);
@@ -333,7 +334,7 @@ module hauling_agreements::proceeds_tests {
         );
 
         let (items, coins) = collect(LISTER, cap_id, &mut scenario);
-        items.destroy_none();
+        items.destroy_empty();
         assert_eq!(coins.value(), REWARD_QTY + COLLATERAL_QTY);
         transfer::public_transfer(coins, OTHER);
         assert_lister_holds_nothing(&mut scenario);
@@ -366,10 +367,9 @@ module hauling_agreements::proceeds_tests {
         );
 
         let (items, coins) = collect(LISTER, cap_id, &mut scenario);
-        let items = items.destroy_some();
-        assert_eq!(spec::of(&items), cargo_spec());
+        assert_eq!(spec::of_each(&items), cargo_spec());
         assert_eq!(coins.value(), REWARD_QTY);
-        transfer::public_transfer(items, OTHER);
+        payout::pay_all(items, OTHER);
         transfer::public_transfer(coins, OTHER);
         assert_lister_holds_nothing(&mut scenario);
         finish(scenario, clock);
@@ -384,7 +384,7 @@ module hauling_agreements::proceeds_tests {
         close_lapsed(agreement_id, &mut scenario, &mut clock);
 
         let (items, coins) = collect(LISTER, cap_id, &mut scenario);
-        items.destroy_none();
+        items.destroy_empty();
         coins.destroy_zero();
         assert_lister_holds_nothing(&mut scenario);
         finish(scenario, clock);
@@ -400,13 +400,46 @@ module hauling_agreements::proceeds_tests {
         let cap = scenario.take_from_sender<ListerCap>();
         let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
         let (cargo, reward) = agreement.cancel(cap, &clock, scenario.ctx());
-        assert_eq!(spec::of(&cargo), cargo_spec());
+        assert_eq!(spec::of_each(&cargo), cargo_spec());
         assert_eq!(reward.value(), REWARD_QTY);
-        transfer::public_transfer(cargo, LISTER);
+        payout::pay_all(cargo, LISTER);
         transfer::public_transfer(reward, LISTER);
 
         scenario.next_tx(OTHER);
         assert_eq!(ts::ids_for_address<Proceeds<TOKEN>>(cap_id.to_address()).length(), 0);
+        finish(scenario, clock);
+    }
+
+    /// A mixed delivery arrives as one `Proceeds` holding every item, which
+    /// `collect` returns in `want`'s order.
+    #[test]
+    fun proceeds_hold_every_delivered_item_in_order() {
+        let (mut scenario, mut clock) = setup();
+        let mixed_want = vector[spec::new(dst(), ITEM, CARGO_QTY), spec::new(dst(), ITEM + 1, 4)];
+        scenario.next_tx(LISTER);
+        let cargo = vector[
+            mint(src(), ITEM, CARGO_QTY, &mut scenario),
+            mint(src(), ITEM + 1, 4, &mut scenario),
+        ];
+        let reward = test_config::mint(REWARD_QTY, scenario.ctx());
+        let terms = terms::new_for_cap_holder(mixed_want, COLLATERAL_QTY, ACCEPT_MS, HAUL_MS);
+        let cap = test_config::post_with_terms(cargo, reward, terms, &clock, scenario.ctx());
+        let cap_id = object::id(&cap);
+        transfer::public_transfer(cap, LISTER);
+        accept(&mut scenario, &mut clock);
+
+        scenario.next_tx(OTHER);
+        let delivered = vector[
+            mint(dst(), ITEM, CARGO_QTY, &mut scenario),
+            mint(dst(), ITEM + 1, 4, &mut scenario),
+        ];
+        let agreement = scenario.take_shared<HaulingAgreement<TOKEN>>();
+        agreement.deliver(delivered, &clock, scenario.ctx());
+
+        let (items, coins) = collect(LISTER, cap_id, &mut scenario);
+        assert_eq!(spec::of_each(&items), mixed_want);
+        payout::pay_all(items, LISTER);
+        coins.destroy_zero();
         finish(scenario, clock);
     }
 
@@ -424,9 +457,8 @@ module hauling_agreements::proceeds_tests {
         deliver(&mut scenario, &mut clock);
 
         let (items, coins) = collect(CUSTODIAN, cap_id, &mut scenario);
-        let items = items.destroy_some();
-        assert_eq!(spec::of(&items), want());
-        transfer::public_transfer(items, CUSTODIAN);
+        assert_eq!(spec::of_each(&items), want());
+        payout::pay_all(items, CUSTODIAN);
         coins.destroy_zero();
         assert_lister_holds_nothing(&mut scenario);
         finish(scenario, clock);
@@ -455,7 +487,7 @@ module hauling_agreements::proceeds_tests {
         let second_cap = scenario.take_from_sender_by_id<ListerCap>(second_cap_id);
         let ticket = ts::most_recent_receiving_ticket<Proceeds<TOKEN>>(&first_cap_id);
         let (items, coins) = second_cap.collect(ticket, scenario.ctx());
-        items.destroy_none();
+        items.destroy_empty();
         transfer::public_transfer(coins, LISTER);
         finish(scenario, clock);
     }
