@@ -17,7 +17,7 @@ concurrency:
 # Pinned dependency revs, shared by every package. Keep in sync with the
 # packages' Move.toml files: when you bump a pin there, bump it here too.
 env:
-  ARMATURE_REV: "ae60685f888ac5dd4d24413fb989002ef5315c74"
+  ARMATURE_REV: "cf027e9d518969d8f30c71d6264e2b927db2e32b"
   MULTICOIN_REV: "2772c26d24c02671726d39f167b8f772777875d9"
   WORLD_REV: "d33ff232bd3878e8f9ad0721e18564b21facc925"
   WAREHOUSE_RECEIPTS_REV: "212be7c5ee1ee8bca55305e86e1ae549df78c279"

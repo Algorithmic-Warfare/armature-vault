@@ -16,7 +16,7 @@ version = "0.0.1"
 [dependencies]
 # roles: the caller-identity primitive (`roles::acl::Principal`), local to this repo.
 roles = { local = "../../primitives/roles" }
-armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "ae60685f888ac5dd4d24413fb989002ef5315c74", override = true }
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "cf027e9d518969d8f30c71d6264e2b927db2e32b", override = true }
 world = { git = "https://github.com/evefrontier/world-contracts.git", subdir = "contracts/world", rev = "d33ff232bd3878e8f9ad0721e18564b21facc925", override = true }
 # override = true: unify warehouse_receipts on the same multicoin build (2772c26,
 # 0xdbb778cb...) so `multicoin::Balance` receipts are the same on-chain type

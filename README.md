@@ -113,7 +113,7 @@ the anchor exists (ARMATURE-43).
 - `roles` (local, `packages/primitives/roles`) — the caller identity
   (`roles::acl::Principal`). The vault shipped its own `armature_vault::acl` copy
   through Cycle 7 and switched at the Cycle 8 fresh publish.
-- `armature` (framework) pinned to `ae60685` (Cycle 7, armature `main`) — OU identity
+- `armature` (framework) pinned to `cf027e9` (Cycle 8, armature `cycle-8`) — OU identity
   (`armature::ou::OU`) / `is_governance_member`.
 - `world` pinned to `d33ff23` — same rev warehouse-receipts uses, so `StorageUnit`
   / `Character` types match.

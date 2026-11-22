@@ -11,7 +11,7 @@ Unpublished. End-to-end tests of the [agreement_roles](../../extensions/agreemen
 | agreement_roles (local) | The claim gate under test. |
 | hauling_agreements (local) | The agreement type it gates. |
 | agreements, roles (local) | `Request`, `Spec` and `Principal`, used directly by the tests. |
-| armature `ae60685` | `armature::ou::OU`, as in agreement_roles and roles. |
+| armature `cf027e9` | `armature::ou::OU`, as in agreement_roles and roles. |
 | multicoin `2772c26` | Cargo and `want` balances, as in agreements and hauling_agreements. |
 
 ## Test
