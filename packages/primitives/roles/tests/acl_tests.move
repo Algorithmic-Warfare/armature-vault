@@ -82,6 +82,14 @@ module roles::acl_tests {
     }
 
     #[test]
+    fun ou_id_is_some_only_for_ou_principals() {
+        let id = object::id_from_address(@0x0B);
+        assert_eq!(acl::ou_id(&acl::ou(id)), option::some(id));
+        assert_eq!(acl::ou_id(&acl::player(PLAYER)), option::none());
+        assert_eq!(acl::ou_id(&acl::machine(BOT)), option::none());
+    }
+
+    #[test]
     fun peel_principal_reads_what_bcs_wrote() {
         let principals = vector[
             acl::player(PLAYER),
