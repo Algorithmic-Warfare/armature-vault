@@ -16,7 +16,7 @@ agreements = { local = "../../primitives/agreements" }
 roles = { local = "../../primitives/roles" }
 hauling_agreements = { local = "../../composites/hauling_agreements" }
 agreement_roles = { local = "../../extensions/agreement_roles" }
-armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "ae60685f888ac5dd4d24413fb989002ef5315c74" }
+armature = { git = "https://github.com/loash-industries/armature.git", subdir = "packages/armature_framework", rev = "cf027e9d518969d8f30c71d6264e2b927db2e32b" }
 multicoin = { git = "https://github.com/Algorithmic-Warfare/multicoin", subdir = "packages/multicoin", rev = "2772c26d24c02671726d39f167b8f772777875d9" }
 
 [environments]

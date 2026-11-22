@@ -4,10 +4,10 @@
 /// defines its own `Role` type and maps each role to a list of principals; a
 /// caller holds a role if they satisfy any principal listed for it.
 ///
-/// `agreement_roles`' claim gate uses it. It copies `armature_vault::acl`,
-/// adding a public `satisfies`, `satisfies_directly` and `peel_principal`; the
-/// vault switches to this module at its next fresh publish (see `@todo(roles)`
-/// in that package).
+/// `agreement_roles`' claim gate and every `armature_vault` role check use it.
+/// It replaced the copy the vault shipped as `armature_vault::acl` through
+/// Cycle 7, adding a public `satisfies`, `satisfies_directly` and
+/// `peel_principal`.
 module roles::acl {
     use armature::ou::OU;
     use sui::bcs::BCS;
@@ -39,6 +39,15 @@ module roles::acl {
     /// not tied to an on-chain Player. Checked exactly like `Player`.
     public fun machine(addr: address): Principal {
         Principal::Machine { addr }
+    }
+
+    /// The OU id of an `Ou` principal; none for `Player` and `Machine`. For
+    /// consumers that treat OU principals specially (armature_vault's anchor).
+    public fun ou_id(principal: &Principal): Option<ID> {
+        match (principal) {
+            Principal::Ou { ou_id } => option::some(*ou_id),
+            _ => option::none(),
+        }
     }
 
     // === Authorization ===

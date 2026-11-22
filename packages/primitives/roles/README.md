@@ -3,7 +3,7 @@
 The caller-identity primitive for role-gated packages in this repo. It depends only on [armature](https://github.com/loash-industries/armature).
 
 - [agreement_roles](../../extensions/agreement_roles) uses it for its claim gate.
-- [armature_vault](../../composites/armature_vault) ships its own copy as `armature_vault::acl` and switches to this package at its next fresh publish (see `@todo(roles)` there).
+- [armature_vault](../../composites/armature_vault) uses it for every role check (since Cycle 8; it shipped its own copy, `armature_vault::acl`, before that).
 
 ## `roles::acl`
 
@@ -28,19 +28,17 @@ An `ou` principal is read at call time, so a board change applies at once to eve
 
 `peel_principal(bcs)` reads one `Principal` written by `bcs::to_bytes`, for packages that store principals inside a BCS-encoded config such as a requirement. It aborts with `EUnknownPrincipal` on an unknown variant tag. It sits beside the enum so the variant tags stay in step with it: **add new variants only at the end**, or encoded principals will decode as the wrong variant.
 
-## Differences from `armature_vault::acl`
+## Differences from the old `armature_vault::acl`
 
-The `Principal` enum, its variants and their order are identical. This package adds:
+The `Principal` enum, its variants and their order are identical to the copy the vault shipped through Cycle 7. This package adds:
 
-- `satisfies` is `public` (it is `public(package)` in the vault),
+- `satisfies` is `public` (it was `public(package)` in the vault),
 - `satisfies_directly`,
 - `peel_principal`.
 
-The two are still different on-chain types until the vault switches.
-
 ## Dependency pin
 
-`armature` is pinned to `ae60685` (Cycle 7, armature `main`), the same revision armature_vault and agreement_roles use, so `armature::ou::OU` is one type across the repo.
+`armature` is pinned to `cf027e9` (Cycle 8, armature `cycle-8`), the same revision armature_vault and agreement_roles use, so `armature::ou::OU` is one type across the repo.
 
 ## Build & test
 

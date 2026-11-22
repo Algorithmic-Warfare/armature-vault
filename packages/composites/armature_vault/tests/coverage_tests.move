@@ -4,13 +4,12 @@
 #[test_only]
 module armature_vault::coverage_tests {
     use armature::{ou::{Self, OU}, governance};
-    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
     use armature_vault::{
-        acl::{Self as acl, Principal},
         keyspace::{Self, Keyspace},
         ou_receipt_vault::{Self as vault, OuReceiptVault, OuReceiptVaultRegistry, Role}
     };
     use multicoin::multicoin::{Self, Collection, CollectionCap, Balance};
+    use roles::acl::{Self as acl, Principal};
     use std::string;
     use sui::{test_scenario as ts, vec_map};
 
@@ -102,6 +101,7 @@ module armature_vault::coverage_tests {
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         keyspace::create_keyspace_for_ou(
             b"Org Vault",
+            &org,
             &org,
             vector[acl::ou(ou_id)],
             vector[],
@@ -315,7 +315,7 @@ module armature_vault::coverage_tests {
 
     /// ou_receipt_vault.move:560 — update_registry_key aborts when the old slot holds another vault's id.
     #[test]
-    #[expected_failure(abort_code = vault::EInvalidArguments)]
+    #[expected_failure(abort_code = vault::EVaultRegistryMismatch)]
     fun vault_update_registry_key_slot_points_elsewhere_aborts() {
         let mut scenario = ts::begin(MEMBER);
         let members = make_ou(&mut scenario, MEMBER, vector[MEMBER]);
@@ -333,7 +333,7 @@ module armature_vault::coverage_tests {
         {
             let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared_by_id<OuReceiptVault>(&scenario, v_id);
-            vault::register_for_testing(&mut reg, ssu_id, officers, object::id_from_address(@0xDEAD));
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, object::id_from_address(@0xDEAD));
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -369,13 +369,9 @@ module armature_vault::coverage_tests {
         {
             let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared_by_id<OuReceiptVault>(&scenario, v_id);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
-            vault::register_for_testing(
-                &mut reg,
-                ssu_id,
-                new_officers,
-                object::id_from_address(@0xBEEF),
+            vault::register_for_testing(&mut reg, ssu_id, new_officers, officers, object::id_from_address(@0xBEEF),
             );
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -440,7 +436,7 @@ module armature_vault::coverage_tests {
         {
             let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared_by_id<OuReceiptVault>(&scenario, v_id);
-            vault::register_for_testing(&mut reg, ssu_id, officers, object::id_from_address(@0xDEAD));
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, object::id_from_address(@0xDEAD));
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);

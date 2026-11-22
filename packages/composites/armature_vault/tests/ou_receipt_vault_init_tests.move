@@ -8,11 +8,8 @@
 #[test_only]
 module armature_vault::ou_receipt_vault_init_tests {
     use armature::{governance, ou::{Self, OU}};
-    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
-    use armature_vault::{
-        acl,
-        ou_receipt_vault::{Self as vault, OuReceiptVault, OuReceiptVaultRegistry}
-    };
+    use armature_vault::ou_receipt_vault::{Self as vault, OuReceiptVault, OuReceiptVaultRegistry};
+    use roles::acl;
     use std::string::utf8;
     use sui::test_scenario as ts;
     use warehouse_receipts::{receipt, vault::VaultConfig};
@@ -180,13 +177,14 @@ module armature_vault::ou_receipt_vault_init_tests {
     }
 
     /// Call `initialize_ou_vault` as `caller` on `storage_unit_id` with the
-    /// world's VaultConfig.
+    /// world's VaultConfig, anchored to `anchor`.
     fun initialize(
         sc: &mut ts::Scenario,
         w: &World,
         storage_unit_id: ID,
         caller: address,
         registrant: ID,
+        anchor: ID,
         deposit: vector<acl::Principal>,
         withdraw: vector<acl::Principal>,
         edit: vector<acl::Principal>,
@@ -196,16 +194,17 @@ module armature_vault::ou_receipt_vault_init_tests {
         let storage_unit = ts::take_shared_by_id<StorageUnit>(sc, storage_unit_id);
         let org = ts::take_shared_by_id<OU>(sc, registrant);
         let config = ts::take_shared_by_id<VaultConfig>(sc, w.vault_config);
-        vault::initialize_ou_vault(
-            &mut registry,
-            &storage_unit,
-            &org,
-            &config,
-            deposit,
-            withdraw,
-            edit,
-            sc.ctx(),
-        );
+        if (anchor == registrant) {
+            vault::initialize_ou_vault(
+                &mut registry, &storage_unit, &org, &org, &config, deposit, withdraw, edit, sc.ctx(),
+            );
+        } else {
+            let anchor_ou = ts::take_shared_by_id<OU>(sc, anchor);
+            vault::initialize_ou_vault(
+                &mut registry, &storage_unit, &org, &anchor_ou, &config, deposit, withdraw, edit, sc.ctx(),
+            );
+            ts::return_shared(anchor_ou);
+        };
         ts::return_shared(config);
         ts::return_shared(org);
         ts::return_shared(storage_unit);
@@ -216,7 +215,7 @@ module armature_vault::ou_receipt_vault_init_tests {
 
     /// Init binds the vault to the SSU and its receipt collection, seeds the ACL
     /// from the caller's lists (leaving empty roles unset) and registers the
-    /// vault under (SSU, registrant OU). Officers can then administer it and
+    /// vault under (SSU, registrant OU, anchor OU). Officers can then administer it and
     /// deinitialize it, which frees the registry slot.
     #[test]
     fun initialize_registers_and_seeds_acl() {
@@ -231,6 +230,7 @@ module armature_vault::ou_receipt_vault_init_tests {
             w.storage_unit,
             MEMBER,
             members,
+            officers,
             vector[acl::ou(members)],
             vector[],
             vector[acl::ou(officers)],
@@ -242,8 +242,11 @@ module armature_vault::ou_receipt_vault_init_tests {
         let config = ts::take_shared_by_id<VaultConfig>(&sc, w.vault_config);
         let officers_ou = ts::take_shared_by_id<OU>(&sc, officers);
 
-        assert!(vault::lookup(&registry, w.storage_unit, members) == option::some(object::id(&v)));
-        assert!(vault::lookup(&registry, w.storage_unit, officers).is_none());
+        assert!(vault::lookup(&registry, w.storage_unit, members, officers) == option::some(object::id(&v)));
+        // The anchor is part of the key: the same registrant with another anchor
+        // finds nothing, and so does the anchor as registrant.
+        assert!(vault::lookup(&registry, w.storage_unit, members, members).is_none());
+        assert!(vault::lookup(&registry, w.storage_unit, officers, officers).is_none());
         assert!(vault::storage_unit_id(&v) == w.storage_unit);
         assert!(vault::collection_id(&v) == config.collection_id());
         assert!(vault::principals(&v, vault::role_deposit()) == vector[acl::ou(members)]);
@@ -271,7 +274,7 @@ module armature_vault::ou_receipt_vault_init_tests {
         assert!(vault::principals(&v, vault::role_withdraw()) == vector[acl::ou(members)]);
 
         vault::deinitialize_ou_vault(&mut registry, &mut v, &officers_ou, sc.ctx());
-        assert!(vault::lookup(&registry, w.storage_unit, members).is_none());
+        assert!(vault::lookup(&registry, w.storage_unit, members, officers).is_none());
         assert!(vault::principals(&v, vault::role_edit()) == vector[]);
 
         ts::return_shared(officers_ou);
@@ -293,6 +296,7 @@ module armature_vault::ou_receipt_vault_init_tests {
             &w,
             w.storage_unit,
             MEMBER,
+            members,
             members,
             vector[acl::ou(members)],
             vector[acl::player(SSU_OWNER)],
@@ -322,6 +326,7 @@ module armature_vault::ou_receipt_vault_init_tests {
             w.storage_unit,
             OUTSIDER,
             members,
+            members,
             vector[],
             vector[],
             vector[acl::ou(members)],
@@ -329,13 +334,13 @@ module armature_vault::ou_receipt_vault_init_tests {
         sc.end();
     }
 
-    /// A vault with no Edit principal could never be administered.
+    /// With no extra Edit principals, the anchor is the only editor.
     #[test]
-    #[expected_failure(abort_code = vault::EEmptyEditPrincipals)]
-    fun initialize_without_editors_aborts() {
+    fun initialize_without_extra_editors_lists_only_the_anchor() {
         let mut sc = ts::begin(GOVERNOR);
         let w = setup_world(&mut sc);
         let members = make_ou(&mut sc, MEMBER);
+        let officers = make_ou(&mut sc, OFFICER);
 
         initialize(
             &mut sc,
@@ -343,10 +348,48 @@ module armature_vault::ou_receipt_vault_init_tests {
             w.storage_unit,
             MEMBER,
             members,
+            officers,
             vector[acl::ou(members)],
             vector[acl::ou(members)],
             vector[],
         );
+
+        ts::next_tx(&mut sc, MEMBER);
+        let v = ts::take_shared<OuReceiptVault>(&sc);
+        assert!(vault::anchor_ou_id(&v) == officers);
+        assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(officers)]);
+        ts::return_shared(v);
+        sc.end();
+    }
+
+    /// The anchor is listed first on Edit, ahead of the extra editors, and a
+    /// copy of it in `edit_principals` is dropped.
+    #[test]
+    fun initialize_lists_the_anchor_first_once() {
+        let mut sc = ts::begin(GOVERNOR);
+        let w = setup_world(&mut sc);
+        let members = make_ou(&mut sc, MEMBER);
+        let officers = make_ou(&mut sc, OFFICER);
+
+        initialize(
+            &mut sc,
+            &w,
+            w.storage_unit,
+            MEMBER,
+            members,
+            officers,
+            vector[],
+            vector[],
+            vector[acl::player(SSU_OWNER), acl::ou(officers), acl::ou(members)],
+        );
+
+        ts::next_tx(&mut sc, MEMBER);
+        let v = ts::take_shared<OuReceiptVault>(&sc);
+        assert!(
+            vault::principals(&v, vault::role_edit())
+                == vector[acl::ou(officers), acl::player(SSU_OWNER), acl::ou(members)],
+        );
+        ts::return_shared(v);
         sc.end();
     }
 
@@ -364,6 +407,7 @@ module armature_vault::ou_receipt_vault_init_tests {
             &w,
             other_ssu,
             MEMBER,
+            members,
             members,
             vector[],
             vector[],
@@ -386,6 +430,7 @@ module armature_vault::ou_receipt_vault_init_tests {
             w.storage_unit,
             MEMBER,
             members,
+            members,
             vector[],
             vector[],
             vector[acl::ou(members)],
@@ -396,10 +441,82 @@ module armature_vault::ou_receipt_vault_init_tests {
             w.storage_unit,
             MEMBER,
             members,
+            members,
             vector[],
             vector[],
             vector[acl::ou(members)],
         );
+        sc.end();
+    }
+
+    // === Audit fixes (PR #28) ===
+
+    /// One board member of `members` anchoring a vault to an OU only they control
+    /// doesn't take the members' slot: the officers-anchored vault still
+    /// initializes, and a lookup with the trusted anchor finds only it.
+    #[test]
+    fun a_rogue_anchor_does_not_take_the_registrants_slot() {
+        let mut sc = ts::begin(GOVERNOR);
+        let w = setup_world(&mut sc);
+        let members = make_ou(&mut sc, MEMBER);
+        let officers = make_ou(&mut sc, OFFICER);
+        let rogue = make_ou(&mut sc, MEMBER);
+
+        initialize(&mut sc, &w, w.storage_unit, MEMBER, members, rogue, vector[acl::ou(members)], vector[], vector[]);
+        initialize(&mut sc, &w, w.storage_unit, MEMBER, members, officers, vector[acl::ou(members)], vector[], vector[]);
+
+        ts::next_tx(&mut sc, OFFICER);
+        let registry = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+        let trusted = vault::lookup(&registry, w.storage_unit, members, officers).destroy_some();
+        let rogue_vault = vault::lookup(&registry, w.storage_unit, members, rogue).destroy_some();
+        assert!(trusted != rogue_vault);
+        let v = ts::take_shared_by_id<OuReceiptVault>(&sc, trusted);
+        assert!(vault::anchor_ou_id(&v) == officers);
+        ts::return_shared(v);
+        ts::return_shared(registry);
+        sc.end();
+    }
+
+    /// Duplicates in the init lists are dropped, so one revoke removes a
+    /// principal for good.
+    #[test]
+    fun initialize_drops_duplicate_principals() {
+        let mut sc = ts::begin(GOVERNOR);
+        let w = setup_world(&mut sc);
+        let members = make_ou(&mut sc, MEMBER);
+        let officers = make_ou(&mut sc, OFFICER);
+        let p = acl::player(OUTSIDER);
+
+        initialize(
+            &mut sc,
+            &w,
+            w.storage_unit,
+            MEMBER,
+            members,
+            officers,
+            vector[p, acl::ou(members), p],
+            vector[p, p],
+            vector[p, acl::ou(officers), p],
+        );
+
+        ts::next_tx(&mut sc, OFFICER);
+        let mut v = ts::take_shared<OuReceiptVault>(&sc);
+        let officers_ou = ts::take_shared_by_id<OU>(&sc, officers);
+        assert!(vault::principals(&v, vault::role_deposit()) == vector[p, acl::ou(members)]);
+        assert!(vault::principals(&v, vault::role_withdraw()) == vector[p]);
+        assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(officers), p]);
+
+        vault::revoke(
+            &mut v,
+            &officers_ou,
+            vector[vault::role_withdraw(), vault::role_edit()],
+            vector[p, p],
+            sc.ctx(),
+        );
+        assert!(vault::principals(&v, vault::role_withdraw()) == vector[]);
+        assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(officers)]);
+        ts::return_shared(officers_ou);
+        ts::return_shared(v);
         sc.end();
     }
 }

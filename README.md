@@ -94,24 +94,26 @@ If Protodroid goes rogue, an AWAR officer calls `revoke` (invoking as
 ## Why the OU indirection (migration)
 
 A migrated OU gets a **new object id**. The OU principal expresses "the current
-board" by id, so the guaranteed migration path is:
+board" by id. Each vault has an **anchor** OU that is always on `Edit` and can't be
+revoked, so the board can always undo what one rogue member granted. The migration
+path moves the anchor only to the successor the anchor OU voted for:
 
-1. create the new OU,
-2. grant `ou(new_ou_id)` the `Edit` role on the vault (old + new editors coexist),
+1. the anchor OU votes `SpawnOU`, which records its successor (`Migrating`),
+2. anyone calls `rotate_anchor_to_successor`, listing the successor on `Edit` and
+   making it the anchor (old + new editors coexist). Do this before the old OU
+   can be destroyed: a destroyed anchor can't be rotated,
 3. migrate caps/coins to the new OU object,
-4. revoke the old `Edit` principal.
+4. the new board revokes the old `Edit` principal.
 
-Invariant: `Edit` can never be emptied (`ELastEditor`) — an empty `Edit` list would
-permanently brick the ACL.
+See [the vault README](packages/composites/armature_vault/README.md#anchor) for why
+the anchor exists (ARMATURE-43).
 
 ## Dependencies & environments
 
-- **Pending: `roles`** (local, `packages/primitives/roles`). The vault still ships
-  its own `armature_vault::acl`, which `roles::acl` copies. Switching the vault to
-  `roles` changes its types, so it waits for the next fresh publish (every cycle
-  rollover is one) rather than an upgrade of v1. The change points are marked
-  `@todo(roles)` in the package.
-- `armature` (framework) pinned to `ae60685` (Cycle 7, armature `main`) — OU identity
+- `roles` (local, `packages/primitives/roles`) — the caller identity
+  (`roles::acl::Principal`). The vault shipped its own `armature_vault::acl` copy
+  through Cycle 7 and switched at the Cycle 8 fresh publish.
+- `armature` (framework) pinned to `cf027e9` (Cycle 8, armature `cycle-8`) — OU identity
   (`armature::ou::OU`) / `is_governance_member`.
 - `world` pinned to `d33ff23` — same rev warehouse-receipts uses, so `StorageUnit`
   / `Character` types match.
