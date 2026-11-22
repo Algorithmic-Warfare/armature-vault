@@ -102,6 +102,7 @@ module armature_vault::coverage_tests {
         keyspace::create_keyspace_for_ou(
             b"Org Vault",
             &org,
+            &org,
             vector[acl::ou(ou_id)],
             vector[],
             vector[acl::player(USER1)],
