@@ -1,6 +1,3 @@
-// @todo(docs): in the module doc below, `Edit` holders can grant/revoke on every role,
-// including `Edit`, not only `Deposit`/`Withdraw`. Fix the comments in this file at the
-// next fresh publish, not in a v1 upgrade-in-place.
 /// OU receipt vault (`ou_receipt_vault`) — an OU-gated accumulator for warehouse
 /// receipts with a dynamic, multi-principal access-control list.
 ///
@@ -19,7 +16,7 @@
 ///         (`org.id() == ou_id`) and is one of its board members.
 ///     A caller passes a role check if they satisfy *any* principal listed for it.
 ///   - `Edit` is ACL administration: holders may batch grant/revoke principals on
-///     `Deposit`/`Withdraw` roles via `grant`/`revoke`. The people who can
+///     every role, `Edit` included, via `grant`/`revoke`. The people who can
 ///     *administer* the vault need not be the people who can *use* it — e.g. AWAR
 ///     officers hold `Edit` while AWAR/WOLF members hold `Deposit`/`Withdraw`.
 ///   - Roles are not tied to principal kinds: `Edit`, like every role, may be
@@ -44,9 +41,8 @@
 /// types diverge and receipts cannot be deposited.
 module armature_vault::ou_receipt_vault {
     use armature::ou::OU;
-    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
-    use armature_vault::acl::{Self as acl, Principal};
     use multicoin::multicoin::Balance;
+    use roles::acl::{Self as acl, Principal};
     use sui::{dynamic_object_field as dof, event, table::{Self, Table}, vec_map::{Self, VecMap}};
     use warehouse_receipts::vault::VaultConfig;
     use world::storage_unit::StorageUnit;
@@ -109,8 +105,7 @@ module armature_vault::ou_receipt_vault {
         registrant_ou_id: ID,
     }
 
-    // @todo(docs): the registry key is (storage_unit_id, registrant_ou_id).
-    /// Shared singleton registry mapping (storage_unit_id, editor_ou_id) → vault id.
+    /// Shared singleton registry mapping (storage_unit_id, registrant_ou_id) → vault id.
     public struct OuReceiptVaultRegistry has key {
         id: UID,
         vaults: Table<VaultKey, ID>,
@@ -331,10 +326,10 @@ module armature_vault::ou_receipt_vault {
 
     // === Public: deposit / withdraw ===
 
-    // @todo(docs): a bare `Machine` principal also passes with any `&OU`, not only `Player`.
     /// Deposit a warehouse receipt. The caller must satisfy the `Deposit` role using
-    /// `org` as their OU context (or be a bare `Player` deposit principal, in which
-    /// case any `&OU` may be passed). Receipt must belong to the vault's collection.
+    /// `org` as their OU context (or be a bare `Player` or `Machine` deposit
+    /// principal, in which case any `&OU` may be passed). Receipt must belong to the
+    /// vault's collection.
     public fun deposit_receipt(
         vault: &mut OuReceiptVault,
         org: &OU,
@@ -495,12 +490,10 @@ module armature_vault::ou_receipt_vault {
             i = i + 1;
         };
 
-        // Brick-guard 1: Edit list must remain non-empty.
-        let edit_role = Role::Edit;
-        assert!(
-            vault.acl.contains(&edit_role) && vault.acl.get(&edit_role).length() > 0,
-            ELastEditor,
-        );
+        // Brick-guard 1: Edit list must remain non-empty. The Edit entry itself
+        // still exists: assert_role above required it, and remove_principal
+        // never removes a role's entry.
+        assert!(vault.acl.get(&Role::Edit).length() > 0, ELastEditor);
         // H1: brick-guard 2 — the caller must still satisfy Edit using editor_org.
         // Prevents grant-bogus-then-revoke-self bricking attacks: a rogue can only
         // remove themselves from Edit if some other satisfiable principal remains
@@ -567,10 +560,8 @@ module armature_vault::ou_receipt_vault {
         vault.registrant_ou_id = new_registrant_org.id();
     }
 
-    // @todo(docs): the slot is keyed by `vault.registrant_ou_id`, not `editor_org`, and the
-    // field below is `registrant_ou_id`, not `registry_key_ou_id`.
-    /// M2: free the registry slot for this vault's (SSU, current editor_org) key
-    /// and effectively brick the vault by clearing its ACL. The caller must satisfy
+    /// M2: free the registry slot for this vault's (SSU, `vault.registrant_ou_id`)
+    /// key and effectively brick the vault by clearing its ACL. The caller must satisfy
     /// `Edit` using `editor_org`, and the vault must be empty
     /// (`non_empty_assets == 0`).
     ///
@@ -583,11 +574,10 @@ module armature_vault::ou_receipt_vault {
     /// empty. The orphan is harmless: no DOFs, no admin path, not discoverable
     /// via the registry.
     ///
-    /// `editor_org` may differ from the original initializer — after
-    /// `update_registry_key` the vault's current registry slot is keyed by the
-    /// migrated OU id. The vault tracks `registry_key_ou_id` internally and
-    /// uses it to locate the slot, so the caller only needs an OU that satisfies
-    /// the current `Edit` role.
+    /// `editor_org` need not be the registrant OU — after `update_registry_key`
+    /// the vault's current registry slot is keyed by the migrated OU id. The vault
+    /// tracks it in `registrant_ou_id` and uses it to locate the slot, so the
+    /// caller only needs an OU that satisfies the current `Edit` role.
     public fun deinitialize_ou_vault(
         registry: &mut OuReceiptVaultRegistry,
         vault: &mut OuReceiptVault,

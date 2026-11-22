@@ -106,11 +106,9 @@ permanently brick the ACL.
 
 ## Dependencies & environments
 
-- **Pending: `roles`** (local, `packages/primitives/roles`). The vault still ships
-  its own `armature_vault::acl`, which `roles::acl` copies. Switching the vault to
-  `roles` changes its types, so it waits for the next fresh publish (every cycle
-  rollover is one) rather than an upgrade of v1. The change points are marked
-  `@todo(roles)` in the package.
+- `roles` (local, `packages/primitives/roles`) — the caller identity
+  (`roles::acl::Principal`). The vault shipped its own `armature_vault::acl` copy
+  through Cycle 7 and switched at the Cycle 8 fresh publish.
 - `armature` (framework) pinned to `ae60685` (Cycle 7, armature `main`) — OU identity
   (`armature::ou::OU`) / `is_governance_member`.
 - `world` pinned to `d33ff23` — same rev warehouse-receipts uses, so `StorageUnit`

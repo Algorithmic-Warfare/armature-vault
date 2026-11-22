@@ -4,8 +4,7 @@ version = "0.0.1"
 edition = "2024"
 
 # roles — the caller-identity primitive for role-gated packages in this repo.
-# agreement_roles' claim gate uses it now. armature_vault still ships its own copy as
-# armature_vault::acl and switches at its next fresh publish (see @todo(roles)).
+# agreement_roles' claim gate and armature_vault (since Cycle 8) use it.
 # A `Principal` is a player address, a machine key, or any board member of an
 # armature OU. Each consuming package defines its own Role type and ACL.
 #

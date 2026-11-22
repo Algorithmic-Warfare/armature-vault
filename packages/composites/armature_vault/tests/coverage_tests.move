@@ -4,13 +4,12 @@
 #[test_only]
 module armature_vault::coverage_tests {
     use armature::{ou::{Self, OU}, governance};
-    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
     use armature_vault::{
-        acl::{Self as acl, Principal},
         keyspace::{Self, Keyspace},
         ou_receipt_vault::{Self as vault, OuReceiptVault, OuReceiptVaultRegistry, Role}
     };
     use multicoin::multicoin::{Self, Collection, CollectionCap, Balance};
+    use roles::acl::{Self as acl, Principal};
     use std::string;
     use sui::{test_scenario as ts, vec_map};
 
