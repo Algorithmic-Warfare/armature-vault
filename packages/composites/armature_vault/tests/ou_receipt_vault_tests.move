@@ -12,12 +12,9 @@
 #[test_only]
 module armature_vault::ou_receipt_vault_tests {
     use armature::{ou::{Self, OU}, governance, proposal, remove_member::RemoveMember};
-    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once acl.move moves there.
-    use armature_vault::{
-        acl::{Self as acl, Principal},
-        ou_receipt_vault::{Self as vault, OuReceiptVault, Role}
-    };
+    use armature_vault::ou_receipt_vault::{Self as vault, OuReceiptVault, Role};
     use multicoin::multicoin::{Self, Collection, CollectionCap, Balance};
+    use roles::acl::{Self as acl, Principal};
     use std::string;
     use sui::{test_scenario as ts, vec_map};
 
@@ -938,58 +935,24 @@ module armature_vault::ou_receipt_vault_tests {
     /// registry entry at old_key points at a *different* vault than the one passed.
     /// Prevents a caller with Edit on vault B (and editor_ou listed on vault B's
     /// ACL) from silently remapping vault A's registry entry.
+    ///
+    /// Vault B claims the same (SSU, registrant OU) as vault A, so `old_key`
+    /// exists and the abort comes from the cross-vault check, not the
+    /// missing-slot check before it.
     #[test]
     #[expected_failure(abort_code = vault::EInvalidArguments)]
     fun update_registry_key_rejects_cross_vault_remap() {
         let mut scenario = ts::begin(AWAR_M1);
-        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
-        let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
-        let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let (officers, ssu_id, v_a_id) = registered_vault(&mut scenario);
         let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
-        let collection_id = make_collection(&mut scenario, AWAR_M1);
-        let ssu_id = object::id_from_address(@0x5501);
-
-        ts::next_tx(&mut scenario, AWAR_M1);
-        vault::init_for_testing(scenario.ctx());
-
-        // Vault A is the real registry occupant of (ssu_id, officers).
-        ts::next_tx(&mut scenario, AWAR_M1);
-        let v_a = vault::new_for_testing(
-            ssu_id,
-            collection_id,
-            example_acl(awar, wolf, officers),
-            scenario.ctx(),
-        );
-        let v_a_id = object::id(&v_a);
-        vault::share_for_testing(v_a);
-
-        // Vault B is a separate vault on which the officer also holds Edit.
-        ts::next_tx(&mut scenario, AWAR_M1);
-        let v_b = vault::new_for_testing(
-            object::id_from_address(@0x5502),
-            collection_id,
-            example_acl(awar, wolf, officers),
-            scenario.ctx(),
-        );
-        vault::share_for_testing(v_b);
-
-        ts::next_tx(&mut scenario, AWAR_M1);
-        {
-            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
-            // Only register vault A under (ssu_id, officers). Vault B is unrelated to
-            // this slot but the attacker tries to remap it.
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_a_id);
-            ts::return_shared(reg);
-        };
+        let v_b_id = second_vault_claiming(&mut scenario, ssu_id, officers);
 
         // Attacker holds Edit on vault B and passes vault B (not vault A) to
         // update_registry_key — pre-fix this would silently remap vault A's slot.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
-        // Both vaults are shared; disambiguate by taking vault B by id.
-        // We don't actually need the v_b id earlier — take_shared returns the second
-        // one if we already took the first; instead just take by id here.
-        let mut v_b = ts::take_shared<OuReceiptVault>(&scenario);
+        assert!(vault::lookup(&reg, ssu_id, officers) == option::some(v_a_id), 0);
+        let mut v_b = ts::take_shared_by_id<OuReceiptVault>(&scenario, v_b_id);
         let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
         vault::update_registry_key(
@@ -1136,9 +1099,8 @@ module armature_vault::ou_receipt_vault_tests {
         abort
     }
 
-    // @todo(docs): the key is (ssu_id, registrant_ou_id).
     /// M2: registry slot is reusable after deinit — a fresh registration under the
-    /// same (ssu_id, editor_ou_id) key succeeds.
+    /// same (ssu_id, registrant_ou_id) key succeeds.
     #[test]
     fun registry_slot_reusable_after_deinit() {
         let mut scenario = ts::begin(AWAR_M1);
@@ -1382,9 +1344,8 @@ module armature_vault::ou_receipt_vault_tests {
         ts::end(scenario);
     }
 
-    // @todo(docs): the field is `registrant_ou_id`, not `registry_key_ou_id`.
     /// M2: after `update_registry_key`, deinit uses the *new* registry slot (the
-    /// vault's `registry_key_ou_id` tracks the migration).
+    /// vault's `registrant_ou_id` tracks the migration).
     #[test]
     fun deinit_uses_current_registry_key_after_migration() {
         let mut scenario = ts::begin(AWAR_M1);
@@ -1500,6 +1461,225 @@ module armature_vault::ou_receipt_vault_tests {
         let mut v = ts::take_shared<OuReceiptVault>(&scenario);
         let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
         vault::deposit_receipt(&mut v, &awar_ou, r2, scenario.ctx());
+
+        abort
+    }
+
+    // =============================================================================
+    // === Rejected inputs and registry edge cases
+    // =============================================================================
+
+    /// The example vault on SSU @0x5501, shared. Returns `(awar, officers, collection_id)`.
+    fun example_vault(scenario: &mut ts::Scenario): (ID, ID, ID) {
+        let awar = make_ou(scenario, AWAR_M1, vector[AWAR_M1]);
+        let wolf = make_ou(scenario, WOLF_M1, vector[WOLF_M1]);
+        let officers = make_ou(scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        let collection_id = make_collection(scenario, AWAR_M1);
+        ts::next_tx(scenario, AWAR_M1);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            collection_id,
+            example_acl(awar, wolf, officers),
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+        (awar, officers, collection_id)
+    }
+
+    /// The example vault, registered under (SSU, officers) with the registry
+    /// stood up. Returns `(officers, ssu_id, vault_id)`.
+    fun registered_vault(scenario: &mut ts::Scenario): (ID, ID, ID) {
+        let (_, officers, _) = example_vault(scenario);
+        let ssu_id = object::id_from_address(@0x5501);
+        ts::next_tx(scenario, AWAR_M1);
+        vault::init_for_testing(scenario.ctx());
+        ts::next_tx(scenario, AWAR_M1);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(scenario);
+        let mut v = ts::take_shared<OuReceiptVault>(scenario);
+        let v_id = object::id(&v);
+        vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+        vault::set_registrant_ou_id_for_testing(&mut v, officers);
+        ts::return_shared(v);
+        ts::return_shared(reg);
+        (officers, ssu_id, v_id)
+    }
+
+    /// A second vault editable by `officers` that claims (ssu_id, officers) as
+    /// its registry slot without occupying it. Returns its id.
+    fun second_vault_claiming(scenario: &mut ts::Scenario, ssu_id: ID, officers: ID): ID {
+        ts::next_tx(scenario, AWAR_M1);
+        let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        acl_map.insert(vault::role_edit(), vector[acl::ou(officers)]);
+        let mut v = vault::new_for_testing(ssu_id, object::id_from_address(@0xC0), acl_map, scenario.ctx());
+        vault::set_registrant_ou_id_for_testing(&mut v, officers);
+        let id = object::id(&v);
+        vault::share_for_testing(v);
+        id
+    }
+
+    #[test]
+    #[expected_failure(abort_code = vault::EWrongCollection)]
+    fun deposit_rejects_receipt_from_another_collection() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (awar, _, _) = example_vault(&mut scenario);
+        // WOLF_M1 owns the second collection's cap, so the mint helper finds it.
+        let other_collection = make_collection(&mut scenario, WOLF_M1);
+        let receipt = mint(&mut scenario, WOLF_M1, other_collection, ASSET, 10);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        vault::deposit_receipt(&mut v, &awar_ou, receipt, scenario.ctx());
+
+        abort
+    }
+
+    #[test]
+    #[expected_failure(abort_code = vault::EInsufficientVaultBalance)]
+    fun withdraw_rejects_asset_never_deposited() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (awar, _, _) = example_vault(&mut scenario);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        let out = vault::withdraw_receipt(&mut v, &awar_ou, ASSET, 1, scenario.ctx());
+        transfer::public_transfer(out, AWAR_M1);
+
+        abort
+    }
+
+    #[test]
+    #[expected_failure(abort_code = vault::EInsufficientVaultBalance)]
+    fun withdraw_rejects_more_than_held() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (awar, _, collection_id) = example_vault(&mut scenario);
+        let receipt = mint(&mut scenario, AWAR_M1, collection_id, ASSET, 100);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        vault::deposit_receipt(&mut v, &awar_ou, receipt, scenario.ctx());
+        let out = vault::withdraw_receipt(&mut v, &awar_ou, ASSET, 101, scenario.ctx());
+        transfer::public_transfer(out, AWAR_M1);
+
+        abort
+    }
+
+    #[test]
+    #[expected_failure(abort_code = vault::EInvalidArguments)]
+    fun revoke_rejects_mismatched_lengths() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (_, officers, _) = example_vault(&mut scenario);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        vault::revoke(
+            &mut v,
+            &officers_ou,
+            vector[vault::role_deposit(), vault::role_withdraw()],
+            vector[acl::player(PROTO)],
+            scenario.ctx(),
+        );
+
+        abort
+    }
+
+    /// grant_edit_ou for an OU that already holds Edit changes nothing and
+    /// emits no event.
+    #[test]
+    fun grant_edit_ou_to_existing_editor_is_a_no_op() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (_, officers, _) = example_vault(&mut scenario);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            vault::grant_edit_ou(&mut v, &officers_ou, &officers_ou, scenario.ctx());
+            assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(officers)], 0);
+            ts::return_shared(officers_ou);
+            ts::return_shared(v);
+        };
+        let effects = ts::next_tx(&mut scenario, AWAR_OFFICER);
+        assert!(ts::num_user_events(&effects) == 0, 1);
+
+        ts::end(scenario);
+    }
+
+    /// update_registry_key needs the vault's current registry slot to exist.
+    #[test]
+    #[expected_failure(abort_code = vault::EInvalidArguments)]
+    fun update_registry_key_rejects_missing_slot() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (_, officers, _) = example_vault(&mut scenario);
+        let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        ts::next_tx(&mut scenario, AWAR_M1);
+        vault::init_for_testing(scenario.ctx());
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        vault::set_registrant_ou_id_for_testing(&mut v, officers);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
+        vault::update_registry_key(&mut reg, &mut v, &officers_ou, &new_officers_ou, scenario.ctx());
+
+        abort
+    }
+
+    /// update_registry_key will not overwrite a slot another vault already holds.
+    #[test]
+    #[expected_failure(abort_code = vault::EVaultAlreadyExists)]
+    fun update_registry_key_rejects_occupied_new_key() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (officers, ssu_id, _) = registered_vault(&mut scenario);
+        let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        vault::register_for_testing(&mut reg, ssu_id, new_officers, object::id_from_address(@0xB0));
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
+        vault::update_registry_key(&mut reg, &mut v, &officers_ou, &new_officers_ou, scenario.ctx());
+
+        abort
+    }
+
+    /// deinitialize_ou_vault needs the vault's registry slot to exist.
+    #[test]
+    #[expected_failure(abort_code = vault::EInvalidArguments)]
+    fun deinit_rejects_missing_registry_slot() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (_, officers, _) = example_vault(&mut scenario);
+        ts::next_tx(&mut scenario, AWAR_M1);
+        vault::init_for_testing(scenario.ctx());
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        vault::set_registrant_ou_id_for_testing(&mut v, officers);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        vault::deinitialize_ou_vault(&mut reg, &mut v, &officers_ou, scenario.ctx());
+
+        abort
+    }
+
+    /// deinitialize_ou_vault will not free a slot that points at another vault.
+    #[test]
+    #[expected_failure(abort_code = vault::EVaultRegistryMismatch)]
+    fun deinit_rejects_slot_of_another_vault() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (officers, ssu_id, _) = registered_vault(&mut scenario);
+        let v_b_id = second_vault_claiming(&mut scenario, ssu_id, officers);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        let mut v_b = ts::take_shared_by_id<OuReceiptVault>(&scenario, v_b_id);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        vault::deinitialize_ou_vault(&mut reg, &mut v_b, &officers_ou, scenario.ctx());
 
         abort
     }

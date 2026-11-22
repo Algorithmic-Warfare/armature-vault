@@ -17,7 +17,7 @@
 ///               re-encrypted.
 ///   - `Write` — can call `publish_entry`, `update_entry`, `edit_entry`.
 ///
-/// Access control uses the shared `Principal` model from `armature_vault::acl`:
+/// Access control uses the shared `Principal` model from `roles::acl`:
 /// each list member is a bare `Player { addr }` (single wallet), a
 /// `Machine { addr }` (single service/bot key), or an `Ou { ou_id }` (any board
 /// member of that OU), checked via `acl::satisfies`.
@@ -28,9 +28,7 @@
 /// member check makes that association unspoofable.
 module armature_vault::keyspace {
     use armature::ou::OU;
-    // @todo(roles): import `acl` from `roles::acl` (packages/primitives/roles) once
-    // acl.move moves there, and update the module doc's `armature_vault::acl` above.
-    use armature_vault::acl::{Self as acl, Principal};
+    use roles::acl::{Self as acl, Principal};
     use std::{option::{Self, Option}, string::String};
     use sui::{event, vec_map::{Self, VecMap}};
 

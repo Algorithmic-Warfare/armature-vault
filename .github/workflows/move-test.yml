@@ -67,8 +67,7 @@ jobs:
         include:
           - path: composites/armature_vault
             pins: armature multicoin world warehouse_receipts
-            # @todo(roles): add `roles` here when armature_vault switches to it.
-            deps: armature multicoin std sui warehouse_receipts world
+            deps: armature multicoin roles std sui warehouse_receipts world
           - path: primitives/roles
             pins: armature
             deps: armature std sui

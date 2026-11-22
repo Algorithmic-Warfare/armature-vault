@@ -5,14 +5,14 @@ Shared resources whose access is a role-based list of principals keyed on [armat
 - [`ou_receipt_vault`](#armature_vaultou_receipt_vault): a vault for [warehouse receipts](https://github.com/loash-industries/warehouse-receipts) on one Storage Unit.
 - [`keyspace`](#armature_vaultkeyspace): an access list for Seal-encrypted content stored off-chain.
 
-Both depend on [`acl`](#armature_vaultacl) for the caller identity.
+Both depend on [`roles::acl`](#rolesacl) for the caller identity.
 
 - [docs/keyspace-indexing.md](../../../docs/keyspace-indexing.md): rebuilding keyspace state from events.
 - [docs/registrant-ou-edit-decoupling.md](../../../docs/registrant-ou-edit-decoupling.md): why the vault's registry key and its `Edit` role are separate.
 
-## `armature_vault::acl`
+## `roles::acl`
 
-A `Principal` is one of:
+The caller identity lives in the [`roles`](../../primitives/roles) primitive. A `Principal` is one of:
 
 - `player(addr)`: satisfied when the sender is `addr`.
 - `machine(addr)`: the same check, for a service or bot key that isn't an on-chain Player.
@@ -22,7 +22,7 @@ Each module defines its own `Role` enum and maps each role to a list of principa
 
 **Every role check takes an `&OU`,** including checks a `player` or `machine` principal passes. Those principals match whatever OU is passed, so a caller listed directly may pass any OU.
 
-This module is copied as `roles::acl` in [`primitives/roles`](../../primitives/roles). The vault switches to it at its next fresh publish; the change points are marked `@todo(roles)`.
+Until Cycle 8 the vault shipped its own copy as `armature_vault::acl`. Cycle 8's fresh publish switched it to `roles::acl`, so a `Principal` is now a `roles` type: build one with `<roles package>::acl::ou(...)` etc., not the vault's package ID.
 
 ## `armature_vault::ou_receipt_vault`
 
