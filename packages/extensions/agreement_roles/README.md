@@ -62,7 +62,7 @@ The gate doesn't check which action it guards, or which agreement type. `require
 |---|---|
 | agreements (local) | `Request` and `Requirement`. The gate works on any agreement type's request. |
 | roles (local) | `Principal`. |
-| armature `ae60685` | `armature::ou::OU`. The same revision as roles and armature_vault. |
+| armature `cf027e9` | `armature::ou::OU`. The same revision as roles and armature_vault. |
 
 It depends on no agreement type, so a new agreement type can use the gate without linking `hauling_agreements`. CI holds it to these three. Its end-to-end tests with hauling agreements live in the unpublished [hauling_claim_tests](../../integration/hauling_claim_tests) package, since Sui's package manager has no dev-dependencies.
 

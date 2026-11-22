@@ -38,7 +38,7 @@ The `Principal` enum, its variants and their order are identical to the copy the
 
 ## Dependency pin
 
-`armature` is pinned to `ae60685` (Cycle 7, armature `main`), the same revision armature_vault and agreement_roles use, so `armature::ou::OU` is one type across the repo.
+`armature` is pinned to `cf027e9` (Cycle 8, armature `cycle-8`), the same revision armature_vault and agreement_roles use, so `armature::ou::OU` is one type across the repo.
 
 ## Build & test
 

@@ -136,7 +136,7 @@ Every state change emits an event, so an indexer can rebuild keyspaces, ACLs, ve
 
 | Dependency | Rev | Why |
 |---|---|---|
-| armature | `ae60685` | Cycle 7, armature `main`. Provides `armature::ou::OU`. |
+| armature | `cf027e9` | Cycle 8, armature `cycle-8`. Provides `armature::ou::OU`. |
 | world | `d33ff23` | The rev warehouse-receipts uses, so `StorageUnit` is the same type. |
 | multicoin | `2772c26` | The rev warehouse-receipts uses, so a deposited `Balance` is the same on-chain type. `override = true`. |
 | warehouse_receipts | `212be7c` | warehouse-receipts `main`. Provides `VaultConfig`. |
