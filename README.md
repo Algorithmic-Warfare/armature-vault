@@ -100,7 +100,8 @@ path moves the anchor only to the successor the anchor OU voted for:
 
 1. the anchor OU votes `SpawnOU`, which records its successor (`Migrating`),
 2. anyone calls `rotate_anchor_to_successor`, listing the successor on `Edit` and
-   making it the anchor (old + new editors coexist),
+   making it the anchor (old + new editors coexist). Do this before the old OU
+   can be destroyed: a destroyed anchor can't be rotated,
 3. migrate caps/coins to the new OU object,
 4. the new board revokes the old `Edit` principal.
 

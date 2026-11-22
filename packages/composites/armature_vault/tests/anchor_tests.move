@@ -43,14 +43,21 @@ module armature_vault::anchor_tests {
         let mut acl_map = vec_map::empty<Role, vector<Principal>>();
         acl_map.insert(vault::role_edit(), vector[acl::ou(a)]);
         acl_map.insert(vault::role_withdraw(), vector[acl::ou(a)]);
-        let v = vault::new_for_testing(
+        let mut v = vault::new_for_testing(
             object::id_from_address(SSU),
             object::id_from_address(@0xC0),
             acl_map,
             scenario.ctx(),
         );
+        vault::set_registrant_ou_id_for_testing(&mut v, a);
         let id = object::id(&v);
         vault::share_for_testing(v);
+        // Registered under (SSU, a, a), as `initialize_ou_vault` would.
+        vault::init_for_testing(scenario.ctx());
+        ts::next_tx(scenario, HONEST);
+        let mut reg = ts::take_shared<OuReceiptVaultRegistry>(scenario);
+        vault::register_for_testing(&mut reg, object::id_from_address(SSU), a, a, id);
+        ts::return_shared(reg);
         (a, id)
     }
 
@@ -255,16 +262,22 @@ module armature_vault::anchor_tests {
             let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
             let a_ou = ts::take_shared_by_id<OU>(&sc, a);
             let s_ou = ts::take_shared_by_id<OU>(&sc, s);
-            vault::rotate_anchor_to_successor(&mut v, &a_ou, &s_ou, sc.ctx());
+            let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+            vault::rotate_anchor_to_successor(&mut reg, &mut v, &a_ou, &s_ou, sc.ctx());
             assert!(vault::anchor_ou_id(&v) == s, 0);
             assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(a), acl::ou(s)], 1);
+            // The registry key follows the anchor.
+            let ssu = object::id_from_address(SSU);
+            assert!(vault::lookup(&reg, ssu, a, s) == option::some(v_id), 4);
+            assert!(vault::lookup(&reg, ssu, a, a).is_none(), 5);
             ts::return_shared(s_ou);
             ts::return_shared(a_ou);
             ts::return_shared(v);
+            ts::return_shared(reg);
         };
-        // Grant + AnchorSet.
+        // RegistryKeyUpdated + Grant + AnchorSet.
         let effects = ts::next_tx(&mut sc, HONEST);
-        assert!(ts::num_user_events(&effects) == 2, 2);
+        assert!(ts::num_user_events(&effects) == 3, 2);
 
         {
             let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
@@ -291,10 +304,12 @@ module armature_vault::anchor_tests {
             let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
             let a_ou = ts::take_shared_by_id<OU>(&sc, a);
             let s_ou = ts::take_shared_by_id<OU>(&sc, s);
-            vault::rotate_anchor_to_successor(&mut v, &a_ou, &s_ou, sc.ctx());
+            let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+            vault::rotate_anchor_to_successor(&mut reg, &mut v, &a_ou, &s_ou, sc.ctx());
             ts::return_shared(s_ou);
             ts::return_shared(a_ou);
             ts::return_shared(v);
+            ts::return_shared(reg);
         };
 
         // ROGUE is still on the old OU's board; it can't drop the new anchor.
@@ -328,12 +343,14 @@ module armature_vault::anchor_tests {
         let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
         let a_ou = ts::take_shared_by_id<OU>(&sc, a);
         let s_ou = ts::take_shared_by_id<OU>(&sc, s);
-        vault::rotate_anchor_to_successor(&mut v, &a_ou, &s_ou, sc.ctx());
+        let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+        vault::rotate_anchor_to_successor(&mut reg, &mut v, &a_ou, &s_ou, sc.ctx());
         assert!(vault::anchor_ou_id(&v) == s, 0);
         assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(a), acl::ou(s)], 1);
         ts::return_shared(s_ou);
         ts::return_shared(a_ou);
         ts::return_shared(v);
+        ts::return_shared(reg);
         sc.end();
     }
 
@@ -349,7 +366,8 @@ module armature_vault::anchor_tests {
         let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
         let a_ou = ts::take_shared_by_id<OU>(&sc, a);
         let b_ou = ts::take_shared_by_id<OU>(&sc, b);
-        vault::rotate_anchor_to_successor(&mut v, &a_ou, &b_ou, sc.ctx());
+        let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+        vault::rotate_anchor_to_successor(&mut reg, &mut v, &a_ou, &b_ou, sc.ctx());
         abort
     }
 
@@ -367,7 +385,8 @@ module armature_vault::anchor_tests {
         let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
         let a_ou = ts::take_shared_by_id<OU>(&sc, a);
         let b_ou = ts::take_shared_by_id<OU>(&sc, b);
-        vault::rotate_anchor_to_successor(&mut v, &a_ou, &b_ou, sc.ctx());
+        let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+        vault::rotate_anchor_to_successor(&mut reg, &mut v, &a_ou, &b_ou, sc.ctx());
         abort
     }
 
@@ -397,7 +416,8 @@ module armature_vault::anchor_tests {
         let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
         let b_ou = ts::take_shared_by_id<OU>(&sc, b);
         let c_ou = ts::take_shared_by_id<OU>(&sc, c);
-        vault::rotate_anchor_to_successor(&mut v, &b_ou, &c_ou, sc.ctx());
+        let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+        vault::rotate_anchor_to_successor(&mut reg, &mut v, &b_ou, &c_ou, sc.ctx());
         abort
     }
 
@@ -410,13 +430,9 @@ module armature_vault::anchor_tests {
         let s = make_ou(&mut sc, HONEST, vector[HONEST]);
 
         ts::next_tx(&mut sc, HONEST);
-        vault::init_for_testing(sc.ctx());
-        ts::next_tx(&mut sc, HONEST);
         {
             let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
             let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
-            vault::register_for_testing(&mut reg, object::id_from_address(SSU), a, v_id);
-            vault::set_registrant_ou_id_for_testing(&mut v, a);
             let a_ou = ts::take_shared_by_id<OU>(&sc, a);
             vault::deinitialize_ou_vault(&mut reg, &mut v, &a_ou, sc.ctx());
             ts::return_shared(a_ou);
@@ -429,7 +445,60 @@ module armature_vault::anchor_tests {
         let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
         let a_ou = ts::take_shared_by_id<OU>(&sc, a);
         let s_ou = ts::take_shared_by_id<OU>(&sc, s);
-        vault::rotate_anchor_to_successor(&mut v, &a_ou, &s_ou, sc.ctx());
+        let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+        vault::rotate_anchor_to_successor(&mut reg, &mut v, &a_ou, &s_ou, sc.ctx());
+        abort
+    }
+
+    /// Rotation re-keys the registry; if the successor's key is already taken
+    /// the rotation aborts rather than overwrite it.
+    #[test]
+    #[expected_failure(abort_code = vault::EVaultAlreadyExists)]
+    fun rotate_rejects_a_taken_successor_key() {
+        let mut sc = ts::begin(HONEST);
+        let (a, v_id) = anchored_vault(&mut sc);
+        let s = make_ou(&mut sc, HONEST, vector[HONEST]);
+        start_migration(&mut sc, a, s);
+
+        ts::next_tx(&mut sc, ANYONE);
+        let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+        vault::register_for_testing(&mut reg, object::id_from_address(SSU), a, s, object::id_from_address(@0xBEEF));
+        let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v_id);
+        let a_ou = ts::take_shared_by_id<OU>(&sc, a);
+        let s_ou = ts::take_shared_by_id<OU>(&sc, s);
+        vault::rotate_anchor_to_successor(&mut reg, &mut v, &a_ou, &s_ou, sc.ctx());
+        abort
+    }
+
+    /// A vault whose registry slot doesn't hold it can't be rotated.
+    #[test]
+    #[expected_failure(abort_code = vault::EVaultRegistryMismatch)]
+    fun rotate_rejects_an_unregistered_vault() {
+        let mut sc = ts::begin(HONEST);
+        let (a, _) = anchored_vault(&mut sc);
+        let s = make_ou(&mut sc, HONEST, vector[HONEST]);
+
+        // A second vault with the same anchor and registrant, never registered.
+        ts::next_tx(&mut sc, HONEST);
+        let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        acl_map.insert(vault::role_edit(), vector[acl::ou(a)]);
+        let mut v2 = vault::new_for_testing(
+            object::id_from_address(SSU),
+            object::id_from_address(@0xC0),
+            acl_map,
+            sc.ctx(),
+        );
+        vault::set_registrant_ou_id_for_testing(&mut v2, a);
+        let v2_id = object::id(&v2);
+        vault::share_for_testing(v2);
+        start_migration(&mut sc, a, s);
+
+        ts::next_tx(&mut sc, ANYONE);
+        let mut reg = ts::take_shared<OuReceiptVaultRegistry>(&sc);
+        let mut v = ts::take_shared_by_id<OuReceiptVault>(&sc, v2_id);
+        let a_ou = ts::take_shared_by_id<OU>(&sc, a);
+        let s_ou = ts::take_shared_by_id<OU>(&sc, s);
+        vault::rotate_anchor_to_successor(&mut reg, &mut v, &a_ou, &s_ou, sc.ctx());
         abort
     }
 }

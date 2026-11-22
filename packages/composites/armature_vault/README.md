@@ -33,7 +33,7 @@ Players mint `multicoin::Balance` receipts with the warehouse_receipts package, 
 1. **`initialize_ou_vault`**: a board member of `registrant_org` creates a vault for one Storage Unit. They pass the SSU's warehouse_receipts `VaultConfig`, and the vault accepts only receipts from the collection that config binds to the SSU. They also pass an **anchor** OU (`anchor_org`, see below), which is always on `Edit`, and the starting principals for each role; any list may be empty. The SSU owner doesn't need to sign.
 2. **`deposit_receipt`**: a `Deposit` holder adds a receipt from the vault's collection. Balances are kept per `asset_id` in dynamic object fields. Zero-value receipts are rejected.
 3. **`withdraw_receipt`**: a `Withdraw` holder takes an amount of one `asset_id` and receives it as a `Balance`.
-4. **`deinitialize_ou_vault`**: once every balance is drained, an `Edit` holder frees the registry slot and clears the ACL. Shared objects can't be deleted, so the vault stays on-chain, but no one can satisfy any role on it and `lookup` no longer finds it.
+4. **`deinitialize_ou_vault`**: once every balance is drained, the anchor's board (acting as the anchor OU) frees the registry slot and clears the ACL, the anchor included. Shared objects can't be deleted, so the vault stays on-chain, but no one can satisfy any role on it and `lookup` no longer finds it.
 
 ### Roles
 
@@ -41,7 +41,8 @@ Players mint `multicoin::Balance` receipts with the warehouse_receipts package, 
 |---|---|
 | `Deposit` | `deposit_receipt` |
 | `Withdraw` | `withdraw_receipt` |
-| `Edit` | `grant`, `revoke`, `grant_edit_ou`, `update_registry_key`, `deinitialize_ou_vault` |
+| `Edit` | `grant`, `revoke`, `grant_edit_ou` |
+| `Edit`, acting as the anchor OU | `update_registry_key`, `deinitialize_ou_vault` |
 
 - **`grant` and `revoke`** take parallel vectors of roles and principals, so one call can change several roles. Pairs that are already present (or absent) are skipped without an event.
 - **`grant_edit_ou`** gives `Edit` to an OU passed as `&OU`, so the granted ID is known to be a real OU. `grant` accepts any ID.
@@ -65,18 +66,22 @@ The anchor doesn't make `Edit` safe to hand out: any `Edit` holder can grant its
 
 ### Registry
 
-A shared `OuReceiptVaultRegistry`, created at publish, maps `(storage_unit_id, registrant_ou_id)` to a vault ID. `lookup` reads it. Each OU can have one vault per Storage Unit.
+A shared `OuReceiptVaultRegistry`, created at publish, maps `(storage_unit_id, registrant_ou_id, anchor_ou_id)` to a vault ID. `lookup(registry, ssu, registrant, anchor)` reads it. There is one vault per Storage Unit, registrant OU and anchor OU.
 
-`registrant_org` sets only the registry key and who may initialize. It doesn't get `Edit` unless it is listed in `edit_principals`. So a vault can be found under the members' OU while only the officers' OU administers it.
+`registrant_org` sets the registry key and who may initialize. It doesn't get `Edit` unless it is listed in `edit_principals`. So a vault can be found under the members' OU while only the officers' OU administers it.
+
+**Look vaults up with the anchor you trust.** Any one board member of the registrant can initialize a vault for it, with any anchor, including an OU only they control. The anchor is part of the key, so such a vault sits under a different key and never displaces, or is found in place of, the vault anchored to the OU the client expects (for a members vault, the officers OU).
+
+`update_registry_key` moves a vault to a new registrant, for example after the registrant migrated. The caller must act as the vault's anchor and be a board member of the new registrant, so nobody can move a vault into another OU's slot. It emits `RegistryKeyUpdatedEvent`.
 
 ### Moving to a new OU
 
 A migrated OU gets a new object ID. Because a principal names an OU by ID, the board can move without re-listing addresses. The anchor moves only to the successor the anchor OU itself voted for:
 
 1. The anchor OU passes a `SpawnOU` vote, which creates the new OU and sets the old one's status to `Migrating { successor_ou_id }`.
-2. Anyone calls `rotate_anchor_to_successor(vault, &old_ou, &new_ou)`. It lists the new OU on `Edit` and makes it the anchor; the old OU stays on `Edit` as an ordinary principal during cutover.
-3. Move caps and coins to the new OU. Do step 2 before the old OU's last `TransferAssets`: once its treasury and capability vault are empty anyone may destroy it, and a destroyed anchor can't be rotated.
-4. `update_registry_key` if the vault was registered under the old OU.
+2. Anyone calls `rotate_anchor_to_successor(registry, vault, &old_ou, &new_ou)`. It lists the new OU on `Edit`, makes it the anchor and moves the registry entry to `(ssu, registrant, new_ou)`; the old OU stays on `Edit` as an ordinary principal during cutover.
+3. Move caps and coins to the new OU. **Do step 2 before the old OU can be destroyed.** `ou::destroy` is permissionless once the OU is migrating and its treasury, capability vault and entries are empty, and a destroyed anchor can't be rotated, which freezes the vault's `Edit` for good. The new OU is created inside the `SpawnOU` call, so step 2 can't run in the same transaction. If the anchor OU holds nothing when `SpawnOU` executes, first deposit a dust coin into its treasury (`treasury_vault::deposit` is permissionless), so destruction waits for a `TransferAssets` you run after step 2.
+4. `update_registry_key` if the vault was registered under the old OU as registrant.
 5. The new OU's board `revoke`s the old OU's `Edit` principal.
 
 ### Events
@@ -90,13 +95,14 @@ A migrated OU gets a new object ID. Because a principal names an OU by ID, the b
 | `DepositEvent` | `deposit_receipt` |
 | `WithdrawEvent` | `withdraw_receipt` |
 | `VaultDeinitializedEvent` | `deinitialize_ou_vault` |
+| `RegistryKeyUpdatedEvent` | `update_registry_key` (new registrant), `rotate_anchor_to_successor` (new anchor) |
 
 ACL events are emitted only for real changes, so an indexer can rebuild the current ACL from them, with two caveats:
 
-- **Count, don't deduplicate.** `initialize_ou_vault` stores its starting lists as given, duplicates included (except that the anchor appears once on `Edit`), and emits one `AclGrantedEvent` per element. `revoke` removes one copy and emits one `AclRevokedEvent`. A principal holds a role while its `AclGrantedEvent`s for that role outnumber its `AclRevokedEvent`s.
+- **Each role's list is a set.** `initialize_ou_vault` drops duplicates from its starting lists and emits one `AclGrantedEvent` per stored principal, and `revoke` removes the principal and emits one `AclRevokedEvent`.
 - **`VaultDeinitializedEvent` revokes everything.** `deinitialize_ou_vault` empties the whole ACL without emitting any `AclRevokedEvent`.
 
-`update_registry_key` emits no event.
+`VaultInitializedEvent`, `VaultDeinitializedEvent` and `RegistryKeyUpdatedEvent` carry both halves of the registry key (registrant and anchor), so an indexer can rebuild the registry from them.
 
 ## `armature_vault::keyspace`
 

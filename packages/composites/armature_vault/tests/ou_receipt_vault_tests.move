@@ -312,13 +312,23 @@ module armature_vault::ou_receipt_vault_tests {
         let collection_id = make_collection(&mut scenario, AWAR_M1);
 
         ts::next_tx(&mut scenario, AWAR_M1);
-        let v = vault::new_for_testing(
+        let mut v = vault::new_for_testing(
             object::id_from_address(@0x5501),
             collection_id,
             example_acl(awar, wolf, officers),
             scenario.ctx(),
         );
+        // Registered under (SSU, awar, officers): awar members, officer anchor.
+        vault::set_registrant_ou_id_for_testing(&mut v, awar);
+        let v_id = object::id(&v);
         vault::share_for_testing(v);
+        vault::init_for_testing(scenario.ctx());
+        ts::next_tx(&mut scenario, AWAR_M1);
+        {
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            vault::register_for_testing(&mut reg, object::id_from_address(@0x5501), awar, officers, v_id);
+            ts::return_shared(reg);
+        };
 
         // The "migrated" officers OU (new id, same officer on board for the test).
         let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
@@ -327,15 +337,21 @@ module armature_vault::ou_receipt_vault_tests {
         // Anyone rotates the anchor; both OUs are on Edit during cutover.
         ts::next_tx(&mut scenario, OUTSIDER);
         {
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
             let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
-            vault::rotate_anchor_to_successor(&mut v, &officers_ou, &new_officers_ou, scenario.ctx());
+            vault::rotate_anchor_to_successor(&mut reg, &mut v, &officers_ou, &new_officers_ou, scenario.ctx());
             assert!(vault::anchor_ou_id(&v) == new_officers, 0);
             assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(officers), acl::ou(new_officers)], 2);
+            // Lookups with the new anchor find it; the old key is gone.
+            let ssu = object::id_from_address(@0x5501);
+            assert!(vault::lookup(&reg, ssu, awar, new_officers) == option::some(v_id), 3);
+            assert!(vault::lookup(&reg, ssu, awar, officers).is_none(), 4);
             ts::return_shared(new_officers_ou);
             ts::return_shared(officers_ou);
             ts::return_shared(v);
+            ts::return_shared(reg);
         };
 
         // New officers OU now revokes the old Edit principal (valid editor itself).
@@ -949,12 +965,12 @@ module armature_vault::ou_receipt_vault_tests {
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
             // M2: tell the vault which registry slot it lives under.
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             // Lookup under the old key works.
-            assert!(vault::lookup(&reg, ssu_id, officers).is_some(), 0);
-            assert!(vault::lookup(&reg, ssu_id, new_officers).is_none(), 1);
+            assert!(vault::lookup(&reg, ssu_id, officers, officers).is_some(), 0);
+            assert!(vault::lookup(&reg, ssu_id, new_officers, officers).is_none(), 1);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
@@ -974,8 +990,8 @@ module armature_vault::ou_receipt_vault_tests {
                 scenario.ctx(),
             );
             // New key resolves; old key no longer.
-            assert!(vault::lookup(&reg, ssu_id, new_officers).is_some(), 2);
-            assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 3);
+            assert!(vault::lookup(&reg, ssu_id, new_officers, officers).is_some(), 2);
+            assert!(vault::lookup(&reg, ssu_id, officers, officers).is_none(), 3);
             ts::return_shared(new_officers_ou);
             ts::return_shared(officers_ou);
             ts::return_shared(v);
@@ -994,7 +1010,7 @@ module armature_vault::ou_receipt_vault_tests {
     /// exists and the abort comes from the cross-vault check, not the
     /// missing-slot check before it.
     #[test]
-    #[expected_failure(abort_code = vault::EInvalidArguments)]
+    #[expected_failure(abort_code = vault::EVaultRegistryMismatch)]
     fun update_registry_key_rejects_cross_vault_remap() {
         let mut scenario = ts::begin(AWAR_M1);
         let (officers, ssu_id, v_a_id) = registered_vault(&mut scenario);
@@ -1005,7 +1021,7 @@ module armature_vault::ou_receipt_vault_tests {
         // update_registry_key — pre-fix this would silently remap vault A's slot.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
-        assert!(vault::lookup(&reg, ssu_id, officers) == option::some(v_a_id), 0);
+        assert!(vault::lookup(&reg, ssu_id, officers, officers) == option::some(v_a_id), 0);
         let mut v_b = ts::take_shared_by_id<OuReceiptVault>(&scenario, v_b_id);
         let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
@@ -1063,7 +1079,7 @@ module armature_vault::ou_receipt_vault_tests {
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -1078,7 +1094,7 @@ module armature_vault::ou_receipt_vault_tests {
             vault::deinitialize_ou_vault(&mut reg, &mut v, &officers_ou, scenario.ctx());
 
             // Registry slot freed: lookup returns none.
-            assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 0);
+            assert!(vault::lookup(&reg, ssu_id, officers, officers).is_none(), 0);
             // ACL fully wiped — every role is now absent.
             assert!(vault::principals(&v, vault::role_edit()).is_empty(), 1);
             assert!(vault::principals(&v, vault::role_deposit()).is_empty(), 2);
@@ -1121,7 +1137,7 @@ module armature_vault::ou_receipt_vault_tests {
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -1182,7 +1198,7 @@ module armature_vault::ou_receipt_vault_tests {
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_a_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_a_id);
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -1214,8 +1230,8 @@ module armature_vault::ou_receipt_vault_tests {
         ts::next_tx(&mut scenario, AWAR_M1);
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_b_id);
-            let looked_up = vault::lookup(&reg, ssu_id, officers);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_b_id);
+            let looked_up = vault::lookup(&reg, ssu_id, officers, officers);
             assert!(looked_up.is_some(), 0);
             assert!(*looked_up.borrow() == v_b_id, 1);
             ts::return_shared(reg);
@@ -1252,7 +1268,7 @@ module armature_vault::ou_receipt_vault_tests {
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -1308,7 +1324,7 @@ module armature_vault::ou_receipt_vault_tests {
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -1352,7 +1368,7 @@ module armature_vault::ou_receipt_vault_tests {
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -1389,7 +1405,7 @@ module armature_vault::ou_receipt_vault_tests {
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
             vault::deinitialize_ou_vault(&mut reg, &mut v, &officers_ou, scenario.ctx());
-            assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 0);
+            assert!(vault::lookup(&reg, ssu_id, officers, officers).is_none(), 0);
             ts::return_shared(officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -1427,7 +1443,7 @@ module armature_vault::ou_receipt_vault_tests {
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+            vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
             vault::set_registrant_ou_id_for_testing(&mut v, officers);
             ts::return_shared(v);
             ts::return_shared(reg);
@@ -1448,23 +1464,23 @@ module armature_vault::ou_receipt_vault_tests {
                 &new_officers_ou,
                 scenario.ctx(),
             );
-            assert!(vault::lookup(&reg, ssu_id, new_officers).is_some(), 0);
-            assert!(vault::lookup(&reg, ssu_id, officers).is_none(), 1);
+            assert!(vault::lookup(&reg, ssu_id, new_officers, officers).is_some(), 0);
+            assert!(vault::lookup(&reg, ssu_id, officers, officers).is_none(), 1);
             ts::return_shared(new_officers_ou);
             ts::return_shared(officers_ou);
             ts::return_shared(v);
             ts::return_shared(reg);
         };
 
-        // Now deinit with new_officers (the *current* editor) — must locate the
-        // new key and free it.
+        // Now deinit through the anchor (officers): it must locate the new key
+        // and free it.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         {
             let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-            let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
+            let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
             vault::deinitialize_ou_vault(&mut reg, &mut v, &new_officers_ou, scenario.ctx());
-            assert!(vault::lookup(&reg, ssu_id, new_officers).is_none(), 2);
+            assert!(vault::lookup(&reg, ssu_id, new_officers, officers).is_none(), 2);
             // ACL is fully wiped — every role becomes empty/absent.
             assert!(vault::principals(&v, vault::role_edit()).is_empty(), 3);
             assert!(vault::principals(&v, vault::role_deposit()).is_empty(), 4);
@@ -1551,7 +1567,7 @@ module armature_vault::ou_receipt_vault_tests {
         let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(scenario);
         let mut v = ts::take_shared<OuReceiptVault>(scenario);
         let v_id = object::id(&v);
-        vault::register_for_testing(&mut reg, ssu_id, officers, v_id);
+        vault::register_for_testing(&mut reg, ssu_id, officers, officers, v_id);
         vault::set_registrant_ou_id_for_testing(&mut v, officers);
         ts::return_shared(v);
         ts::return_shared(reg);
@@ -1664,7 +1680,7 @@ module armature_vault::ou_receipt_vault_tests {
 
     /// update_registry_key needs the vault's current registry slot to exist.
     #[test]
-    #[expected_failure(abort_code = vault::EInvalidArguments)]
+    #[expected_failure(abort_code = vault::EVaultRegistryMismatch)]
     fun update_registry_key_rejects_missing_slot() {
         let mut scenario = ts::begin(AWAR_M1);
         let (_, officers, _) = example_vault(&mut scenario);
@@ -1693,7 +1709,7 @@ module armature_vault::ou_receipt_vault_tests {
 
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
-        vault::register_for_testing(&mut reg, ssu_id, new_officers, object::id_from_address(@0xB0));
+        vault::register_for_testing(&mut reg, ssu_id, new_officers, officers, object::id_from_address(@0xB0));
         let mut v = ts::take_shared<OuReceiptVault>(&scenario);
         let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
         let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
@@ -1736,5 +1752,99 @@ module armature_vault::ou_receipt_vault_tests {
         vault::deinitialize_ou_vault(&mut reg, &mut v_b, &officers_ou, scenario.ctx());
 
         abort
+    }
+
+    // === Audit fixes (PR #28): registry re-keying and deinit ===
+
+    /// The registry squat: an Edit holder can't move its vault into the slot of
+    /// an OU it isn't a board member of.
+    #[test]
+    #[expected_failure(abort_code = vault::ENotAuthorized)]
+    fun update_registry_key_into_a_foreign_slot_aborts() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (officers, _, _) = registered_vault(&mut scenario);
+        let victim = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        let victim_ou = ts::take_shared_by_id<OU>(&scenario, victim);
+        vault::update_registry_key(&mut reg, &mut v, &officers_ou, &victim_ou, scenario.ctx());
+        abort
+    }
+
+    /// Re-keying must be done acting as the anchor, not any Edit holder.
+    #[test]
+    #[expected_failure(abort_code = vault::EAnchorRequired)]
+    fun update_registry_key_requires_the_anchor() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (officers, _, _) = registered_vault(&mut scenario);
+        let other = editor_ou_granted_by(&mut scenario, officers);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let other_ou = ts::take_shared_by_id<OU>(&scenario, other);
+        vault::update_registry_key(&mut reg, &mut v, &other_ou, &other_ou, scenario.ctx());
+        abort
+    }
+
+    /// Deinitializing wipes the anchor too, so only the anchor may do it.
+    #[test]
+    #[expected_failure(abort_code = vault::EAnchorRequired)]
+    fun deinit_requires_the_anchor() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (officers, _, _) = registered_vault(&mut scenario);
+        let other = editor_ou_granted_by(&mut scenario, officers);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let other_ou = ts::take_shared_by_id<OU>(&scenario, other);
+        vault::deinitialize_ou_vault(&mut reg, &mut v, &other_ou, scenario.ctx());
+        abort
+    }
+
+    /// A re-key by the anchor into an OU the caller sits on moves the slot,
+    /// keeps the anchor half of the key and emits RegistryKeyUpdatedEvent.
+    #[test]
+    fun update_registry_key_moves_the_slot_and_emits() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let (officers, ssu_id, v_id) = registered_vault(&mut scenario);
+        let new_registrant = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+
+        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        {
+            let mut reg = ts::take_shared<vault::OuReceiptVaultRegistry>(&scenario);
+            let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+            let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+            let new_ou = ts::take_shared_by_id<OU>(&scenario, new_registrant);
+            vault::update_registry_key(&mut reg, &mut v, &officers_ou, &new_ou, scenario.ctx());
+            assert!(vault::lookup(&reg, ssu_id, new_registrant, officers) == option::some(v_id), 0);
+            assert!(vault::lookup(&reg, ssu_id, officers, officers).is_none(), 1);
+            ts::return_shared(new_ou);
+            ts::return_shared(officers_ou);
+            ts::return_shared(v);
+            ts::return_shared(reg);
+        };
+        let effects = ts::next_tx(&mut scenario, AWAR_OFFICER);
+        assert!(ts::num_user_events(&effects) == 1, 2);
+        ts::end(scenario);
+    }
+
+    /// A new OU (AWAR_M1 its only member) granted Edit by `officers`, which is
+    /// not the anchor. Returns its id.
+    fun editor_ou_granted_by(scenario: &mut ts::Scenario, officers: ID): ID {
+        let other = make_ou(scenario, AWAR_M1, vector[AWAR_M1]);
+        ts::next_tx(scenario, AWAR_OFFICER);
+        let mut v = ts::take_shared<OuReceiptVault>(scenario);
+        let officers_ou = ts::take_shared_by_id<OU>(scenario, officers);
+        let other_ou = ts::take_shared_by_id<OU>(scenario, other);
+        vault::grant_edit_ou(&mut v, &officers_ou, &other_ou, scenario.ctx());
+        ts::return_shared(other_ou);
+        ts::return_shared(officers_ou);
+        ts::return_shared(v);
+        other
     }
 }

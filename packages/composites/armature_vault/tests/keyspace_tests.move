@@ -37,9 +37,9 @@ module armature_vault::keyspace_tests {
     /// Publish an entry into keyspace `ks_id` as `writer` and return its ID.
     fun publish(sc: &mut ts::Scenario, ks_id: ID, ou_id: ID, writer: address): ID {
         ts::next_tx(sc, writer);
-        let mut ks = ts::take_shared_by_id<Keyspace>(sc, ks_id);
+        let ks = ts::take_shared_by_id<Keyspace>(sc, ks_id);
         let org = ts::take_shared_by_id<OU>(sc, ou_id);
-        keyspace::publish_entry(&mut ks, b"QmPublished", b"first", &org, sc.ctx());
+        keyspace::publish_entry(&ks, b"QmPublished", b"first", &org, sc.ctx());
         ts::return_shared(org);
         ts::return_shared(ks);
         ts::next_tx(sc, writer);
@@ -173,7 +173,7 @@ module armature_vault::keyspace_tests {
             sc.ctx(),
         );
         let mut entry = keyspace::test_publish_entry(
-            &mut allowlist,
+            &allowlist,
             b"QmOriginal",
             b"desc",
             sc.ctx(),
@@ -446,10 +446,10 @@ module armature_vault::keyspace_tests {
     #[test]
     fun test_publish_entry_tracks_in_allowlist() {
         let mut sc = ts::begin(ADMIN);
-        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+        let allowlist = keyspace::test_create(b"Vault", sc.ctx());
 
         let entry = keyspace::test_publish_entry(
-            &mut allowlist,
+            &allowlist,
             b"QmFakeCid1",
             b"first entry",
             sc.ctx(),
@@ -472,7 +472,7 @@ module armature_vault::keyspace_tests {
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
         let mut entry = keyspace::test_publish_entry(
-            &mut allowlist,
+            &allowlist,
             b"QmOriginal",
             b"desc",
             sc.ctx(),
@@ -507,9 +507,9 @@ module armature_vault::keyspace_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
-        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+        let allowlist = keyspace::test_create(b"Vault", sc.ctx());
         let mut entry = keyspace::test_publish_entry(
-            &mut allowlist,
+            &allowlist,
             b"QmCid",
             b"desc",
             sc.ctx(),
@@ -538,7 +538,7 @@ module armature_vault::keyspace_tests {
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
         let mut entry = keyspace::test_publish_entry(
-            &mut allowlist,
+            &allowlist,
             b"QmOld",
             b"desc",
             sc.ctx(),
@@ -575,9 +575,9 @@ module armature_vault::keyspace_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
-        let mut allowlist = keyspace::test_create(b"Vault", sc.ctx());
+        let allowlist = keyspace::test_create(b"Vault", sc.ctx());
         let mut entry = keyspace::test_publish_entry(
-            &mut allowlist,
+            &allowlist,
             b"QmCid",
             b"desc",
             sc.ctx(),
@@ -1168,8 +1168,8 @@ module armature_vault::keyspace_tests {
         let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let mut ks = keyspace::test_create(b"Vault", sc.ctx());
-        let mut entry = keyspace::test_publish_entry(&mut ks, b"QmCid", b"desc", sc.ctx());
+        let ks = keyspace::test_create(b"Vault", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(&ks, b"QmCid", b"desc", sc.ctx());
 
         ts::next_tx(&mut sc, USER1);
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
@@ -1186,9 +1186,9 @@ module armature_vault::keyspace_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
-        let mut home = keyspace::test_create(b"Home", sc.ctx());
+        let home = keyspace::test_create(b"Home", sc.ctx());
         let other = keyspace::test_create(b"Other", sc.ctx());
-        let mut entry = keyspace::test_publish_entry(&mut home, b"QmCid", b"desc", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(&home, b"QmCid", b"desc", sc.ctx());
         keyspace::edit_description(&other, &mut entry, b"moved", &org, sc.ctx());
         abort 99
     }
@@ -1201,9 +1201,9 @@ module armature_vault::keyspace_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
-        let mut home = keyspace::test_create(b"Home", sc.ctx());
+        let home = keyspace::test_create(b"Home", sc.ctx());
         let other = keyspace::test_create(b"Other", sc.ctx());
-        let mut entry = keyspace::test_publish_entry(&mut home, b"QmCid", b"desc", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(&home, b"QmCid", b"desc", sc.ctx());
         keyspace::edit_entry(&other, &mut entry, b"QmMoved", &org, sc.ctx());
         abort 99
     }
@@ -1216,9 +1216,9 @@ module armature_vault::keyspace_tests {
 
         ts::next_tx(&mut sc, ADMIN);
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
-        let mut home = keyspace::test_create(b"Home", sc.ctx());
+        let home = keyspace::test_create(b"Home", sc.ctx());
         let other = keyspace::test_create(b"Other", sc.ctx());
-        let mut entry = keyspace::test_publish_entry(&mut home, b"QmCid", b"desc", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(&home, b"QmCid", b"desc", sc.ctx());
         keyspace::update_entry(&other, &mut entry, b"QmMoved", &org, sc.ctx());
         abort 99
     }
@@ -1230,8 +1230,8 @@ module armature_vault::keyspace_tests {
         let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
         ts::next_tx(&mut sc, ADMIN);
-        let mut ks = keyspace::test_create(b"Vault", sc.ctx());
-        let mut entry = keyspace::test_publish_entry(&mut ks, b"QmCid", b"desc", sc.ctx());
+        let ks = keyspace::test_create(b"Vault", sc.ctx());
+        let mut entry = keyspace::test_publish_entry(&ks, b"QmCid", b"desc", sc.ctx());
 
         ts::next_tx(&mut sc, USER1);
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);

@@ -1,5 +1,15 @@
 # Decoupling Registry Key from Edit Authority in `initialize_ou_vault`
 
+> **Update (Cycle 8, ARMATURE-49).** The registry key is now
+> `(storage_unit_id, registrant_ou_id, anchor_ou_id)`. The answer to "can a caller
+> pass a malicious Edit authority?" below meant that any one board member of the
+> registrant could own the registrant's single slot with an anchor only they
+> control. With the anchor in the key, such a vault lands under its own key, and
+> clients look vaults up with the anchor they trust. `update_registry_key` now
+> requires acting as the anchor and board membership of the new registrant, and
+> `deinitialize_ou_vault` requires acting as the anchor. See the vault README's
+> Registry section.
+
 ## Problem
 
 `initialize_ou_vault` currently uses `editor_org` for two distinct purposes:
