@@ -24,6 +24,12 @@ Emitted by `create_keyspace` and `create_keyspace_for_ou`.
 **cannot be spoofed**. The caller is also required to be a governance member
 of the OU at creation time.
 
+`registrant_ou_id` does **not** say who controls the keyspace. The caller picks
+the anchor (see `AnchorSet`), so one board member of X can create a keyspace
+"for X" anchored to an OU only they control. When listing an OU's keyspaces,
+also return the current anchor and let clients drop keyspaces whose anchor
+isn't one they trust (for example, X itself or its officers OU).
+
 ---
 
 ### `AccessGranted`
@@ -160,9 +166,14 @@ AccessRevoked  → REMOVE principal from (keyspace_id, role) membership set
 The keyspace version is not emitted as a standalone event. Reconstruct it as:
 
 ```
-AccessGranted(role = Read) → version += 1
+AccessGranted(role = Read) → version += 1   (not for the grants emitted in the
+                                             KeyspaceCreated transaction)
 AccessRevoked(role = Read) → version += 1
 ```
+
+The on-chain `version` starts at 0 however many readers a keyspace is created
+with, so skip the creation transaction's `AccessGranted` events when counting,
+or read `version` from the object.
 
 `EntryUpdated.new_epoch` reflects the keyspace version at rotation time and
 can be used to cross-check the reconstructed counter.
@@ -183,10 +194,10 @@ EntryDescriptionEdited → UPDATE description = new_description
 
 | Endpoint | Source events |
 |---|---|
-| `GET /v1/ou/:ou_id/keyspaces` | `KeyspaceCreated WHERE registrant_ou_id = ou_id` |
+| `GET /v1/ou/:ou_id/keyspaces` | `KeyspaceCreated WHERE registrant_ou_id = ou_id`, joined with the latest `AnchorSet` so clients can check the anchor |
 | `GET /v1/keyspace/:keyspace_id/acl` | `AccessGranted − AccessRevoked`, grouped by role |
 | `GET /v1/keyspace/:keyspace_id/entries` | `EntryPublished` + latest `EntryUpdated` / `EntryEdited` / `EntryDescriptionEdited` per `entry_id` |
-| `GET /v1/address/:addr/keyspaces?role=Read` | `AccessGranted(role=Read, principal=Player{addr})` minus matching `AccessRevoked` |
+| `GET /v1/address/:addr/keyspaces?role=Read` | `AccessGranted(role=Read, principal=Player{addr} or Machine{addr})` minus matching `AccessRevoked` (both variants are satisfied by the same address) |
 | `GET /v1/ou/:ou_id/keyspaces?role=Grant` | `AccessGranted(role=Grant, principal=Ou{ou_id})` minus matching `AccessRevoked` |
 
 ---

@@ -26,7 +26,10 @@
 /// OU-linked keyspaces (`create_keyspace_for_ou`) emit `registrant_ou_id` in
 /// `KeyspaceCreated` so an indexer can answer "all keyspaces for OU X" without
 /// scanning every Grant-role membership list.  The `&OU` witness + governance-
-/// member check makes that association unspoofable.
+/// member check makes that association unspoofable.  It does not say who
+/// controls the keyspace: any one board member of X can create a keyspace for X
+/// anchored to an OU of their choosing.  Clients listing X's keyspaces must also
+/// check the anchor (`AnchorSet` / `anchor_ou_id`) against the OU they trust.
 ///
 /// Anchor (ARMATURE-46): an OU keyspace has one anchor OU, always on `Grant`,
 /// that nobody can revoke (`EAnchorNotRevocable`).  An `Ou` principal is
@@ -84,7 +87,6 @@ module armature_vault::keyspace {
         /// Incremented whenever the `Read` membership set changes.  Clients use
         /// this to detect when existing entries need re-encryption.
         version: u64,
-        entries: vector<ID>,
         /// The OU always on `Grant` (see the module doc).  None for personal
         /// keyspaces.  Changed only by `rotate_anchor_to_successor`.
         anchor_ou_id: Option<ID>,
@@ -180,6 +182,7 @@ module armature_vault::keyspace {
     //                                  cannot be spoofed by the caller
     //   Primary index queries:
     //     • All keyspaces for OU X:  WHERE registrant_ou_id = Some(X)
+    //                                AND current anchor (AnchorSet) is trusted
     //     • Keyspace by ID:           WHERE id = Y
     //
     // AccessGranted
@@ -272,8 +275,11 @@ module armature_vault::keyspace {
     //   AccessRevoked  → REMOVE principal from role membership set
     //
     // Version counter (re-encryption epoch — not emitted standalone)
-    //   AccessGranted(role=Read) → version += 1
+    //   AccessGranted(role=Read) → version += 1, except the grants emitted in
+    //                              the KeyspaceCreated transaction (version
+    //                              starts at 0 whatever the seeded readers)
     //   AccessRevoked(role=Read) → version += 1
+    //   Or read the on-chain `version` directly.
     //   EntryUpdated.new_epoch reflects the keyspace version at rotation time
     //   and can be used to cross-check the reconstructed counter.
     //
@@ -287,7 +293,8 @@ module armature_vault::keyspace {
     // ── Suggested indexer endpoints ──────────────────────────────────────────
     //
     //   GET /v1/org/:ou_id/keyspaces
-    //     → KeyspaceCreated WHERE registrant_ou_id = ou_id
+    //     → KeyspaceCreated WHERE registrant_ou_id = ou_id, with the current
+    //       anchor so clients can drop keyspaces anchored to an untrusted OU
     //
     //   GET /v1/keyspace/:keyspace_id/acl
     //     → current principals per role
@@ -345,7 +352,6 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector[],
             anchor_ou_id: option::none(),
         });
     }
@@ -356,11 +362,12 @@ module armature_vault::keyspace {
     /// is recorded in `KeyspaceCreated.registrant_ou_id` so an indexer can
     /// answer "all keyspaces for OU X" without replaying full Grant-role lists.
     /// Because `registrant_ou_id` is derived from the `&OU` witness (not from
-    /// caller input), it cannot be spoofed.
+    /// caller input), it cannot be spoofed.  The anchor, which controls the
+    /// keyspace, is the caller's choice: clients must check it too.
     ///
     /// `anchor_org` becomes the anchor: listed first on Grant and never
-    /// revocable (see the module doc).  `grant_principals` are extra grantors
-    /// (a copy of the anchor is dropped); `read_principals` and
+    /// revocable (see the module doc).  `grant_principals` are extra grantors;
+    /// duplicates in any list are dropped.  `read_principals` and
     /// `write_principals` may be empty and populated later via `grant`.  Any of
     /// the three lists may be empty.
     ///
@@ -387,12 +394,14 @@ module armature_vault::keyspace {
 
         let anchor_ou_id = anchor_org.id();
         let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        // Each role's list is a set: `remove_principal` removes one copy, so a
+        // duplicate seeded here would survive a revoke.
         acl_map.insert(Role::Grant, with_anchor_first(anchor_ou_id, grant_principals));
         if (!read_principals.is_empty()) {
-            acl_map.insert(Role::Read, read_principals);
+            acl_map.insert(Role::Read, dedup(read_principals));
         };
         if (!write_principals.is_empty()) {
-            acl_map.insert(Role::Write, write_principals);
+            acl_map.insert(Role::Write, dedup(write_principals));
         };
 
         event::emit(KeyspaceCreated {
@@ -432,7 +441,6 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector[],
             anchor_ou_id: option::some(anchor_ou_id),
         });
     }
@@ -617,7 +625,7 @@ module armature_vault::keyspace {
 
     /// Publish a new encrypted entry.  Requires the `Write` role.
     public fun publish_entry(
-        keyspace: &mut Keyspace,
+        keyspace: &Keyspace,
         uri: vector<u8>,
         description: vector<u8>,
         org: &OU,
@@ -628,7 +636,6 @@ module armature_vault::keyspace {
         let uid = object::new(ctx);
         let entry_id = uid.to_inner();
         let uri_str = uri.to_string();
-        keyspace.entries.push_back(entry_id);
         event::emit(EntryPublished {
             entry_id,
             keyspace_id: keyspace.id.to_inner(),
@@ -726,11 +733,17 @@ module armature_vault::keyspace {
         assert!(*principal != acl::ou(*keyspace.anchor_ou_id.borrow()), EAnchorNotRevocable);
     }
 
-    /// `Ou { anchor_ou_id }` followed by `principals` with any copy of it removed.
+    /// `Ou { anchor_ou_id }` followed by `principals`, without duplicates.
     fun with_anchor_first(anchor_ou_id: ID, principals: vector<Principal>): vector<Principal> {
-        let anchor = acl::ou(anchor_ou_id);
-        let mut out = vector[anchor];
-        principals.do!(|p| if (p != anchor) out.push_back(p));
+        let mut out = vector[acl::ou(anchor_ou_id)];
+        principals.do!(|p| if (!out.contains(&p)) out.push_back(p));
+        out
+    }
+
+    /// `principals` in order, without duplicates.
+    fun dedup(principals: vector<Principal>): vector<Principal> {
+        let mut out = vector[];
+        principals.do!(|p| if (!out.contains(&p)) out.push_back(p));
         out
     }
 
@@ -795,7 +808,6 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector[],
             anchor_ou_id: option::none(),
         }
     }
@@ -828,30 +840,27 @@ module armature_vault::keyspace {
             acl: acl_map,
             name: name.to_string(),
             version: 0,
-            entries: vector[],
             anchor_ou_id,
         }
     }
 
     #[test_only]
     public fun test_destroy(keyspace: Keyspace) {
-        let Keyspace { id, acl: _, name: _, version: _, entries: _, anchor_ou_id: _ } = keyspace;
+        let Keyspace { id, acl: _, name: _, version: _, anchor_ou_id: _ } = keyspace;
         object::delete(id);
     }
 
     /// Create an EncryptedEntry for testing without checking roles or sharing it.
     #[test_only]
     public fun test_publish_entry(
-        keyspace: &mut Keyspace,
+        keyspace: &Keyspace,
         uri: vector<u8>,
         description: vector<u8>,
         ctx: &mut TxContext,
     ): EncryptedEntry {
         let creator = ctx.sender();
         let uid = object::new(ctx);
-        let entry_id = uid.to_inner();
         let uri_str = uri.to_string();
-        keyspace.entries.push_back(entry_id);
         EncryptedEntry {
             id: uid,
             keyspace_id: keyspace.id.to_inner(),

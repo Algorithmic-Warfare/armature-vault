@@ -37,6 +37,12 @@
 ///   - Every `Edit` holder is still trusted while it holds `Edit`: it can grant
 ///     itself `Withdraw` and drain the vault. The anchor bounds the damage to what
 ///     is taken before the board acts; it does not make `Edit` safe to hand out.
+///   - **Registry.** The registry keys a vault by (storage unit, registrant OU,
+///     anchor OU), and `lookup` takes all three. A client looks a vault up with
+///     the anchor it expects (for a members vault, the officers OU), so a vault
+///     anchored to anyone else is never found under that key, whoever registered
+///     it. Only a board member of the registrant can register a vault for it, and
+///     only by acting through the vault's anchor can it be re-keyed or freed.
 ///   - Invariants on `revoke`: (0) the anchor stays on `Edit`
 ///     (`EAnchorNotRevocable`), (1) `Edit` can never be emptied (`ELastEditor`;
 ///     a backstop, since the anchor always remains), and (2) the caller must
@@ -48,9 +54,17 @@
 /// gets a new object id. The migration path: the anchor OU votes to migrate
 /// (SpawnOU sets its status to `Migrating { successor_ou_id }`); anyone then calls
 /// `rotate_anchor_to_successor`, which lists the successor on `Edit` and makes it
-/// the anchor; the successor's board revokes the old OU when it is ready. Run the
-/// rotation before the old OU's last `TransferAssets`: once its treasury and vault
-/// are empty, anyone may destroy it, and a destroyed anchor can't be rotated.
+/// the anchor (re-keying the registry); the successor's board revokes the old OU
+/// when it is ready.
+///
+/// Run the rotation before the old OU can be destroyed. `ou::destroy` is
+/// permissionless once the OU is migrating and its treasury, capability vault and
+/// entries are empty, and a destroyed anchor can't be rotated, which freezes the
+/// vault's `Edit` for good. The successor is created inside the SpawnOU call, so
+/// the rotation can't share its transaction. If the anchor OU holds nothing when
+/// SpawnOU executes, deposit a dust coin into its treasury first
+/// (`treasury_vault::deposit` is permissionless) so destruction waits for a
+/// `TransferAssets` that runs after the rotation.
 ///
 /// The `multicoin` and `world` types used here MUST resolve to the same on-chain
 /// packages as the warehouse_receipts package the receipts are minted from
@@ -121,17 +135,24 @@ module armature_vault::ou_receipt_vault {
     #[error(code = 15)]
     const ENotSuccessor: vector<u8> =
         b"The passed OU is not the successor the anchor OU recorded";
+    #[error(code = 16)]
+    const EAnchorRequired: vector<u8> =
+        b"This call must be made acting as the vault's anchor OU";
 
     // === Structs ===
 
-    /// Composite key used in the registry table. Keyed by the *registrant* OU,
-    /// which scopes a vault to the OU it was registered for on a given SSU.
+    /// Composite key used in the registry table: the SSU, the *registrant* OU the
+    /// vault was registered for, and the vault's *anchor* OU. The anchor is part
+    /// of the key so that a vault anchored to an OU the registrant's board doesn't
+    /// trust can never sit where a client looks for the trusted one.
     public struct VaultKey has copy, drop, store {
         storage_unit_id: ID,
         registrant_ou_id: ID,
+        anchor_ou_id: ID,
     }
 
-    /// Shared singleton registry mapping (storage_unit_id, registrant_ou_id) → vault id.
+    /// Shared singleton registry mapping (storage_unit_id, registrant_ou_id,
+    /// anchor_ou_id) → vault id.
     public struct OuReceiptVaultRegistry has key {
         id: UID,
         vaults: Table<VaultKey, ID>,
@@ -176,8 +197,22 @@ module armature_vault::ou_receipt_vault {
     public struct VaultInitializedEvent has copy, drop {
         vault_id: ID,
         registrant_ou_id: ID,
+        anchor_ou_id: ID,
         storage_unit_id: ID,
         collection_id: ID,
+    }
+
+    /// Emitted when a vault's registry key changes: by `update_registry_key` (new
+    /// registrant) and by `rotate_anchor_to_successor` (new anchor). Indexers
+    /// rebuilding the registry move the vault from the previous key to the new one.
+    public struct RegistryKeyUpdatedEvent has copy, drop {
+        vault_id: ID,
+        storage_unit_id: ID,
+        previous_registrant_ou_id: ID,
+        registrant_ou_id: ID,
+        previous_anchor_ou_id: ID,
+        anchor_ou_id: ID,
+        by: address,
     }
 
     /// M2: emitted when a vault is deinitialized — its registry slot is freed and
@@ -192,6 +227,8 @@ module armature_vault::ou_receipt_vault {
         /// OU id, not the original initializer's. Indexers should treat it as the
         /// registry-key half, not the caller's identity.
         registrant_ou_id: ID,
+        /// The `anchor_ou_id` component of the freed key.
+        anchor_ou_id: ID,
         by: address,
     }
 
@@ -282,7 +319,9 @@ module armature_vault::ou_receipt_vault {
     /// `registrant_org` so the vault is directly discoverable under the member
     /// OU's registry key.
     ///
-    /// Reverts if a vault for this (SSU, registrant_org) pair already exists.
+    /// Duplicates in any list are dropped.
+    ///
+    /// Reverts if a vault for this (SSU, registrant_org, anchor_org) already exists.
     ///
     /// F1 (#3): `vault_config` is the `warehouse_receipts::vault::VaultConfig` for
     /// this SSU. It is the on-chain authoritative record that a specific
@@ -314,17 +353,19 @@ module armature_vault::ou_receipt_vault {
         let collection_id = vault_config.collection_id();
 
         let registrant_ou_id = registrant_org.id();
-        let key = VaultKey { storage_unit_id, registrant_ou_id };
+        let anchor_ou_id = anchor_org.id();
+        let key = VaultKey { storage_unit_id, registrant_ou_id, anchor_ou_id };
         assert!(!table::contains(&registry.vaults, key), EVaultAlreadyExists);
 
+        // Each role's list is a set: `remove_principal` removes one copy, so a
+        // duplicate seeded here would survive a revoke.
         let mut vault_acl = vec_map::empty<Role, vector<Principal>>();
         if (!deposit_principals.is_empty()) {
-            vault_acl.insert(Role::Deposit, deposit_principals);
+            vault_acl.insert(Role::Deposit, dedup(deposit_principals));
         };
         if (!withdraw_principals.is_empty()) {
-            vault_acl.insert(Role::Withdraw, withdraw_principals);
+            vault_acl.insert(Role::Withdraw, dedup(withdraw_principals));
         };
-        let anchor_ou_id = anchor_org.id();
         vault_acl.insert(Role::Edit, with_anchor_first(anchor_ou_id, edit_principals));
 
         let vault = OuReceiptVault {
@@ -341,6 +382,7 @@ module armature_vault::ou_receipt_vault {
         event::emit(VaultInitializedEvent {
             vault_id,
             registrant_ou_id,
+            anchor_ou_id,
             storage_unit_id,
             collection_id,
         });
@@ -581,11 +623,17 @@ module armature_vault::ou_receipt_vault {
     /// permissionless once its treasury and capability vault are empty, and a
     /// destroyed anchor can't be passed here.
     ///
+    /// The anchor is part of the registry key, so the vault moves to (SSU,
+    /// registrant, successor) in `registry`.
+    ///
     /// Aborts `EAnchorMismatch` unless `anchor_org` is the anchor,
     /// `EAnchorNotMigrating` unless it is migrating, `ENotSuccessor` unless
-    /// `successor_org` is its recorded successor, and `ENotAuthorized` on a
-    /// deinitialized vault.
+    /// `successor_org` is its recorded successor, `ENotAuthorized` on a
+    /// deinitialized vault, `EVaultRegistryMismatch` if the registry slot doesn't
+    /// point at this vault, and `EVaultAlreadyExists` if the successor's key is
+    /// taken (by a vault the successor anchors, which its board can free).
     public fun rotate_anchor_to_successor(
+        registry: &mut OuReceiptVaultRegistry,
         vault: &mut OuReceiptVault,
         anchor_org: &OU,
         successor_org: &OU,
@@ -602,6 +650,15 @@ module armature_vault::ou_receipt_vault {
 
         let vault_id = object::id(vault);
         let sender = ctx.sender();
+        let storage_unit_id = vault.storage_unit_id;
+        let registrant_ou_id = vault.registrant_ou_id;
+        move_registry_slot(
+            registry,
+            vault_id,
+            VaultKey { storage_unit_id, registrant_ou_id, anchor_ou_id: previous },
+            VaultKey { storage_unit_id, registrant_ou_id, anchor_ou_id: successor_ou_id },
+            sender,
+        );
         vault.anchor_ou_id = successor_ou_id;
         let principal = acl::ou(successor_ou_id);
         if (add_principal(vault, Role::Edit, principal)) {
@@ -617,13 +674,16 @@ module armature_vault::ou_receipt_vault {
 
     // === Registry maintenance ===
 
-    /// F4: re-key the registry entry for this vault after a registrant OU migration.
-    /// The caller must satisfy the current `Edit` role using `editor_org`. The old
-    /// key is derived from `vault.registrant_ou_id`; the new key uses
-    /// `new_registrant_org.id()`. Aborts if no entry exists for the old key or if
-    /// an entry already exists for the new key.
+    /// F4: re-key the registry entry for this vault to a new registrant OU, e.g.
+    /// after the registrant migrated. The anchor half of the key is unchanged.
     ///
-    /// This does NOT alter the ACL. This function only keeps `lookup(...)` discoverable
+    /// The caller must act through the vault's anchor (`editor_org` is the anchor,
+    /// `EAnchorRequired`) and be a board member of `new_registrant_org`
+    /// (`ENotAuthorized`), the same check `initialize_ou_vault` makes of the
+    /// registrant. Aborts `EVaultRegistryMismatch` if the current slot doesn't
+    /// point at this vault and `EVaultAlreadyExists` if the new one is taken.
+    ///
+    /// This does NOT alter the ACL. It only keeps `lookup(...)` discoverable
     /// under the new registrant OU's identity.
     public fun update_registry_key(
         registry: &mut OuReceiptVaultRegistry,
@@ -634,34 +694,29 @@ module armature_vault::ou_receipt_vault {
     ) {
         let sender = ctx.sender();
         assert_role(vault, Role::Edit, editor_org, sender);
+        assert!(editor_org.id() == vault.anchor_ou_id, EAnchorRequired);
+        assert!(new_registrant_org.is_governance_member(sender), ENotAuthorized);
 
-        let old_key = VaultKey {
-            storage_unit_id: vault.storage_unit_id,
-            registrant_ou_id: vault.registrant_ou_id,
-        };
-        let new_key = VaultKey {
-            storage_unit_id: vault.storage_unit_id,
-            registrant_ou_id: new_registrant_org.id(),
-        };
-        assert!(table::contains(&registry.vaults, old_key), EInvalidArguments);
-        // Cross-vault safety: a caller with Edit on this vault who also has the
-        // editor_org listed as an Ou principal on *another* vault's ACL could
-        // otherwise remap the other vault's registry entry. Assert the stored id
-        // at old_key really refers to *this* vault before swapping.
-        assert!(*table::borrow(&registry.vaults, old_key) == object::id(vault), EInvalidArguments);
-        assert!(!table::contains(&registry.vaults, new_key), EVaultAlreadyExists);
-
-        let vault_id = table::remove(&mut registry.vaults, old_key);
-        table::add(&mut registry.vaults, new_key, vault_id);
+        let storage_unit_id = vault.storage_unit_id;
+        let anchor_ou_id = vault.anchor_ou_id;
+        let new_registrant_ou_id = new_registrant_org.id();
+        move_registry_slot(
+            registry,
+            object::id(vault),
+            VaultKey { storage_unit_id, registrant_ou_id: vault.registrant_ou_id, anchor_ou_id },
+            VaultKey { storage_unit_id, registrant_ou_id: new_registrant_ou_id, anchor_ou_id },
+            sender,
+        );
         // M2: keep the vault's self-reported registrant org in sync so
         // `deinitialize_ou_vault` can later find the right slot to free.
-        vault.registrant_ou_id = new_registrant_org.id();
+        vault.registrant_ou_id = new_registrant_ou_id;
     }
 
-    /// M2: free the registry slot for this vault's (SSU, `vault.registrant_ou_id`)
-    /// key and effectively brick the vault by clearing its ACL. The caller must satisfy
-    /// `Edit` using `editor_org`, and the vault must be empty
-    /// (`non_empty_assets == 0`).
+    /// M2: free the registry slot for this vault's (SSU, `vault.registrant_ou_id`,
+    /// `vault.anchor_ou_id`) key and effectively brick the vault by clearing its
+    /// ACL. The caller must act through the anchor (`editor_org` is the anchor,
+    /// `EAnchorRequired`), and the vault must be empty (`non_empty_assets == 0`).
+    /// Only the anchor may do this because it wipes the anchor too.
     ///
     /// Sui shared objects cannot be deleted once shared (see
     /// `sui::transfer::share_object` doc: "once an object is shared, it will stay
@@ -672,10 +727,9 @@ module armature_vault::ou_receipt_vault {
     /// empty. The orphan is harmless: no DOFs, no admin path, not discoverable
     /// via the registry.
     ///
-    /// `editor_org` need not be the registrant OU — after `update_registry_key`
-    /// the vault's current registry slot is keyed by the migrated OU id. The vault
-    /// tracks it in `registrant_ou_id` and uses it to locate the slot, so the
-    /// caller only needs an OU that satisfies the current `Edit` role.
+    /// After `update_registry_key` or `rotate_anchor_to_successor` the slot is
+    /// keyed by the new OU ids. The vault tracks both halves (`registrant_ou_id`,
+    /// `anchor_ou_id`) and uses them to locate the slot.
     public fun deinitialize_ou_vault(
         registry: &mut OuReceiptVaultRegistry,
         vault: &mut OuReceiptVault,
@@ -684,11 +738,13 @@ module armature_vault::ou_receipt_vault {
     ) {
         let sender = ctx.sender();
         assert_role(vault, Role::Edit, editor_org, sender);
+        assert!(editor_org.id() == vault.anchor_ou_id, EAnchorRequired);
         assert!(vault.non_empty_assets == 0, EVaultNonEmpty);
 
         let key = VaultKey {
             storage_unit_id: vault.storage_unit_id,
             registrant_ou_id: vault.registrant_ou_id,
+            anchor_ou_id: vault.anchor_ou_id,
         };
         // The registry slot must exist and point at *this* vault. Mirrors the
         // cross-vault safety check in `update_registry_key`.
@@ -705,6 +761,7 @@ module armature_vault::ou_receipt_vault {
         event::emit(VaultDeinitializedEvent {
             vault_id,
             registrant_ou_id: freed_registrant_ou_id,
+            anchor_ou_id: vault.anchor_ou_id,
             by: sender,
         });
     }
@@ -725,12 +782,45 @@ module armature_vault::ou_receipt_vault {
         true
     }
 
-    /// `Ou { anchor_ou_id }` followed by `principals` with any copy of it removed.
+    /// `Ou { anchor_ou_id }` followed by `principals`, without duplicates.
     fun with_anchor_first(anchor_ou_id: ID, principals: vector<Principal>): vector<Principal> {
-        let anchor = acl::ou(anchor_ou_id);
-        let mut out = vector[anchor];
-        principals.do!(|p| if (p != anchor) out.push_back(p));
+        let mut out = vector[acl::ou(anchor_ou_id)];
+        principals.do!(|p| if (!out.contains(&p)) out.push_back(p));
         out
+    }
+
+    /// `principals` in order, without duplicates.
+    fun dedup(principals: vector<Principal>): vector<Principal> {
+        let mut out = vector[];
+        principals.do!(|p| if (!out.contains(&p)) out.push_back(p));
+        out
+    }
+
+    /// Move this vault's registry entry from `old_key` to `new_key`. Aborts
+    /// `EVaultRegistryMismatch` unless `old_key` points at `vault_id`, and
+    /// `EVaultAlreadyExists` if `new_key` is taken.
+    fun move_registry_slot(
+        registry: &mut OuReceiptVaultRegistry,
+        vault_id: ID,
+        old_key: VaultKey,
+        new_key: VaultKey,
+        by: address,
+    ) {
+        // Cross-vault safety: the slot must really hold this vault.
+        assert!(table::contains(&registry.vaults, old_key), EVaultRegistryMismatch);
+        assert!(*table::borrow(&registry.vaults, old_key) == vault_id, EVaultRegistryMismatch);
+        assert!(!table::contains(&registry.vaults, new_key), EVaultAlreadyExists);
+        table::remove(&mut registry.vaults, old_key);
+        table::add(&mut registry.vaults, new_key, vault_id);
+        event::emit(RegistryKeyUpdatedEvent {
+            vault_id,
+            storage_unit_id: new_key.storage_unit_id,
+            previous_registrant_ou_id: old_key.registrant_ou_id,
+            registrant_ou_id: new_key.registrant_ou_id,
+            previous_anchor_ou_id: old_key.anchor_ou_id,
+            anchor_ou_id: new_key.anchor_ou_id,
+            by,
+        });
     }
 
     /// Returns true iff the principal was actually removed (i.e. state changed).
@@ -749,13 +839,16 @@ module armature_vault::ou_receipt_vault {
 
     // === View Functions ===
 
-    /// Look up the vault id for a (storage_unit_id, registrant_ou_id) pair.
+    /// Look up the vault registered for `registrant_ou_id` at `storage_unit_id`
+    /// and anchored to `anchor_ou_id`. Pass the anchor you trust (for a members
+    /// vault, the officers OU); a vault anchored elsewhere is not returned.
     public fun lookup(
         registry: &OuReceiptVaultRegistry,
         storage_unit_id: ID,
         registrant_ou_id: ID,
+        anchor_ou_id: ID,
     ): Option<ID> {
-        let key = VaultKey { storage_unit_id, registrant_ou_id };
+        let key = VaultKey { storage_unit_id, registrant_ou_id, anchor_ou_id };
         if (table::contains(&registry.vaults, key)) {
             option::some(*table::borrow(&registry.vaults, key))
         } else {
@@ -862,8 +955,13 @@ module armature_vault::ou_receipt_vault {
         registry: &mut OuReceiptVaultRegistry,
         storage_unit_id: ID,
         registrant_ou_id: ID,
+        anchor_ou_id: ID,
         vault_id: ID,
     ) {
-        table::add(&mut registry.vaults, VaultKey { storage_unit_id, registrant_ou_id }, vault_id);
+        table::add(
+            &mut registry.vaults,
+            VaultKey { storage_unit_id, registrant_ou_id, anchor_ou_id },
+            vault_id,
+        );
     }
 }

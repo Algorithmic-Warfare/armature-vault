@@ -380,4 +380,44 @@ module armature_vault::keyspace_anchor_tests {
         keyspace::rotate_anchor_to_successor(&mut ks, &a_ou, &s_ou, sc.ctx());
         abort
     }
+
+    /// Duplicates in the creation lists are dropped, so one revoke removes a
+    /// principal for good (PR #28 audit).
+    #[test]
+    fun create_drops_duplicate_principals() {
+        let mut sc = ts::begin(HONEST);
+        let a = make_ou(&mut sc, HONEST, vector[ROGUE, HONEST]);
+        // A player outside the OU, so only its own entries can satisfy it.
+        let p = acl::player(ANYONE);
+
+        ts::next_tx(&mut sc, ROGUE);
+        {
+            let org = ts::take_shared_by_id<OU>(&sc, a);
+            keyspace::create_keyspace_for_ou(
+                b"Org",
+                &org,
+                &org,
+                vector[p, acl::ou(a), p],
+                vector[p, acl::ou(a), p],
+                vector[p, p],
+                sc.ctx(),
+            );
+            ts::return_shared(org);
+        };
+
+        ts::next_tx(&mut sc, HONEST);
+        let mut ks = ts::take_shared<Keyspace>(&sc);
+        let org = ts::take_shared_by_id<OU>(&sc, a);
+        assert!(keyspace::principals(&ks, keyspace::role_grant()) == vector[acl::ou(a), p], 0);
+        assert!(keyspace::principals(&ks, keyspace::role_read()) == vector[p, acl::ou(a)], 1);
+        assert!(keyspace::principals(&ks, keyspace::role_write()) == vector[p], 2);
+
+        keyspace::multi_revoke(&mut ks, vector[keyspace::role_grant(), keyspace::role_read()], p, &org, sc.ctx());
+        assert!(!keyspace::has_role(&ks, keyspace::role_grant(), &org, ANYONE), 3);
+        assert!(!keyspace::has_role(&ks, keyspace::role_read(), &org, ANYONE), 4);
+        assert!(keyspace::principals(&ks, keyspace::role_read()) == vector[acl::ou(a)], 5);
+        ts::return_shared(org);
+        ts::return_shared(ks);
+        sc.end();
+    }
 }
