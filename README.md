@@ -94,15 +94,18 @@ If Protodroid goes rogue, an AWAR officer calls `revoke` (invoking as
 ## Why the OU indirection (migration)
 
 A migrated OU gets a **new object id**. The OU principal expresses "the current
-board" by id, so the guaranteed migration path is:
+board" by id. Each vault has an **anchor** OU that is always on `Edit` and can't be
+revoked, so the board can always undo what one rogue member granted. The migration
+path moves the anchor only to the successor the anchor OU voted for:
 
-1. create the new OU,
-2. grant `ou(new_ou_id)` the `Edit` role on the vault (old + new editors coexist),
+1. the anchor OU votes `SpawnOU`, which records its successor (`Migrating`),
+2. anyone calls `rotate_anchor_to_successor`, listing the successor on `Edit` and
+   making it the anchor (old + new editors coexist),
 3. migrate caps/coins to the new OU object,
-4. revoke the old `Edit` principal.
+4. the new board revokes the old `Edit` principal.
 
-Invariant: `Edit` can never be emptied (`ELastEditor`) — an empty `Edit` list would
-permanently brick the ACL.
+See [the vault README](packages/composites/armature_vault/README.md#anchor) for why
+the anchor exists (ARMATURE-43).
 
 ## Dependencies & environments
 

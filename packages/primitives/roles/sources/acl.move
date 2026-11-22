@@ -41,6 +41,15 @@ module roles::acl {
         Principal::Machine { addr }
     }
 
+    /// The OU id of an `Ou` principal; none for `Player` and `Machine`. For
+    /// consumers that treat OU principals specially (armature_vault's anchor).
+    public fun ou_id(principal: &Principal): Option<ID> {
+        match (principal) {
+            Principal::Ou { ou_id } => option::some(*ou_id),
+            _ => option::none(),
+        }
+    }
+
     // === Authorization ===
 
     /// True if `sender` satisfies `principal` given the `&OU` the caller is acting

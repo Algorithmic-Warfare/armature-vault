@@ -11,7 +11,13 @@
 /// anchor — the ACL paths under test never reference the StorageUnit.
 #[test_only]
 module armature_vault::ou_receipt_vault_tests {
-    use armature::{ou::{Self, OU}, governance, proposal, remove_member::RemoveMember};
+    use armature::{
+        ou::{Self, OU},
+        governance,
+        proposal,
+        remove_member::RemoveMember,
+        spawn_ou::SpawnOU
+    };
     use armature_vault::ou_receipt_vault::{Self as vault, OuReceiptVault, Role};
     use multicoin::multicoin::{Self, Collection, CollectionCap, Balance};
     use roles::acl::{Self as acl, Principal};
@@ -56,6 +62,19 @@ module armature_vault::ou_receipt_vault_tests {
             object::id_from_address(@0x9999),
         );
         org.remove_board_member_governance(member, &req);
+        proposal::consume_execution_request_for_testing(req);
+        ts::return_shared(org);
+    }
+
+    /// Mark `ou_id` Migrating towards `successor` as an executed SpawnOU would.
+    fun start_migration(scenario: &mut ts::Scenario, ou_id: ID, successor: ID) {
+        ts::next_tx(scenario, OUTSIDER);
+        let mut org = ts::take_shared_by_id<OU>(scenario, ou_id);
+        let req = proposal::new_execution_request_for_testing<SpawnOU>(
+            ou_id,
+            object::id_from_address(@0x9998),
+        );
+        org.set_migrating(successor, &req);
         proposal::consume_execution_request_for_testing(req);
         ts::return_shared(org);
     }
@@ -281,11 +300,11 @@ module armature_vault::ou_receipt_vault_tests {
         abort
     }
 
-    /// Migration path: a new OU is granted Edit (coexisting with the old editor),
-    /// then the old editor is revoked. The new OU can administer; the property we
-    /// assert is that the new OU's Edit grant takes effect and the old one is gone.
+    /// Migration path: the anchor OU votes to migrate (its status records the
+    /// successor), anyone rotates the anchor to the successor, which lists it on
+    /// Edit, and the successor's board then revokes the old OU.
     #[test]
-    fun migration_grant_new_editor_then_revoke_old() {
+    fun migration_rotate_anchor_then_revoke_old() {
         let mut scenario = ts::begin(AWAR_M1);
         let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
         let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
@@ -303,16 +322,17 @@ module armature_vault::ou_receipt_vault_tests {
 
         // The "migrated" officers OU (new id, same officer on board for the test).
         let new_officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
+        start_migration(&mut scenario, officers, new_officers);
 
-        // Old officers grant Edit to the new officers OU (both editors coexist).
-        // grant_edit_ou checks the new OU is real via its &OU witness.
-        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        // Anyone rotates the anchor; both OUs are on Edit during cutover.
+        ts::next_tx(&mut scenario, OUTSIDER);
         {
             let mut v = ts::take_shared<OuReceiptVault>(&scenario);
             let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
             let new_officers_ou = ts::take_shared_by_id<OU>(&scenario, new_officers);
-            vault::grant_edit_ou(&mut v, &officers_ou, &new_officers_ou, scenario.ctx());
-            assert!(vault::principals(&v, vault::role_edit()).length() == 2, 0);
+            vault::rotate_anchor_to_successor(&mut v, &officers_ou, &new_officers_ou, scenario.ctx());
+            assert!(vault::anchor_ou_id(&v) == new_officers, 0);
+            assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(officers), acl::ou(new_officers)], 2);
             ts::return_shared(new_officers_ou);
             ts::return_shared(officers_ou);
             ts::return_shared(v);
@@ -338,10 +358,10 @@ module armature_vault::ou_receipt_vault_tests {
         ts::end(scenario);
     }
 
-    /// The last Edit principal cannot be revoked (brick guard).
+    /// The anchor cannot be revoked, even by its own board.
     #[test]
-    #[expected_failure(abort_code = vault::ELastEditor)]
-    fun cannot_revoke_last_editor() {
+    #[expected_failure(abort_code = vault::EAnchorNotRevocable)]
+    fun cannot_revoke_the_anchor() {
         let mut scenario = ts::begin(AWAR_M1);
         let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
         let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
@@ -357,7 +377,7 @@ module armature_vault::ou_receipt_vault_tests {
         );
         vault::share_for_testing(v);
 
-        // Officers try to revoke themselves — the only Edit principal — must abort.
+        // Officers try to revoke themselves — the anchor — must abort.
         ts::next_tx(&mut scenario, AWAR_OFFICER);
         let mut v = ts::take_shared<OuReceiptVault>(&scenario);
         let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
@@ -366,6 +386,40 @@ module armature_vault::ou_receipt_vault_tests {
             &officers_ou,
             vector[vault::role_edit()],
             vector[acl::ou(officers)],
+            scenario.ctx(),
+        );
+
+        abort
+    }
+
+    /// Brick-guard 1 is a backstop the anchor makes unreachable in production.
+    /// A test vault with no Ou on Edit has no anchor, so it can still be hit:
+    /// the only editor, a Player, revoking itself aborts ELastEditor.
+    #[test]
+    #[expected_failure(abort_code = vault::ELastEditor)]
+    fun cannot_revoke_last_editor_without_an_anchor() {
+        let mut scenario = ts::begin(AWAR_M1);
+        let awar = make_ou(&mut scenario, AWAR_M1, vector[AWAR_M1]);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let mut acl_map = vec_map::empty<Role, vector<Principal>>();
+        acl_map.insert(vault::role_edit(), vector[acl::player(AWAR_M1)]);
+        let v = vault::new_for_testing(
+            object::id_from_address(@0x5501),
+            object::id_from_address(@0xC0),
+            acl_map,
+            scenario.ctx(),
+        );
+        vault::share_for_testing(v);
+
+        ts::next_tx(&mut scenario, AWAR_M1);
+        let mut v = ts::take_shared<OuReceiptVault>(&scenario);
+        let awar_ou = ts::take_shared_by_id<OU>(&scenario, awar);
+        vault::revoke(
+            &mut v,
+            &awar_ou,
+            vector[vault::role_edit()],
+            vector[acl::player(AWAR_M1)],
             scenario.ctx(),
         );
 
@@ -426,7 +480,8 @@ module armature_vault::ou_receipt_vault_tests {
     }
 
     /// A Machine granted Edit administers the vault on its own key, passing any OU
-    /// ref: it grants a role and revokes the officers OU it was granted by.
+    /// ref: it grants a role and revokes a non-anchor OU editor. (It can't revoke
+    /// the officers OU, the anchor: see `cannot_revoke_the_anchor`.)
     #[test]
     fun machine_granted_edit_administers_vault() {
         let mut scenario = ts::begin(AWAR_M1);
@@ -451,8 +506,8 @@ module armature_vault::ou_receipt_vault_tests {
             vault::grant(
                 &mut v,
                 &officers_ou,
-                vector[vault::role_edit()],
-                vector[acl::machine(BOT)],
+                vector[vault::role_edit(), vault::role_edit()],
+                vector[acl::machine(BOT), acl::ou(wolf)],
                 scenario.ctx(),
             );
             ts::return_shared(officers_ou);
@@ -474,11 +529,11 @@ module armature_vault::ou_receipt_vault_tests {
                 &mut v,
                 &any_ou,
                 vector[vault::role_edit()],
-                vector[acl::ou(officers)],
+                vector[acl::ou(wolf)],
                 scenario.ctx(),
             );
             assert!(vault::principals(&v, vault::role_deposit()).contains(&acl::player(OUTSIDER)), 0);
-            assert!(vault::principals(&v, vault::role_edit()) == vector[acl::machine(BOT)], 1);
+            assert!(vault::principals(&v, vault::role_edit()) == vector[acl::ou(officers), acl::machine(BOT)], 1);
             ts::return_shared(any_ou);
             ts::return_shared(v);
         };
@@ -633,8 +688,7 @@ module armature_vault::ou_receipt_vault_tests {
     // --- H1 brick-guard 2: caller must remain satisfied post-revoke
 
     /// Revoke aborts EEditorWouldLockSelf if the caller wouldn't pass assert_role(Edit)
-    /// after the batch. Defends against the "grant unsatisfiable then revoke self"
-    /// brick path now that Edit accepts any principal.
+    /// after the batch, so an editor can't lock itself out by mistake.
     #[test]
     #[expected_failure(abort_code = vault::EEditorWouldLockSelf)]
     fun revoke_aborts_if_caller_would_lock_themselves() {
@@ -643,7 +697,7 @@ module armature_vault::ou_receipt_vault_tests {
         let wolf = make_ou(&mut scenario, WOLF_M1, vector[WOLF_M1]);
         let officers = make_ou(&mut scenario, AWAR_OFFICER, vector[AWAR_OFFICER]);
         let collection_id = make_collection(&mut scenario, AWAR_M1);
-        // A second editor who is NOT a member of `officers`.
+        // A second editor OU whose only member, OUTSIDER, is not an officer.
         let other = make_ou(&mut scenario, OUTSIDER, vector[OUTSIDER]);
 
         ts::next_tx(&mut scenario, AWAR_M1);
@@ -667,17 +721,17 @@ module armature_vault::ou_receipt_vault_tests {
             ts::return_shared(v);
         };
 
-        // Now AWAR_OFFICER tries to revoke `officers` (their own OU). The brick-guard 1
-        // (length > 0) passes since `other` remains. But AWAR_OFFICER is NOT a member
-        // of `other` — so the post-revoke caller-satisfies check fires.
-        ts::next_tx(&mut scenario, AWAR_OFFICER);
+        // Now OUTSIDER, acting as `other`, revokes `other` (their own OU). The
+        // anchor (`officers`) remains, but OUTSIDER is not an officer, so the
+        // post-revoke caller-satisfies check fires.
+        ts::next_tx(&mut scenario, OUTSIDER);
         let mut v = ts::take_shared<OuReceiptVault>(&scenario);
-        let officers_ou = ts::take_shared_by_id<OU>(&scenario, officers);
+        let other_ou = ts::take_shared_by_id<OU>(&scenario, other);
         vault::revoke(
             &mut v,
-            &officers_ou,
+            &other_ou,
             vector[vault::role_edit()],
-            vector[acl::ou(officers)],
+            vector[acl::ou(other)],
             scenario.ctx(),
         );
 
