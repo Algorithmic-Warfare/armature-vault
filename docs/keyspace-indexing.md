@@ -29,7 +29,8 @@ of the OU at creation time.
 ### `AccessGranted`
 
 Emitted by `create_keyspace` (×3 for Grant/Read/Write), `create_keyspace_for_ou`
-(once per seeded principal per role), `grant`, and `multi_grant`.
+(once per seeded principal per role, the anchor included), `grant`, `multi_grant`,
+and `rotate_anchor_to_successor` (when the successor wasn't already on Grant).
 
 | Field | Type | Description |
 |---|---|---|
@@ -56,6 +57,22 @@ Emitted by `revoke` and `multi_revoke`.
 
 Only emitted on real state changes. A `Read` revocation always accompanies
 a version increment (see [version reconstruction](#version-counter) below).
+
+---
+
+### `AnchorSet`
+
+Emitted by `create_keyspace_for_ou` and `rotate_anchor_to_successor`. An OU
+keyspace's anchor OU is always on Grant and can't be revoked (ARMATURE-46).
+
+| Field | Type | Description |
+|---|---|---|
+| `keyspace_id` | `ID` | Parent Keyspace |
+| `anchor_ou_id` | `ID` | The anchor from now on |
+| `previous_anchor_ou_id` | `Option<ID>` | None at creation; the old anchor on rotation |
+| `by` | `address` | Caller address |
+
+Personal keyspaces (`create_keyspace`) have no anchor and emit no `AnchorSet`.
 
 ---
 

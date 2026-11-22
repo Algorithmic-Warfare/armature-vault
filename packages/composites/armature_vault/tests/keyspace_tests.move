@@ -661,6 +661,7 @@ module armature_vault::keyspace_tests {
         keyspace::create_keyspace_for_ou(
             b"Org Vault",
             &org,
+            &org,
             vector[acl::ou(ou_id)],
             vector[acl::player(USER1), acl::machine(USER2)],
             vector[],
@@ -699,6 +700,7 @@ module armature_vault::keyspace_tests {
         keyspace::create_keyspace_for_ou(
             b"Org Vault",
             &org,
+            &org,
             vector[acl::ou(ou_id)],
             vector[acl::ou(ou_id)],
             vector[acl::player(USER1)],
@@ -723,6 +725,7 @@ module armature_vault::keyspace_tests {
         let org = ts::take_shared_by_id<OU>(&sc, ou_id);
         keyspace::create_keyspace_for_ou(
             b"Org Vault",
+            &org,
             &org,
             vector[acl::ou(ou_id)],
             vector[],
@@ -751,6 +754,7 @@ module armature_vault::keyspace_tests {
         keyspace::create_keyspace_for_ou(
             b"Org Vault",
             &org,
+            &org,
             vector[acl::player(USER1)],
             vector[],
             vector[],
@@ -759,10 +763,9 @@ module armature_vault::keyspace_tests {
         abort 99
     }
 
-    // An empty Grant list would leave the keyspace unadministrable.
+    // An empty Grant list leaves the anchor as the only grantor.
     #[test]
-    #[expected_failure(abort_code = keyspace::EEmptyGrantPrincipals)]
-    fun test_create_keyspace_for_ou_empty_grant_aborts() {
+    fun test_create_keyspace_for_ou_empty_grant_lists_only_the_anchor() {
         let mut sc = ts::begin(ADMIN);
         let ou_id = make_ou(&mut sc, ADMIN, vector[ADMIN]);
 
@@ -771,12 +774,20 @@ module armature_vault::keyspace_tests {
         keyspace::create_keyspace_for_ou(
             b"Org Vault",
             &org,
+            &org,
             vector[],
             vector[acl::player(USER1)],
             vector[],
             sc.ctx(),
         );
-        abort 99
+        ts::return_shared(org);
+
+        ts::next_tx(&mut sc, ADMIN);
+        let ks = ts::take_shared<Keyspace>(&sc);
+        assert!(keyspace::anchor_ou_id(&ks) == option::some(ou_id), 0);
+        assert!(keyspace::principals(&ks, keyspace::role_grant()) == vector[acl::ou(ou_id)], 1);
+        ts::return_shared(ks);
+        sc.end();
     }
 
     // ── Unset roles ──────────────────────────────────────────────────────────

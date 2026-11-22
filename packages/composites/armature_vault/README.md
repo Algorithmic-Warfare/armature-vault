@@ -110,7 +110,8 @@ Ported from loash-industries/keyspace. A `Keyspace` is a shared access list for 
 | `Read` | `seal_approve`: the Seal key server releases decryption keys |
 | `Write` | `publish_entry`, `update_entry`, `edit_entry`, `edit_description` |
 
-- **Creating.** `create_keyspace` makes a personal keyspace with the sender in all three roles. `create_keyspace_for_ou` is called by a board member of an OU, takes a separate principal list per role (`Grant` must not be empty) and records the OU as `registrant_ou_id` in `KeyspaceCreated`.
+- **Creating.** `create_keyspace` makes a personal keyspace with the sender in all three roles. `create_keyspace_for_ou` is called by a board member of an OU, takes an **anchor** OU (`anchor_org`) and a separate principal list per role (any may be empty), and records the OU as `registrant_ou_id` in `KeyspaceCreated`.
+- **Anchor.** An OU keyspace's anchor is always on `Grant` and nobody can revoke it, so its board can always revoke what a removed member granted, the same rule as the receipt vault's [anchor](#anchor) (ARMATURE-46). It moves only through `rotate_anchor_to_successor`, to the successor the anchor OU recorded by vote. Read it with `anchor_ou_id` (none for a personal keyspace).
 - **Changing access.** Unlike the vault, `grant` aborts on a principal that is already listed and `revoke` aborts on one that isn't. `revoke` can't empty `Grant`, `Read` or `Write`.
 - **Seal key IDs** must start with the keyspace's object ID. `seal_approve` checks those 32 bytes, then the `Read` role.
 
